@@ -117,12 +117,25 @@ function refreshStatus(assetId) {
   db.prepare("UPDATE assets SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, assetId);
 }
 
-function nextTag() {
+// ---- asset tag issuance ----
+// Generated tags are prefix + a number from a durable, ever-increasing counter (asset_tag_counter). The counter is
+// independent of the prefix, is never lowered (archiving keeps tags reserved), and is claimed inside the same
+// transaction that inserts the asset. peekTag() only previews the next number and consumes nothing.
+const formatTag = (prefix, n) => prefix + String(n).padStart(5, '0');
+const tagExists = (tag) => !!db.prepare('SELECT 1 FROM assets WHERE tag = ?').get(tag);
+function peekTag() {
   const prefix = getSettings().tag_prefix;
-  const rows = db.prepare('SELECT tag FROM assets WHERE tag LIKE ?').all(prefix + '%');
-  let max = 0;
-  for (const r of rows) { const n = parseInt(r.tag.slice(prefix.length), 10); if (!isNaN(n) && n > max) max = n; }
-  return prefix + String(max + 1).padStart(5, '0');
+  let n = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n + 1;
+  while (tagExists(formatTag(prefix, n))) n++;
+  return formatTag(prefix, n);
+}
+function allocateTag() { // call only inside a transaction
+  const prefix = getSettings().tag_prefix;
+  for (;;) {
+    db.prepare('UPDATE asset_tag_counter SET last_number = last_number + 1 WHERE id = 1').run();
+    const tag = formatTag(prefix, db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n);
+    if (!tagExists(tag)) return tag; // skip numbers already taken by manually chosen tags
+  }
 }
 
 // Fields a non-admin should not see
@@ -136,7 +149,8 @@ function sanitizeAsset(a, user) {
 }
 
 function doCheckout({ asset, user, actor, due_date, notes, condition }) {
-  if (['retired', 'lost', 'maintenance'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
+  if (asset.archived_at) throw httpError(400, 'This asset is archived and can\'t be checked out.');
+  if (['retired', 'lost', 'maintenance', 'disposed'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
   const open = openAssignments(asset.id);
   if (open.some((o) => o.user_id === user.id)) throw httpError(400, `${user.name} already has this asset.`);
   if (open.length >= capacity(asset)) {
@@ -301,8 +315,9 @@ app.get('/api/assets', auth, (req, res) => {
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
   if (status === 'overdue') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < date('now'))`); }
-  else if (status === 'active') { where.push(`a.status NOT IN ('retired','lost')`); }
+  else if (status === 'active') { where.push(`a.status NOT IN ('retired','lost','disposed')`); }
   else if (status) { where.push('a.status = ?'); params.push(status); }
+  if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
   if (user_id) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.user_id = ? AND s.returned_at IS NULL)'); params.push(Number(user_id)); }
   if (req.user.role !== 'admin') {
     // Users see what they hold and what's available to borrow
@@ -315,12 +330,14 @@ app.get('/api/assets', auth, (req, res) => {
 
 app.get('/api/assets/lookup/:code', auth, (req, res) => {
   const code = String(req.params.code).trim();
-  const a = db.prepare('SELECT id FROM assets WHERE tag = ? COLLATE NOCASE').get(code)
-    || db.prepare('SELECT id FROM assets WHERE serial = ? COLLATE NOCASE').get(code);
-  res.json(a ? { found: true, id: a.id } : { found: false, code });
+  // Archived assets are still found (their tags stay reserved); the flag lets clients say so.
+  const a = db.prepare('SELECT id, archived_at FROM assets WHERE tag = ? COLLATE NOCASE').get(code)
+    || db.prepare('SELECT id, archived_at FROM assets WHERE serial = ? COLLATE NOCASE').get(code);
+  res.json(a ? { found: true, id: a.id, archived: !!a.archived_at } : { found: false, code });
 });
 
-app.get('/api/next-tag', admin, (req, res) => res.json({ tag: nextTag() }));
+// Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.
+app.get('/api/next-tag', admin, (req, res) => res.json({ tag: peekTag() }));
 
 app.get('/api/assets/:id', auth, (req, res) => {
   const a = getAsset(Number(req.params.id));
@@ -365,27 +382,39 @@ app.post('/api/assets', admin, (req, res) => {
   if (!v.name) throw httpError(400, 'Give the asset a name');
   v.category = v.category || 'Other';
   v.condition = v.condition || 'Good';
-  const tag = clean(req.body.tag) || nextTag();
-  if (db.prepare('SELECT 1 FROM assets WHERE tag = ?').get(tag)) throw httpError(400, `Tag ${tag} is already used by another asset`);
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
   const cols = ['tag', 'status', ...ASSET_FIELDS];
-  const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
-    .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]));
-  log(info.lastInsertRowid, req.user.id, 'created', `${tag} · ${v.name}`);
-  res.json(getAsset(info.lastInsertRowid));
+  // Number claim + insert are one transaction: a failed create rolls the counter back, and two creates can't share a tag.
+  const create = db.transaction(() => {
+    const tag = clean(req.body.tag) || allocateTag();
+    const used = db.prepare('SELECT archived_at FROM assets WHERE tag = ?').get(tag);
+    if (used) throw httpError(400, used.archived_at ? `Tag ${tag} belongs to an archived asset and can't be reused` : `Tag ${tag} is already used by another asset`);
+    const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
+      .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]));
+    log(info.lastInsertRowid, req.user.id, 'created', `${tag} · ${v.name}`);
+    return info.lastInsertRowid;
+  });
+  res.json(getAsset(create.immediate()));
 });
 
 app.put('/api/assets/:id', admin, (req, res) => {
   const a = getAsset(Number(req.params.id));
   if (!a) throw httpError(404, 'Asset not found');
+  if (a.archived_at) throw httpError(400, 'This asset is archived and can\'t be edited.');
   const v = assetValues({ ...a, ...req.body });
-  const tag = clean(req.body.tag) || a.tag;
-  if (tag.toLowerCase() !== a.tag.toLowerCase() && db.prepare('SELECT 1 FROM assets WHERE tag = ?').get(tag)) throw httpError(400, `Tag ${tag} is already used`);
+  // Asset tags are immutable once created (a case-only difference is ignored). No retag workflow exists yet.
+  const sentTag = clean(req.body.tag);
+  if (sentTag && sentTag.toLowerCase() !== a.tag.toLowerCase()) throw httpError(400, "An asset's tag can't be changed once it's created.");
+  const tag = a.tag;
   let status = a.status;
   if (req.body.status && req.body.status !== a.status) {
     const open = openAssignments(a.id).length;
-    if (['maintenance', 'retired', 'lost'].includes(req.body.status)) {
-      if (open && req.body.status !== 'lost') throw httpError(400, 'Check this asset in before changing its status');
+    if (['maintenance', 'retired', 'lost', 'disposed'].includes(req.body.status)) {
+      // `lost` may stay assigned (keeps accountability); the other states need the assignment resolved first.
+      if (open && req.body.status !== 'lost') {
+        throw httpError(400, ['retired', 'disposed'].includes(req.body.status)
+          ? `Check this asset in before marking it ${req.body.status}.` : 'Check this asset in before changing its status');
+      }
       status = req.body.status;
     } else if (['available', 'checked_out'].includes(req.body.status)) status = open >= capacity({ ...a, ...v }) ? 'checked_out' : 'available';
   }
@@ -397,15 +426,22 @@ app.put('/api/assets/:id', admin, (req, res) => {
   res.json(getAsset(a.id));
 });
 
-app.delete('/api/assets/:id', admin, (req, res) => {
+// Assets are never permanently deleted: "delete" archives. The row, tag, assignments, activity, photos and
+// requests all remain, and the tag stays reserved. The DELETE route is kept as an alias for compatibility.
+function archiveAsset(req, res) {
   const a = getAsset(Number(req.params.id));
   if (!a) throw httpError(404, 'Asset not found');
-  for (const p of db.prepare('SELECT * FROM photos WHERE asset_id = ?').all(a.id)) {
-    for (const f of [p.filename, p.thumb]) fs.rm(path.join(UPLOAD_DIR, f), () => {});
-  }
-  db.prepare('DELETE FROM assets WHERE id = ?').run(a.id);
+  if (a.archived_at) throw httpError(400, 'This asset is already archived.');
+  if (openAssignments(a.id).length) throw httpError(400, 'Check this asset in before archiving it.');
+  const reason = clean(req.body && req.body.reason);
+  db.transaction(() => {
+    db.prepare("UPDATE assets SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(a.id);
+    log(a.id, req.user.id, 'archived', `${a.tag} · ${a.name}${reason ? ` · ${reason}` : ''}`);
+  })();
   res.json({ ok: true });
-});
+}
+app.post('/api/assets/:id/archive', admin, archiveAsset);
+app.delete('/api/assets/:id', admin, archiveAsset);
 
 app.post('/api/assets/:id/checkout', auth, (req, res) => {
   const asset = getAsset(Number(req.params.id));
@@ -636,18 +672,18 @@ app.get('/api/dashboard', auth, (req, res) => {
   if (req.user.role === 'admin') {
     const c = (sql, ...p) => db.prepare(sql).get(...p).c;
     out.stats = {
-      total: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost')"),
-      available: c("SELECT COUNT(*) c FROM assets WHERE status = 'available'"),
+      total: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL"),
+      available: c("SELECT COUNT(*) c FROM assets WHERE status = 'available' AND archived_at IS NULL"),
       checked_out: c("SELECT COUNT(DISTINCT asset_id) c FROM assignments WHERE returned_at IS NULL"),
-      maintenance: c("SELECT COUNT(*) c FROM assets WHERE status = 'maintenance'"),
+      maintenance: c("SELECT COUNT(*) c FROM assets WHERE status = 'maintenance' AND archived_at IS NULL"),
       overdue: c("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND due_date < date('now')"),
       open_requests: c("SELECT COUNT(*) c FROM requests WHERE status IN ('open','approved','dropped_off')"),
       users: c('SELECT COUNT(*) c FROM users WHERE active = 1'),
-      value: db.prepare("SELECT COALESCE(SUM(purchase_cost),0) c FROM assets WHERE status NOT IN ('retired','lost')").get().c,
-      warranty_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost') AND warranty_expires BETWEEN date('now') AND date('now','+60 day')"),
-      licenses_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost') AND license_expires BETWEEN date('now') AND date('now','+60 day')"),
+      value: db.prepare("SELECT COALESCE(SUM(purchase_cost),0) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL").get().c,
+      warranty_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND warranty_expires BETWEEN date('now') AND date('now','+60 day')"),
+      licenses_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND license_expires BETWEEN date('now') AND date('now','+60 day')"),
     };
-    out.byCategory = db.prepare("SELECT category, COUNT(*) n FROM assets WHERE status NOT IN ('retired','lost') GROUP BY category ORDER BY n DESC").all();
+    out.byCategory = db.prepare("SELECT category, COUNT(*) n FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL GROUP BY category ORDER BY n DESC").all();
     out.overdue = db.prepare(`
       SELECT s.*, a.name AS asset_name, a.tag, u.name AS user_name FROM assignments s
       JOIN assets a ON a.id = s.asset_id JOIN users u ON u.id = s.user_id
@@ -658,7 +694,7 @@ app.get('/api/dashboard', auth, (req, res) => {
       WHERE r.status IN ('open','approved','dropped_off') ORDER BY r.created_at DESC LIMIT 20`).all();
     out.expiring = db.prepare(`
       SELECT id, tag, name, category, warranty_expires, license_expires FROM assets
-      WHERE status NOT IN ('retired','lost') AND (warranty_expires BETWEEN date('now') AND date('now','+60 day') OR license_expires BETWEEN date('now') AND date('now','+60 day'))
+      WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND (warranty_expires BETWEEN date('now') AND date('now','+60 day') OR license_expires BETWEEN date('now') AND date('now','+60 day'))
       ORDER BY MIN(COALESCE(warranty_expires,'9999'), COALESCE(license_expires,'9999')) LIMIT 20`).all();
     out.activity = db.prepare(`
       SELECT ac.*, u.name AS actor_name, a.name AS asset_name, a.tag FROM activity ac
@@ -697,7 +733,7 @@ app.get('/api/activity', admin, (req, res) => {
 
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) || /^[=+\-@]/.test(s) ? `"${(/^[=+\-@]/.test(s) ? "'" : '') + s.replace(/"/g, '""')}"` : s; };
 app.get('/api/export/assets.csv', admin, (req, res) => {
-  const rows = db.prepare(`${ASSET_LIST_SQL} ORDER BY a.tag`).all();
+  const rows = db.prepare(`${ASSET_LIST_SQL} WHERE a.archived_at IS NULL ORDER BY a.tag`).all();
   const cols = ['tag', 'name', 'category', 'status', 'holder_names', 'due_date', 'brand', 'model', 'serial', 'condition', 'location', 'purchase_date', 'purchase_cost', 'vendor', 'warranty_expires', 'license_seats', 'seats_used', 'license_expires', 'notes'];
   const csv = [cols.join(',')].concat(rows.map((r) => cols.map((c) => csvCell(r[c])).join(','))).join('\r\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -737,6 +773,7 @@ app.post('/api/import/assets', admin, (req, res) => {
       const v = assetValues(o);
       const tag = clean(o.tag);
       const existing = tag ? db.prepare('SELECT * FROM assets WHERE tag = ?').get(tag) : null;
+      if (existing && existing.archived_at) { errors.push(`Row ${idx + 2}: tag ${tag} belongs to an archived asset — skipped`); return; }
       if (!v.name && !existing) { errors.push(`Row ${idx + 2}: missing name`); return; }
       if (!existing) { v.category = v.category || 'Other'; v.condition = v.condition || 'Good'; }
       let id;
@@ -746,7 +783,7 @@ app.post('/api/import/assets', admin, (req, res) => {
         id = existing.id; updated++;
       } else {
         const cols = ['tag', ...ASSET_FIELDS];
-        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || nextTag(), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
+        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
         log(id, req.user.id, 'created', 'Imported from CSV'); created++;
       }
       const em = clean(o.assigned_email)?.toLowerCase();

@@ -129,12 +129,13 @@ test('license-seat assets allow concurrent holders up to capacity', async () => 
   assert.equal(view.body.asset.status, 'checked_out');
 });
 
-test('deleting an asset removes it', async () => {
+test('the legacy DELETE route archives instead of removing the asset', async () => {
   const asset = (await admin.post('/api/assets', { name: 'To Delete', tag: 'NC-DEL1' })).body;
   const del = await admin.del(`/api/assets/${asset.id}`);
   assert.equal(del.status, 200);
-  const gone = await admin.get(`/api/assets/${asset.id}`);
-  assert.equal(gone.status, 404);
+  const still = await admin.get(`/api/assets/${asset.id}`);
+  assert.equal(still.status, 200);
+  assert.ok(still.body.asset.archived_at);
 });
 
 test('a small uploaded photo is resized and gets a thumbnail', async () => {

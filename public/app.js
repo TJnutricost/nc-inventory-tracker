@@ -77,6 +77,7 @@ const P = {
   download: '<path d="M12 4v11M7 10l5 5 5-5"/><path d="M4 20h16"/>',
   upload: '<path d="M12 20V9M7 14l5-5 5 5"/><path d="M4 4h16"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m14 6 4 4"/>',
+  archive: '<path d="M3 5h18v4H3zM5 9v10h14V9M10 13h4"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   check: '<path d="m5 12 5 5L20 7"/>',
   out: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 7l5 5-5 5M14 12H3"/>',
@@ -106,12 +107,12 @@ const P = {
 const icon = (n, cls = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true">${P[n] || P.box}</svg>`;
 const CAT_ICON = { Laptop: 'laptop', Desktop: 'desktop', Monitor: 'monitor', 'Keyboard & Mouse': 'keyboard', Headset: 'headphones', 'Dock / Adapter': 'dock', Phone: 'phone', Tablet: 'tablet', 'Printer / Scanner': 'printer', Networking: 'wifi', Appliance: 'plug', 'Software License': 'key' };
 const catIcon = (c) => CAT_ICON[c] || (/laptop|notebook/i.test(c) ? 'laptop' : /monitor|display/i.test(c) ? 'monitor' : /license|software/i.test(c) ? 'key' : 'box');
-const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', lost: 'Lost', overdue: 'Overdue' };
+const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', disposed: 'Disposed', lost: 'Lost', overdue: 'Overdue' };
 const REQ_LABEL = { open: 'Open', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
 const pill = (status, label) => `<span class="pill ${esc(status)}">${esc(label || STATUS_LABEL[status] || status)}</span>`;
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
 const thumbHtml = (thumb, cat) => `<div class="thumb">${thumb ? `<img src="/uploads/${esc(thumb)}" alt="" loading="lazy">` : icon(catIcon(cat))}</div>`;
-const assetStatus = (a) => (a.status !== 'retired' && a.status !== 'lost' && isOverdue(a.due_date) ? 'overdue' : a.status);
+const assetStatus = (a) => (!['retired', 'lost', 'disposed'].includes(a.status) && isOverdue(a.due_date) ? 'overdue' : a.status);
 
 // ============================================================ sheets (bottom modal)
 function sheet(html, { onOpen, wide } = {}) {
@@ -440,7 +441,7 @@ async function viewHome() {
     </div>`;
   wireDropoffs(main());
 }
-const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', requested: 'Requested' };
+const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested' };
 function activityList(rows, withAsset) {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
   return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
@@ -452,7 +453,7 @@ async function viewAssets() {
   const p = qs();
   const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
   const statuses = isAdmin()
-    ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired']]
+    ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
     : [['', 'All'], ['available', 'Available'], ['checked_out', 'Mine']];
   main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>` : ''}</div>
     <div class="stack">
@@ -497,7 +498,7 @@ async function viewAsset(id) {
   const d = await api('GET', '/api/assets/' + id);
   const a = d.asset;
   const admin = isAdmin();
-  const st = a.status !== 'retired' && a.status !== 'lost' && d.holders.some((h) => isOverdue(h.due_date)) ? 'overdue' : a.status;
+  const st = !['retired', 'lost', 'disposed'].includes(a.status) && d.holders.some((h) => isOverdue(h.due_date)) ? 'overdue' : a.status;
   const canPhoto = admin || d.is_mine;
   const multi = d.capacity > 1;
   const seatsFree = d.capacity - d.seats_used;
@@ -507,7 +508,9 @@ async function viewAsset(id) {
 
   // ---- action buttons
   let actions = '';
-  if (admin) {
+  if (a.archived_at) {
+    actions = `<div class="banner info">${icon('box')}<div class="grow"><strong>This asset is archived.</strong> Its history is kept and its tag stays reserved.</div></div>`;
+  } else if (admin) {
     const btns = [];
     if (['available', 'checked_out'].includes(a.status) && seatsFree > 0) btns.push(`<button class="btn primary lg" id="act-out">${icon('out')} Check out${multi ? ' a seat' : ''}</button>`);
     if (d.holders.length) btns.push(`<button class="btn ${seatsFree > 0 ? '' : 'primary'} lg" id="act-in">${icon('in')} Check in</button>`);
@@ -561,12 +564,13 @@ async function viewAsset(id) {
       ${kv.length ? `<div class="card"><div class="card-head"><h2>Details</h2></div><div class="kv">${kv.map(([k, v, html]) => `<div class="k">${k}</div><div class="v">${html ? v : esc(v)}</div>`).join('')}</div></div>` : ''}
       ${a.notes && admin ? `<div class="card pad"><h3 style="margin-bottom:6px">Notes</h3><div style="white-space:pre-wrap">${esc(a.notes)}</div></div>` : ''}
       ${admin ? `<div class="card"><div class="card-head"><h2>History</h2></div>${activityList(d.activity)}</div>
-        <div class="row wrap" style="justify-content:center;padding:8px 0 4px">
+        ${a.archived_at ? '' : `<div class="row wrap" style="justify-content:center;padding:8px 0 4px">
           ${a.status !== 'maintenance' && !d.holders.length ? `<button class="btn sm" data-status="maintenance">${icon('wrench')} Mark in repair</button>` : ''}
-          ${a.status === 'maintenance' || a.status === 'retired' || a.status === 'lost' ? `<button class="btn sm" data-status="available">${icon('check')} Mark available</button>` : ''}
+          ${['maintenance', 'retired', 'lost'].includes(a.status) ? `<button class="btn sm" data-status="available">${icon('check')} Mark available</button>` : ''}
           ${a.status !== 'lost' ? `<button class="btn sm" data-status="lost">Mark lost</button>` : ''}
-          ${a.status !== 'retired' && !d.holders.length ? `<button class="btn sm" data-status="retired">Retire</button>` : ''}
-          <button class="btn sm danger" id="del">${icon('trash')} Delete</button></div>` : ''}
+          ${a.status !== 'retired' && a.status !== 'disposed' && !d.holders.length ? `<button class="btn sm" data-status="retired">Retire</button>` : ''}
+          ${a.status !== 'disposed' && !d.holders.length ? `<button class="btn sm" data-status="disposed">Mark disposed</button>` : ''}
+          ${d.holders.length ? '' : `<button class="btn sm danger" id="del">${icon('archive')} Archive</button>`}</div>`}` : ''}
     </div>`;
 
   const reload = () => route(true);
@@ -596,8 +600,8 @@ async function viewAsset(id) {
     await api('PUT', `/api/assets/${a.id}`, { status: b.dataset.status }); toast('Status updated'); reload();
   }));
   on('#del', async () => {
-    if (!(await confirmSheet('Delete this asset?', `This permanently removes ${a.tag}, its photos and history. To keep the history, use "Retire" instead.`, 'Delete', true))) return;
-    try { await api('DELETE', `/api/assets/${a.id}`); toast('Asset deleted'); go('#/assets'); } catch (e) { fail(e); }
+    if (!(await confirmSheet('Archive this asset?', `${a.tag} will be hidden from the asset list. Its history, photos and tag are kept, and the tag can't be reused.`, 'Archive', true))) return;
+    try { await api('POST', `/api/assets/${a.id}/archive`, {}); toast('Asset archived'); go('#/assets'); } catch (e) { fail(e); }
   });
 }
 
@@ -758,7 +762,9 @@ async function viewAssetForm(id) {
       <div class="card pad"><fieldset class="form-grid cols"><legend>The basics</legend>
         <label class="field full"><span>Name *</span><input name="name" required value="${esc(a.name || '')}" placeholder="e.g. Dell Latitude 7440"></label>
         <label class="field"><span>Category</span><select name="category" id="cat">${cats.map((c) => `<option ${c === a.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
-        <label class="field"><span>Asset tag</span><div class="input-group"><input name="tag" value="${esc(a.tag || '')}" placeholder="${nextTag ? `Auto: ${esc(nextTag)}` : ''}" class="mono" autocapitalize="characters"><button type="button" class="btn" data-scan="tag" title="Scan barcode">${icon('scan')}</button></div></label>
+        ${editing
+          ? `<label class="field"><span>Asset tag</span><input value="${esc(a.tag)}" class="mono" disabled title="Asset tags can't be changed once created"></label>`
+          : `<label class="field"><span>Asset tag</span><div class="input-group"><input name="tag" value="${esc(a.tag || '')}" placeholder="${nextTag ? `Auto: ${esc(nextTag)}` : ''}" class="mono" autocapitalize="characters"><button type="button" class="btn" data-scan="tag" title="Scan barcode">${icon('scan')}</button></div></label>`}
         ${!editing ? `<label class="field full"><span>Photos</span><label class="no-photo" style="aspect-ratio:auto;padding:18px"><div>${icon('camera')}<strong id="ph-label">Take or choose photos</strong></div><input type="file" name="photos" id="ph" accept="image/*" multiple hidden></label></label>` : ''}
       </fieldset></div>
       <div class="card pad"><fieldset class="form-grid cols"><legend>Details</legend>

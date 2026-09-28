@@ -81,7 +81,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
     - **Before implementation, generate a duplicate-serial report** against real/current data (dev seed has none; production unknown).
   - **Lookup must never silently pick the first match.** Whenever one scanned value resolves to **more than one distinct asset** — duplicate serials, or a **cross-collision between one asset's tag and another's serial** — the API returns an **ambiguity result** listing the candidates, and the UI asks the operator to choose. (One asset matching by both tag and serial is not ambiguous.) Unknown code → existing "new barcode" flow.
 
-### 3.3 Asset lifecycle and deletion (Phase 1C)
+### 3.3 Asset lifecycle and deletion (Phase 1C — implemented)
 
 - **Current:** hard delete cascades and erases history (F1); status mixes lifecycle with derived availability.
 - **Approved:**
@@ -104,7 +104,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
   5. **Capacity is not expressible as one unique index.** Physical assets have `seat_capacity = 1`; multi-seat software licenses may have `seat_capacity > 1`. Capacity is enforced **inside the assignment (check-out) transaction**: the transaction locks/serializes the asset row (`SELECT … FOR UPDATE` on PostgreSQL; a write-locking transaction on SQLite), counts active assignments, and only then inserts. **A global `UNIQUE(asset_id)` on active assignments is explicitly rejected** because it would break multi-seat licenses.
 - `assets.seat_capacity INTEGER NOT NULL DEFAULT 1` is introduced in 1E; today's `license_seats` maps into it. No software-license redesign.
 
-### 3.5 Asset-tag generation (Phase 1C; PostgreSQL later)
+### 3.5 Asset-tag generation (Phase 1C — implemented for SQLite; PostgreSQL later)
 
 - **Confirmed risk (F4):** `max(existing suffix) + 1` reissues the top tag after delete and is not atomic on PostgreSQL / multiple instances.
 - **Approved:**
@@ -205,7 +205,7 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **Tests:** runner idempotent on fresh + existing DB; cover own/foreign/missing/clear; request bad ids → 400; fresh DB default OFF while an existing DB's stored value is preserved; category validation.
 - **Risk:** low. No major model rewrite.
 
-### Phase 1C — Asset Lifecycle + Durable Tag Issuance
+### Phase 1C — Asset Lifecycle + Durable Tag Issuance — **IMPLEMENTED** (see PROJECT_STATUS.md)
 - **Goal:** Archive replaces Delete; `archived_at`; `disposed`; terminal-state assignment guards (retired/disposed/archive need no active assignments; `lost` may stay assigned); monotonic never-reused tags via durable high-water counter; prefix changes don't reset numbers; tags immutable.
 - **Affects:** `assets` (+ counter table), asset endpoints/filters/dashboard, activity, UI Delete→Archive with reason.
 - **User-visible:** "Archive" with reason; archived hidden by default with a filter; tag field read-only after creation.
@@ -225,7 +225,7 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **User-visible:** none directly; richer activity entries.
 - **Tests:** asset with history can't be hard-deleted at DB level; same employee can't hold an asset twice; capacity 1 vs multi-seat enforced in-transaction; every audited action writes a row with actor snapshot and employee subject.
 - **Risk:** medium-high (table rebuilds). Depends on 1D.
-- **Runner prerequisite (deferred from 1B):** SQLite cannot toggle `PRAGMA foreign_keys` inside a transaction, so the migration runner needs an option to disable FKs around a table-rebuild migration, run `PRAGMA foreign_key_check`, then re-enable. Solve as part of this slice.
+- **Runner prerequisite:** already delivered in Phase 1C (`disableForeignKeys` migration option: FKs off around the transaction, `foreign_key_check`, always re-enabled); reuse it for these table rebuilds.
 
 ### Phase 1F — Serial Normalization + Lookup Ambiguity
 - **Goal:** duplicate-serial report first; normalized serial + placeholder handling; duplicate warning with explicit admin override; ambiguous scanner/API response; tag↔serial cross-collision handling.
