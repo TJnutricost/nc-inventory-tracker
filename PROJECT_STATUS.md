@@ -3,7 +3,7 @@
 **Last Updated:** 2026-09-28  
 **Project Status:** Early MVP / Prototype  
 **Current Phase:** Baseline & Test Harness  
-**Canonical Branch:** TBD  
+**Canonical Branch:** `stage` (shared integration / GitHub default branch); `main` is the stable/release branch — see Section 3a  
 **Production Status:** Not deployed
 
 ---
@@ -123,6 +123,17 @@ Use when:
 9. Scanner functionality must be verified on real devices and not assumed functional based only on desktop/browser testing.
 
 10. Prefer incremental migration over rewriting the application from scratch.
+
+---
+
+# 3a. Git Branch Strategy
+
+**Established 2026-09-28.**
+
+- **`stage`** — shared integration branch. This is the GitHub **default branch**. Short-lived feature/chore branches normally branch from `stage` and merge back into `stage`.
+- **`main`** — stable/release branch. Ordinary feature branches are **not** merged directly into `main` unless explicitly instructed. Promotion from `stage` to `main` is a deliberate, separately-approved step.
+- `stage` and `main` were created equal (both at commit `fcbff1d`, which includes Phase 0A + Phase 0B) and will diverge from here as `stage` accumulates new work ahead of the next approved promotion to `main`.
+- Branch protection rules were explicitly **not** configured this slice (out of scope) — `stage` currently has no protection beyond what already existed on `main`.
 
 ---
 
@@ -881,9 +892,21 @@ First establish a known-good local baseline and verify the scanner/assignment li
 
 ---
 
+## 2026-09-28 — Git Branch Strategy
+
+Decision:
+
+Adopt `stage` (shared integration branch, set as the GitHub default) → `main` (stable/release branch) as the repository flow. Feature/chore branches branch from and merge back into `stage`; promotion from `stage` to `main` is a separate, deliberate step, not automatic.
+
+Reason:
+
+Multiple contributors/agents (Claude Code, Codex) working in parallel need a shared integration point that isn't the release branch, so `main` stays deployable.
+
+---
+
 # 20. Open Decisions
 
-- [ ] Repository branching strategy
+- [x] Repository branching strategy — *resolved 2026-09-28: `stage` (integration/default) → `main` (release), see Section 3a.*
 - [ ] Supabase organization/project naming
 - [ ] Employee vs login-account schema
 - [ ] Asset identifier schema
