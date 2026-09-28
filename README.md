@@ -1,0 +1,133 @@
+# Nutricost IT Assets
+
+A mobile-first web app for tracking Nutricost's IT equipment: computers, monitors, peripherals, phones, appliances and software licenses. It records who has each item, handles check-out and check-in, lets IT ask for items back, scans barcodes, stores photos, and sends email through Google Workspace.
+
+It runs on phones, tablets and desktops. On a phone, users can add it to the home screen and it opens like a regular app.
+
+---
+
+## What it does
+
+| | Admins (IT) | Users (employees) |
+|---|---|---|
+| **Dashboard** | Totals, overdue items, open requests, warranties and licenses expiring soon, recent activity | Their own equipment and any return requests |
+| **Assets** | Add, edit, retire, mark lost or in repair, delete; add photos | See what's available and what they have |
+| **Check out** | Assign an item to anyone, with a due date and condition | Scan an available item and check it out to themselves (can be turned off) |
+| **Check in** | Scan the item, record its condition and where it goes, optionally mark it in repair | Tap "I'm returning this" |
+| **Return requests** | Ask a person to turn an item in by a date; they get an email and a banner in the app | Tap "I've dropped it off", which emails IT |
+| **Equipment requests** | Assign an asset to the request (checks it out), approve it, or decline it | Ask IT for equipment |
+| **Barcodes** | Scan to find an item. Scanning an unknown code offers to create a new asset with that tag. Print Code 128 label sheets. | Scan to find an item |
+| **Software licenses** | Seat counts (for example 3 of 25 used), license key, renewal date | See the license key for seats assigned to them |
+| **People** | Invite people, set admin or user, deactivate, see each person's current and past equipment | Their own profile |
+| **Data** | CSV import (bulk onboarding) and export, full activity log per asset | |
+
+**Emails sent automatically:** welcome/invite, password reset, checked out to you, return received, please return, dropped-off alert (to IT), new equipment request (to IT), request approved or declined, self check-out alert (to IT), overdue reminder (on the due date, then every 3 days).
+
+**Barcode scanning** works three ways:
+1. **Phone or tablet camera.** Tap Scan. It reads Code 128, Code 39, UPC/EAN, QR, Data Matrix and more. This needs **https**.
+2. **USB or Bluetooth handheld scanner.** On a desktop the Scan page's input box is focused automatically, so scanning there works right away.
+3. **Typing** the tag or serial number.
+
+You can put the app's own labels on devices (Print labels, sized for Avery 5160/8160 sheets or a label printer), or reuse barcodes that are already on the device. For the second option, scan the existing barcode when you add the asset and it becomes the tag.
+
+---
+
+## Quick start (local test)
+
+Requires **Node.js 20.12 or newer**.
+
+```bash
+npm install
+cp .env.example .env      # edit it (see "Email" below). Can be left as-is for a local test.
+npm start
+```
+
+Open http://localhost:3000. The first visit asks you to create the first **admin** account. Then:
+1. **Settings**: check the categories, locations and check-out rules.
+2. **People → Add person**: each person gets an email invite to set their password.
+3. **Add assets** one by one (scan, fill in, take photos) or **Import / export → Import CSV** for bulk onboarding. A template is available there.
+4. **Print labels** and stick them on the devices.
+
+Emails are saved to **Settings → Outbox** until SMTP is configured, so everything can be tested without sending real mail.
+
+---
+
+## Deploying for the company
+
+### Option 1: Docker (recommended)
+
+```bash
+cp .env.example .env     # fill in APP_URL, SESSION_SECRET and the Gmail settings
+docker compose up -d --build
+```
+
+The database and photos are stored in `./data`. **Back up this folder.** It is the whole system.
+
+### Option 2: Plain Node on a server or VM
+
+```bash
+npm ci --omit=dev
+npm start                # run it under systemd, pm2 or similar so it restarts automatically
+```
+
+### HTTPS (required for phone camera scanning)
+
+Put the app behind a reverse proxy with a certificate: Caddy, nginx, Cloudflare Tunnel, or your cloud provider's load balancer. With Caddy it is two lines:
+
+```
+assets.nutricost.com {
+  reverse_proxy localhost:3000
+}
+```
+
+Set `APP_URL=https://assets.nutricost.com` in `.env` so links in emails point to the right place and cookies are marked secure.
+
+If the app should only be reachable inside the office network or VPN, host it internally with an internal certificate. Scanning still works as long as the address is https.
+
+---
+
+## Email (Google Workspace / Gmail)
+
+There are two ways to set it up. Both go in `.env`, and the app needs a restart afterwards.
+
+**A. Mailbox and App Password (simplest)**
+1. Use or create a mailbox such as `it@nutricost.com`.
+2. Turn on 2-Step Verification for that account.
+3. Go to Google Account → Security → **App passwords** and create one called "IT Assets".
+4. In `.env`:
+   ```
+   SMTP_HOST=smtp.gmail.com
+   SMTP_PORT=465
+   SMTP_USER=it@nutricost.com
+   SMTP_PASS=<the 16-character app password>
+   MAIL_FROM="Nutricost IT <it@nutricost.com>"
+   ```
+   If App passwords don't appear, a Workspace admin needs to allow them, or you can use option B.
+
+**B. Workspace SMTP relay (no mailbox password)**
+In the Admin console, go to Apps → Google Workspace → Gmail → Routing → **SMTP relay service**, and allow your server's IP address. Then set `SMTP_HOST=smtp-relay.gmail.com`, `SMTP_PORT=587`, and use `SMTP_USER`/`SMTP_PASS` only if you required authentication.
+
+To check it, go to **Settings → Send me a test email**. The Outbox shows each message as sent, failed (with the reason) or not sent.
+
+---
+
+## Branding
+
+The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (black) and `--brand-accent` (blue). Change them to match the official brand values. To use the official logo, replace `public/logo.svg` (dark, for light backgrounds) and `public/logo-white.svg` (for the black header) with files of the same names. The app icons are `public/icon.svg`, `icon-192.png` and `icon-512.png`.
+
+## Security notes
+
+- Passwords are hashed with bcrypt. Sessions last 30 days and are stored in the database. Logins are rate-limited.
+- Users only see available items and their own items. Purchase cost, vendor, notes and license keys stay hidden unless the user holds that item.
+- A deactivated person is signed out immediately. Their assignment history is kept.
+- Photos are resized automatically (to at most 1600px, and EXIF data is stripped). Only signed-in users can view them.
+
+## Project layout
+
+```
+src/server.js     API, auth, check-out logic, CSV import/export, overdue reminders
+src/db.js         SQLite schema and settings
+src/mailer.js     Email templates and Gmail SMTP
+public/           Front end (no build step): index.html, app.js, app.css, logos, PWA files
+data/             Created at runtime: assets.db and uploads/ (back this up)
+```

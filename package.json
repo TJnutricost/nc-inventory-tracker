@@ -1,0 +1,27 @@
+{
+  "name": "nutricost-it-assets",
+  "version": "1.0.0",
+  "description": "Nutricost IT asset management — track, check out and scan IT equipment",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test test/"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^13.0.3",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "html5-qrcode": "^2.3.8",
+    "jsbarcode": "^3.12.3",
+    "multer": "^2.4.0",
+    "nodemailer": "^10.0.10",
+    "sharp": "^0.35.4"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20.12"
+  }
+}
