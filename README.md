@@ -104,6 +104,20 @@ If the app should only be reachable inside the office network or VPN, host it in
 
 ---
 
+## Planned production direction (not yet built)
+
+The setup above (Docker or plain Node, with local SQLite) is what actually works today. The intended longer-term production direction is:
+
+- **Application hosting:** Railway. The team doesn't have Railway account/project access yet — an administrator is setting that up, with no confirmed completion date.
+- **Database:** managed PostgreSQL, described and built provider-neutrally rather than locked to one vendor. **Railway PostgreSQL is the current preferred host.**
+- **File/photo storage:** S3-compatible object storage, also provider-neutral. **Railway object storage (or another S3-compatible provider) is the current preferred direction.**
+- **Authentication:** provider **TBD** — no specific vendor is assumed. Expected requirements regardless of provider: Google sign-in, an email/magic-link fallback, persistent authenticated sessions, separate admin vs. employee authorization enforced by the backend (not by hostname), and pre-provisioned employee linking (an employee can exist and hold equipment without ever having a login).
+- **Portals:** a separate employee-facing portal is planned alongside this admin app, sharing the same backend, database, and authentication system — there's no separate inventory data per portal. Both are expected to live on separate subdomains of an existing hosted parent domain/site (not a new domain bought for this project); the exact parent domain and both subdomains are still TBD, and no DNS has been configured. Session/cookie behavior across the two hostnames will be decided during the authentication work, not assumed now.
+
+See `PROJECT_STATUS.md` for the full roadmap and current status of each of these.
+
+---
+
 ## Email (Google Workspace / Gmail)
 
 There are two ways to set it up. Both go in `.env`, and the app needs a restart afterwards.

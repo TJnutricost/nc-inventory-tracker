@@ -491,10 +491,15 @@ To be scheduled as planned future work **after** the shared database/auth/backen
 
 ## Domain / Application Split
 
-- `admin.<domain>` — hosts the IT/admin inventory-management application currently being built.
-- `<domain>` (root/apex) — will host a separate, employee-facing web experience (Employee Portal).
+**Revised 2026-09-28** — supersedes the earlier `admin.<domain>` / `<domain>` (root/apex) assumption. Current direction: both portals will likely live on separate subdomains of an **existing hosted parent domain/site**, not on a domain registered specifically for this project, and the employee portal is **not** assumed to live at the apex/root domain.
+
+- **Admin portal:** `<admin-subdomain>.<parent-domain>` — hosts the IT/admin inventory-management application currently being built.
+- **Employee portal:** `<employee-subdomain>.<parent-domain>` — a separate, employee-facing web experience (Employee Portal V1).
+- Both hostnames are expected to be subdomains of an existing parent domain (not necessarily a new domain purchased for this project).
+- Exact parent domain: **TBD**. Exact admin subdomain: **TBD**. Exact employee subdomain: **TBD**. DNS/CNAME/proxy/hosting details: **TBD**. None of this is being configured now (tracked in Section 20, Open Decisions).
 - Both applications share the **same** backend, database, authentication system, and inventory data, whichever hosting/provider choices are ultimately made. There is no separate inventory database for the employee app.
-- Exact production domain is still TBD (tracked in Section 20, Open Decisions).
+
+**Future-design note — auth across two hostnames:** authentication/session design must support both portal hostnames; do not assume shared browser cookies across the two subdomains. Exact cookie/session/SSO behavior will be decided during Phase 4 (Authentication), not here.
 
 ## Employee Portal V1 — Planned Functionality
 
@@ -537,7 +542,7 @@ This formalizes, and is the authoritative source for, the direction noted inform
 - No browsing other employees
 - No ability to grant themselves admin access
 
-**Important:** admin authorization must be enforced independently of the `admin.<domain>` hostname — the hostname is a UX/routing convenience, not a security boundary.
+**Important:** admin authorization must be enforced independently of the `<admin-subdomain>.<parent-domain>` hostname — the hostname is a UX/routing convenience, not a security boundary.
 
 ## Employee Permission Model (2026-09-28 clarification)
 
@@ -587,8 +592,8 @@ Preferred future behavior:
 
 ## Admin Portal Rule (reinforced, 2026-09-28)
 
-- `admin.<domain>` always requires authentication.
-- Reaching `admin.<domain>` does **not** itself grant admin rights.
+- `<admin-subdomain>.<parent-domain>` always requires authentication.
+- Reaching `<admin-subdomain>.<parent-domain>` does **not** itself grant admin rights.
 - Admin authorization must be determined by trusted application/backend authorization data, not by hostname, route, or client-side state.
 
 ## Auth Direction
@@ -1165,6 +1170,18 @@ Staff without a dedicated barcode scanner still need a fast, low-friction way to
 
 ---
 
+## 2026-09-28 — Portal Hostname Direction Revised
+
+Decision:
+
+Supersede the earlier `admin.<domain>` / `<domain>` (root/apex) assumption in Section 8a. Both the admin and employee portals are now expected to live on separate subdomains of an **existing hosted parent domain/site**, not a domain registered specifically for this project. The employee portal is explicitly **not** assumed to live at the apex/root domain. Exact parent domain, admin subdomain, and employee subdomain are each individually TBD; no DNS/CNAME/proxy configuration has been done.
+
+Reason:
+
+The earlier `<domain>` assumption implied a dedicated root domain for this project; the actual plan is to host both portals under an existing parent site the organization already has, which changes how hostnames (and eventually auth/session/cookie scope across them — see Section 8a's auth note) need to be designed. Recorded now, before Phase 4 authentication design, so that work doesn't bake in the wrong hostname assumption.
+
+---
+
 # 20. Open Decisions
 
 - [x] Repository branching strategy — *resolved 2026-09-28: `stage` (integration/default) → `main` (release), see Section 3a.*
@@ -1177,7 +1194,7 @@ Staff without a dedicated barcode scanner still need a fast, low-friction way to
 - [ ] Asset lifecycle statuses
 - [ ] Self-checkout behavior
 - [ ] Email provider
-- [ ] Production domain
+- [ ] Production domain — *revised 2026-09-28: parent domain, admin subdomain, and employee subdomain are each individually TBD; expected to be subdomains of an existing hosted parent domain rather than a new domain; DNS/CNAME/proxy/hosting details also TBD; see Section 8a.*
 - [ ] Barcode label dimensions/printer
 - [ ] Whether QR codes are needed in addition to Code 128
 - [ ] Inventory/cycle-count V1 scope
