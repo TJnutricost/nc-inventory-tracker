@@ -52,6 +52,24 @@ Emails are saved to **Settings → Outbox** until SMTP is configured, so everyth
 
 ---
 
+## Development dataset (seed)
+
+For local development you don't have to add data by hand. `npm run seed:dev` wipes and rebuilds an **isolated** database at `./data-dev` (never touches the real `./data`) with 9 people, 48 realistic assets (tags `NC-00001`–`NC-00048`), and a mix of current/past assignments, requests and activity history.
+
+```bash
+npm run seed:dev
+DATA_DIR=./data-dev PORT=3000 npm start
+```
+
+Then open http://localhost:3000 and log in as the seeded admin:
+
+- **Email:** `dana.ito@example.com`
+- **Password:** `DevPass!2026`
+
+Every seeded account (admin and regular users) shares that same development-only password. `./data-dev` is gitignored — it's disposable scratch data, safe to delete or reseed at any time, and is **never** used by `npm start` unless you set `DATA_DIR` yourself as shown above.
+
+---
+
 ## Deploying for the company
 
 ### Option 1: Docker (recommended)

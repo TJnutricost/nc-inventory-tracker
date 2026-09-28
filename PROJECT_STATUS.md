@@ -284,7 +284,7 @@ Current implementation uses custom authentication rather than Supabase Auth.
 
 ## Testing
 
-- [ ] Repeatable dummy-data seed (no seed script exists yet; test fixtures use ephemeral per-run temp DBs, not a persistent dev seed)
+- [x] Repeatable dummy-data seed — *`npm run seed:dev` (added 2026-09-28, Phase 0B); see Section 10 for details.*
 - [x] Automated test suite — *Correction (Claude Code, 2026-09-28): already exists. `test/` has 5 files / 45 tests via Node's built-in test runner (`npm test`), all passing against the real Express app on a throwaway SQLite DB.*
 - [x] API smoke tests — *covered: the suite boots the real app and drives it over HTTP with a cookie-aware client.*
 - [x] Assignment lifecycle tests — *covered: `test/requests.test.js` exercises return-request → drop-off → check-in.*
@@ -520,7 +520,7 @@ All dummy email addresses should use safe non-deliverable/test domains such as `
 
 ## Phase 0 — Baseline & Test Harness
 
-**Status:** IN PROGRESS — Phase 0A (local baseline verification) completed 2026-09-28 by Claude Code. Golden path below has not yet been walked end-to-end against a live server; that + Phase 0B/0C/0D remain open.
+**Status:** IN PROGRESS — Phase 0A (local baseline, 2026-09-28) and Phase 0B (deterministic dev seed, 2026-09-28) complete. Physical scanner hardware (Phase 0D) and CSV import/export / photo verification remain open.
 
 Goal:
 
@@ -533,13 +533,13 @@ Prove the current application works before replacing infrastructure.
 - [x] Confirm dependency installation — *`npm ci` succeeded, 96 packages, `package-lock.json` unchanged.*
 - [x] Confirm database initialization — *fresh SQLite DB auto-created 11 tables on first boot (see Section 21 verification log).*
 - [x] Document local startup procedure — *README Quick Start verified accurate against actual behavior; no changes needed.*
-- [ ] Create deterministic dummy-data seed — *not done; still ephemeral only (see Phase 0B).*
-- [ ] Create test users/employees — *not done as persistent local dev data; a temporary admin/asset were created and torn down against an isolated throwaway DB during verification only.*
-- [ ] Create test assets — *same as above.*
+- [x] Create deterministic dummy-data seed — *`npm run seed:dev`, added 2026-09-28 (Phase 0B); see Section 10 log.*
+- [x] Create test users/employees — *9 seeded people (1 admin), persisted in `./data-dev` via `npm run seed:dev`.*
+- [x] Create test assets — *48 seeded assets, tags `NC-00001`–`NC-00048`.*
 - [x] Add minimal automated smoke tests — *already present (45 tests in `test/`); see correction in Section 6.*
-- [ ] Verify current scanner workflow — *surface-level only so far (scanner page, JS libraries, manual input, lookup endpoint — see Section 21). Physical device / full scan-to-checkout flow not yet verified.*
-- [ ] Verify assignment workflow — *covered by the automated suite; not yet manually exercised against a live server.*
-- [ ] Verify check-in workflow — *covered by the automated suite; not yet manually exercised against a live server.*
+- [ ] Verify current scanner workflow — *surface-level only so far (scanner page, JS libraries, manual input, lookup endpoint — see Section 21). Physical device / full scan-to-checkout flow not yet verified. Seeded tags (e.g. `NC-00025`) are now available to test against once a device is available.*
+- [x] Verify assignment workflow — *manually verified 2026-09-28 against a live server started on the seeded dataset: checkouts, an overdue assignment, and a multi-seat license checkout all showed correctly via the API and dashboard.*
+- [x] Verify check-in workflow — *manually verified 2026-09-28: check-in and the full request → drop-off → check-in flow both confirmed against a live server on seeded data.*
 - [ ] Verify asset photos — *not exercised this slice.*
 - [ ] Verify CSV import/export — *covered by the automated suite; not yet manually exercised against a live server.*
 
@@ -797,6 +797,24 @@ After this passes, proceed to:
 
 ### Phase 0B — Deterministic Development Seed
 
+**Status:** COMPLETE (implementation-only scope) — 2026-09-28, Claude Code. Not merged/pushed; left on `chore/phase-0b-dev-seed` for review.
+
+**Implementation.** `scripts/seed-dev.js` (`npm run seed:dev`) wipes and rebuilds an isolated `./data-dev` SQLite database, driving the real app over HTTP through the same boot/client pattern as `test/helpers.js` — so all business logic (tag generation, checkout/check-in, requests, activity logging, the invite/reset flow) is reused rather than re-implemented. No new dependencies were added.
+
+**Safety.** `assertSafeDevDir()` refuses to run if the resolved target equals the real `./data` directory or the repo root, checked before anything is deleted. The default target (`./data-dev`) is added to `.gitignore`. The script always prints the exact path it's operating on. There is no `--force` or equivalent override.
+
+**Idempotency.** Each run fully wipes and rebuilds the target directory before reseeding — running `npm run seed:dev` twice in a row produces byte-for-byte identical row counts (verified by `test/seed-dev.test.js`, which also asserts the real `./data` directory's `assets.db` mtime is unchanged after seeding).
+
+**Seeded dataset** (see Section 21 for the full breakdown): 9 users (1 admin), 48 assets (`NC-00001`–`NC-00048`), 9 current + 4 historical assignments, 5 requests spanning equipment/return types and open/approved/denied/dropped-off/completed statuses. Coverage includes: a missing serial, an unusually long serial, one asset each in `maintenance`/`retired`/`lost`, purchase/warranty info present and absent, an active and an expired warranty, a software license with partial seat usage (3 of 25), and one asset (`NC-00001`) with two completed historical assignments plus a third currently open — matching every explicit coverage requirement from the Phase 0B brief. No duplicate serial numbers were introduced (that's deliberately deferred to Phase 1 per the brief).
+
+**Dev login:** `dana.ito@example.com` / `DevPass!2026` — every seeded account shares that password (development-only, printed by the script, documented in the README).
+
+**Verification:** `test/seed-dev.test.js` added (6 new tests: safety-guard rejection, dataset shape, real-`./data` non-modification, idempotency, and a live-HTTP check that a seeded admin can log in and see correct holder/history data). Full suite: 51/51 passing (45 prior + 6 new). Manually re-ran `npm run seed:dev` twice from a clean checkout and booted the real server against `./data-dev` on an isolated port — admin login, dashboard, asset/user lists, tag lookup, `/next-tag` (correctly returns `NC-00049` after seeding), and both a currently-held and a previously-returned asset's history all verified correct.
+
+**Deferred / explicitly out of scope this slice:** photo seeding (per the brief — not a blocker), a scripted second admin or deactivated user (not requested), Supabase/Postgres work, fixing the known hard-delete/serial-uniqueness/identifier-model issues from Section 7 (unchanged, not re-tested).
+
+**Issues found:** none. No blockers, no new bugs. One documentation note, not a defect: the dashboard's `checked_out` stat counts distinct assets with an open assignment (regardless of the asset's own `status` column), so a multi-seat license asset with partial usage appears in both the `available` and `checked_out` buckets simultaneously — this is pre-existing `src/server.js` dashboard behavior (unrelated to this slice) and is not an "impossible state": the asset's `status` column correctly stays `available` while capacity remains.
+
 Then:
 
 ### Phase 0C — Core Workflow Smoke Tests
@@ -891,17 +909,17 @@ First establish a known-good local baseline and verify the scanner/assignment li
 - Initial production risks identified
 - Railway + Supabase architecture direction selected
 - Development workflow established
-- Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`)
+- Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`, merged locally into `main`)
 - Phase 0A — Local Baseline verification (clean install, fresh-DB boot, runtime smoke check, asset CRUD, scanner surface check — see Section 10 log; 2026-09-28)
+- Phase 0B — Deterministic Development Seed (`npm run seed:dev`; 9 users, 48 assets, full history/requests coverage; 6 new automated tests, 51/51 suite passing — see Section 10 log; 2026-09-28, on `chore/phase-0b-dev-seed`)
 
 ### In Progress
 
-- Phase 0 golden path (scan → assign → check-in) not yet walked end-to-end against a live server
-- Phase 0B — Deterministic Development Seed (not started)
+- Phase 0 golden path (scan → assign → check-in) — assignment and check-in legs now verified live (Phase 0B); the scan leg still needs a physical device (Phase 0D)
 
 ### Next
 
-**Phase 0B — Deterministic Development Seed**, then **Phase 0C — Core Workflow Smoke Tests**, then **Phase 0D — Physical Scanner Verification**
+**Phase 0C — Core Workflow Smoke Tests**, then **Phase 0D — Physical Scanner Verification**
 
 ### Blocked
 
