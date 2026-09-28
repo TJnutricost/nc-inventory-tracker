@@ -1,6 +1,9 @@
 // Minimal versioned migration runner. Each migration is { id, name, up(db) }; ids are
 // positive integers applied once, in ascending order, each inside its own transaction
 // together with its schema_migrations row (so a failed migration leaves no trace).
+// A migration that rebuilds a table other tables reference sets `disableForeignKeys: true`: the
+// runner turns enforcement off around its transaction (SQLite ignores that pragma inside one),
+// fails the migration if PRAGMA foreign_key_check finds violations, and always turns it back on.
 function runMigrations(db, migrations) {
   db.exec(`CREATE TABLE IF NOT EXISTS schema_migrations (
     id INTEGER PRIMARY KEY,
@@ -16,10 +19,19 @@ function runMigrations(db, migrations) {
   const ran = [];
   for (const m of sorted) {
     if (applied.has(m.id)) continue;
-    db.transaction(() => {
-      m.up(db);
-      db.prepare('INSERT INTO schema_migrations (id, name) VALUES (?, ?)').run(m.id, m.name);
-    })();
+    if (m.disableForeignKeys) db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        m.up(db);
+        if (m.disableForeignKeys) {
+          const bad = db.pragma('foreign_key_check');
+          if (bad.length) throw new Error(`Migration ${m.id} left ${bad.length} foreign key violation(s)`);
+        }
+        db.prepare('INSERT INTO schema_migrations (id, name) VALUES (?, ?)').run(m.id, m.name);
+      })();
+    } finally {
+      if (m.disableForeignKeys) db.pragma('foreign_keys = ON');
+    }
     ran.push(m.id);
   }
   return ran;

@@ -11,7 +11,7 @@ It runs on phones, tablets and desktops. On a phone, users can add it to the hom
 | | Admins (IT) | Users (employees) |
 |---|---|---|
 | **Dashboard** | Totals, overdue items, open requests, warranties and licenses expiring soon, recent activity | Their own equipment and any return requests |
-| **Assets** | Add, edit, retire, mark lost or in repair, delete; add photos | See what's available and what they have |
+| **Assets** | Add, edit, retire, mark lost, disposed or in repair, archive; add photos | See what's available and what they have |
 | **Check out** | Assign an item to anyone, with a due date and condition | Scan an available item and check it out to themselves (can be turned off) |
 | **Check in** | Scan the item, record its condition and where it goes, optionally mark it in repair | Tap "I'm returning this" |
 | **Return requests** | Ask a person to turn an item in by a date; they get an email and a banner in the app | Tap "I've dropped it off", which emails IT |

@@ -142,7 +142,7 @@ a.item:active, a.item:hover { background: var(--surface-2); }
 .pill.available { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .pill.checked_out { background: var(--info-soft); color: var(--info); border-color: transparent; }
 .pill.maintenance { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
-.pill.retired { color: var(--muted); }
+.pill.retired, .pill.disposed { color: var(--muted); }
 .pill.lost, .pill.overdue, .pill.denied { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
 .pill.open, .pill.dropped_off { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
 .pill.approved, .pill.completed { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
