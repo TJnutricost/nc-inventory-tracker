@@ -739,7 +739,19 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 
 **Remaining unresolved:** duplicate-serial report results; tag-correction workflow (deferred); session/`sessions` design (Phase 4); auth provider, unmatched-login experience and `issue` request scope (out of Phase 1); concrete production tag prefix/width.
 
-**Phase 1 sequence (all Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
+### Phase 1B — Migration Foundation + Immediate Integrity Fixes (implemented, 2026-09-28, `feature/phase-1b-migration-integrity`; reviewed; committed and pushed, not yet merged)
+
+- **Migration runner (implemented):** `src/migrate.js` + ordered list in `src/migrations.js`; `schema_migrations(id, name, applied_at)`; each migration runs once, in id order, in its own transaction with its bookkeeping row (failure leaves no trace); runs automatically at startup and is idempotent. Migration 1 = the pre-existing baseline schema (all `IF NOT EXISTS`, so fresh and existing databases both work, nothing rebuilt); migration 2 clears invalid cover-photo references.
+- **Cover-photo ownership (implemented):** `PUT /api/assets/:id/cover` requires an existing asset (404), a well-formed photo id (400), an existing photo (404) and a photo owned by that asset (400); null/empty clears. Failed requests leave the previous cover intact.
+- **Request reference validation (implemented):** `POST /api/requests` returns 400 for malformed asset/user ids and 404 for unknown ones; approve returns 400/404 for a bad `asset_id`. No request lifecycle change (Phase 1G).
+- **Self-checkout (implemented):** default is OFF for NEW databases; startup still uses `INSERT OR IGNORE`, so existing values (ON or OFF) are never overwritten.
+- **Category/location (implemented, minimal):** `assetValues()` (create, edit, CSV import) rejects non-text values with 400; trimming was already done by `clean()`.
+- **Deferred:** category/location *length limits* (no existing convention; would be arbitrary) and validating category against the configured list (would affect existing/imported data) — left for a later hygiene slice.
+- **Tests added:** 16 (`test/migrations.test.js`, `test/integrity.test.js`); suite is 71 passing / 0 failing.
+- **Known limitation (future Phase 1E work, not solved in 1B):** the runner wraps every migration in a transaction, and SQLite cannot change `PRAGMA foreign_keys` inside one. Phase 1E's SQLite table rebuilds (history-safe FKs) will need a runner option to disable FK enforcement around a migration, run `PRAGMA foreign_key_check` afterwards, and re-enable it.
+- **Not touched:** Archive/`archived_at`/`disposed`, tag sequencing, employee/account split, assignment model, serial handling, request states, PostgreSQL/Railway/auth.
+
+**Phase 1 sequence (1B implemented on its branch, rest Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
 
 - [ ] Define employee/person model — *must be independent of login account; see Section 8a*
 - [ ] Define login/profile model — *a user of the eventual shared auth provider (TBD) optionally links to an employee record; see Section 8a*
