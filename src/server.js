@@ -353,6 +353,9 @@ const ASSET_FIELDS = ['name', 'category', 'brand', 'model', 'serial', 'condition
   'warranty_expires', 'license_key', 'license_seats', 'license_expires', 'notes'];
 function assetValues(body) {
   const v = {};
+  for (const f of ['category', 'location']) {
+    if (body[f] !== undefined && body[f] !== null && typeof body[f] !== 'string') throw httpError(400, `${f === 'category' ? 'Category' : 'Location'} must be text`);
+  }
   for (const f of ASSET_FIELDS) v[f] = ['purchase_cost', 'license_seats'].includes(f) ? num(body[f]) : clean(body[f]);
   return v;
 }
@@ -503,7 +506,18 @@ app.delete('/api/photos/:id', admin, (req, res) => {
   res.json({ ok: true });
 });
 app.put('/api/assets/:id/cover', admin, (req, res) => {
-  db.prepare('UPDATE assets SET cover_photo_id = ? WHERE id = ?').run(Number(req.body.photo_id) || null, Number(req.params.id));
+  const asset = getAsset(Number(req.params.id));
+  if (!asset) throw httpError(404, 'Asset not found');
+  const raw = req.body.photo_id;
+  let photoId = null; // null/empty clears the cover
+  if (raw !== undefined && raw !== null && raw !== '') {
+    photoId = Number(raw);
+    if (!Number.isInteger(photoId) || photoId < 1) throw httpError(400, 'Choose a valid photo');
+    const photo = db.prepare('SELECT asset_id FROM photos WHERE id = ?').get(photoId);
+    if (!photo) throw httpError(404, 'Photo not found');
+    if (photo.asset_id !== asset.id) throw httpError(400, 'That photo belongs to a different asset');
+  }
+  db.prepare('UPDATE assets SET cover_photo_id = ? WHERE id = ?').run(photoId, asset.id);
   res.json({ ok: true });
 });
 app.use('/uploads', (req, res, next) => (currentUser(req) ? next() : res.status(401).end()),
@@ -529,6 +543,10 @@ app.post('/api/requests', auth, (req, res) => {
   if (!category && !message) throw httpError(400, 'Tell IT what you need');
   const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.id;
   const assetId = num(req.body.asset_id);
+  if (!Number.isInteger(forUser) || forUser < 1) throw httpError(400, 'Choose a valid person for this request');
+  if (assetId !== null && (!Number.isInteger(assetId) || assetId < 1)) throw httpError(400, 'Choose a valid asset');
+  if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(forUser)) throw httpError(404, 'User not found');
+  if (assetId !== null && !getAsset(assetId)) throw httpError(404, 'Asset not found');
   const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by) VALUES ('equipment', ?, ?, ?, ?, ?, ?)")
     .run(forUser, assetId, category, message, clean(req.body.needed_by), req.user.id);
   const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
@@ -546,7 +564,9 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
   if (r.type !== 'equipment' || !['open', 'approved'].includes(r.status)) throw httpError(400, 'This request is not open');
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id);
   let asset = null;
-  const assetId = num(req.body.asset_id) || null;
+  const rawAssetId = num(req.body.asset_id);
+  if (rawAssetId !== null && (!Number.isInteger(rawAssetId) || rawAssetId < 0)) throw httpError(400, 'Choose a valid asset');
+  const assetId = rawAssetId || null;
   if (assetId) {
     asset = getAsset(assetId);
     if (!asset) throw httpError(404, 'Asset not found');

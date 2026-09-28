@@ -155,7 +155,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
 ### 3.8 Self-checkout (Phase 1B)
 
 - **Current:** `self_checkout` default `'1'` (**ON**) at `src/db.js:140` via `INSERT OR IGNORE`. Code paths: `POST /api/assets/:id/checkout` non-admin branch (`src/server.js:415`), `notify.selfCheckoutToAdmins` (`:157`, `mailer.js:91`), `PUT /api/settings` (`:655`), front-end action gating (`public/app.js:528`) and the Settings checkbox (`:1031`); tests at `test/assets.test.js:105-113`.
-- **Approved:** default for **NEW databases becomes OFF**. **Existing databases/settings must not be silently overwritten** by startup (`INSERT OR IGNORE` already preserves stored values). *Planned in 1B; not changed in Phase 1A.* Test fixtures that assume the ON default must set it explicitly.
+- **Approved:** default for **NEW databases becomes OFF**. **Existing databases/settings must not be silently overwritten** by startup (`INSERT OR IGNORE` already preserves stored values). *Implemented in Phase 1B (2026-09-28): new databases default OFF; existing values are preserved.* Test fixtures that assume the ON default must set it explicitly.
 
 ### 3.9 Categories / locations
 
@@ -198,7 +198,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
 
 Ordered to minimize schema churn: cheap fixes and the migration runner first, then lifecycle, then the identity split, then history hardening built on the split, then identifiers, then requests. Each slice is independently reviewable/mergeable into `stage`. If a sub-slice proves necessary, it is reported before scope expands. **All Planned — none started.**
 
-### Phase 1B — Migration Foundation + Immediate Integrity Fixes
+### Phase 1B — Migration Foundation + Immediate Integrity Fixes — **IMPLEMENTED** (see PROJECT_STATUS.md; category/location length limits and list-membership validation deferred)
 - **Goal:** migration runner; cover-photo ownership validation (F2, incl. repairing bad rows); invalid request `asset_id`/`user_id` → proper 4xx not 500 (F8); self-checkout default OFF for new DBs; small category/location input validation if it fits cleanly.
 - **Affects:** `src/db.js` (runner, default), `PUT /assets/:id/cover`, `POST /requests`, asset create/update/import validation, tests/seed that assume self-checkout ON.
 - **User-visible:** foreign/missing cover photo is rejected; clear errors on bad request input; new installs start with self-checkout off.
@@ -225,6 +225,7 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **User-visible:** none directly; richer activity entries.
 - **Tests:** asset with history can't be hard-deleted at DB level; same employee can't hold an asset twice; capacity 1 vs multi-seat enforced in-transaction; every audited action writes a row with actor snapshot and employee subject.
 - **Risk:** medium-high (table rebuilds). Depends on 1D.
+- **Runner prerequisite (deferred from 1B):** SQLite cannot toggle `PRAGMA foreign_keys` inside a transaction, so the migration runner needs an option to disable FKs around a table-rebuild migration, run `PRAGMA foreign_key_check`, then re-enable. Solve as part of this slice.
 
 ### Phase 1F — Serial Normalization + Lookup Ambiguity
 - **Goal:** duplicate-serial report first; normalized serial + placeholder handling; duplicate warning with explicit admin override; ambiguous scanner/API response; tag↔serial cross-collision handling.
