@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "test": "node --test test/"
+    "test": "node --test test/",
+    "seed:dev": "node scripts/seed-dev.js"
   },
   "license": "UNLICENSED",
   "dependencies": {
