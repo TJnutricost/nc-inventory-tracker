@@ -29,11 +29,12 @@ The system is intended to allow an equipment manager or administrator to:
   - Condition
   - Location
   - Notes
-- Scan asset barcodes using:
-  - Mobile device camera
-  - USB barcode scanner
-  - Bluetooth barcode scanner
-  - Manual entry
+- Scan asset barcodes using (scanner strategy, revised 2026-09-28 — see Section 16 for QA status of each):
+  - **Desktop USB barcode scanner** (keyboard-wedge) — implemented, software/desktop behavior verified in Phase 0D.
+  - **Desktop Bluetooth barcode scanner** (keyboard-wedge) — implemented, same as above; physical-hardware QA still pending (Phase 0D, future QA).
+  - **Manual entry** (typed tag/serial) — implemented and verified.
+  - **Native phone-camera scanner** — implemented in the current admin app (`html5-qrcode`); real-device QA pending a secure HTTPS-accessible environment (Section 14a).
+  - **Paired phone scanner (future concept)** — a phone acts as a dedicated wireless scanner input for a desktop/kiosk session (e.g. scanning on a paired phone feeds tag/serial values into an admin session running elsewhere), as a lower-friction alternative to a dedicated USB/Bluetooth scanner for staff without one. Not designed or implemented yet — noted here as a future direction alongside Employee Portal V1 (Section 8a), not committed scope.
 - Assign equipment to employees.
 - Check equipment back in.
 - Maintain assignment and activity history.
@@ -41,16 +42,16 @@ The system is intended to allow an equipment manager or administrator to:
 - Import and export inventory data.
 - Eventually perform physical inventory audits/cycle counts.
 
-The intended production architecture is currently:
+The intended production architecture is currently **Railway-first and provider-neutral where possible** (revised 2026-09-28 — see Section 19 Decisions Log; Supabase is no longer assumed):
 
-**Browser / PWA → Railway-hosted application → Supabase**
+**Browser / PWA → Railway-hosted application → managed PostgreSQL → object storage**
 
-Supabase is expected to provide:
-
-- PostgreSQL database
-- Asset photo storage
-- Authentication
-- Authorization / Row Level Security where appropriate
+- **Application hosting:** Railway.
+- **Database:** a managed PostgreSQL instance. **Railway PostgreSQL is the current preferred host**, but the data layer/migration work (Phase 2) is being described and built provider-neutrally, not tied to a specific vendor's client SDK or proprietary features.
+- **Object/photo storage:** an S3-compatible object storage service. **Railway object storage (or another S3-compatible provider) is the current preferred direction**, described provider-neutrally for the same reason.
+- **Authentication:** provider **TBD** (see Section 14 — Phase 4). Not assumed to be any specific vendor's auth product.
+- **Authorization:** application/backend-enforced, independent of hosting provider or hostname (see Section 8a for the admin-vs-employee access model this applies to).
+- Admin and employee portals (Section 8a) share this same backend, database, and authentication system — there is no separate stack per portal.
 
 ---
 
@@ -157,17 +158,19 @@ The audited source currently uses approximately:
 
 ## Proposed Production Stack
 
+**Revised 2026-09-28 — Railway-first, provider-neutral; Supabase is no longer assumed. See Section 19 Decisions Log for why.**
+
 ### Application
 Railway
 
 ### Database
-Supabase PostgreSQL
+Managed PostgreSQL, described and built provider-neutrally. **Railway PostgreSQL is the current preferred host.**
 
 ### File Storage
-Supabase Storage
+S3-compatible object storage, described provider-neutrally. **Railway object storage (or another S3-compatible provider) is the current preferred direction.**
 
 ### Authentication
-Supabase Auth
+**TBD.** No specific provider is assumed. Will be decided during Phase 4 (Section 14).
 
 ### Email
 TBD
@@ -177,6 +180,15 @@ Potential options:
 - Resend
 - Postmark
 - Existing SMTP if Railway plan/environment supports it
+
+### Backup / Restore
+
+PostgreSQL backup/restore is a hard requirement of the production data layer, independent of final host choice:
+
+- Automated, regular backups of the production PostgreSQL database are required before any real inventory data is migrated in.
+- A documented, tested restore procedure is required — an untested backup does not satisfy this requirement.
+- Backup/restore approach should not depend on Supabase-specific tooling; it must work against whatever managed PostgreSQL host is chosen (Railway PostgreSQL currently preferred).
+- This formalizes and supersedes the general "Database backup strategy" bullet already tracked in Section 17 (Phase 7 — Production Readiness).
 
 ---
 
@@ -262,7 +274,7 @@ Real-device verification is still required.
 - [x] Invite flow
 - [x] Password reset
 
-Current implementation uses custom authentication rather than Supabase Auth.
+Current implementation uses custom (bcrypt + session) authentication rather than the eventual shared authentication provider, which is currently TBD (see Section 14).
 
 ### Other Features
 
@@ -282,11 +294,11 @@ Current implementation uses custom authentication rather than Supabase Auth.
 
 ## Infrastructure
 
-- [ ] Supabase project connected
+- [ ] Managed PostgreSQL project connected (Railway PostgreSQL preferred)
 - [ ] PostgreSQL schema created
 - [ ] SQLite → PostgreSQL migration completed
-- [ ] Supabase Storage integrated
-- [ ] Supabase Auth integrated
+- [ ] Object storage integrated (Railway/S3-compatible preferred)
+- [ ] Authentication provider integrated (provider TBD — see Section 14)
 - [ ] Railway deployment configured
 - [ ] Railway health endpoint implemented
 - [ ] Production environment variables documented
@@ -475,13 +487,13 @@ This should be treated as a separate feature milestone after the core asset-mana
 
 **Status:** Newly agreed direction, 2026-09-28. Not implemented. No employee UI, auth, schema, or directory changes have been made — this section is planning/documentation only.
 
-To be scheduled as planned future work **after** the shared Supabase database/auth/backend foundation (Phases 2–4) is established — not the next phase after Phase 0/1.
+To be scheduled as planned future work **after** the shared database/auth/backend foundation (Phases 2–4) is established — not the next phase after Phase 0/1. (Note 2026-09-28: that foundation is now Railway-first and provider-neutral, not assumed to be Supabase — see Section 19 Decisions Log.)
 
 ## Domain / Application Split
 
 - `admin.<domain>` — hosts the IT/admin inventory-management application currently being built.
 - `<domain>` (root/apex) — will host a separate, employee-facing web experience (Employee Portal).
-- Both applications share the **same** backend, Supabase project, database, authentication system, and inventory data. There is no separate inventory database for the employee app.
+- Both applications share the **same** backend, database, authentication system, and inventory data, whichever hosting/provider choices are ultimately made. There is no separate inventory database for the employee app.
 - Exact production domain is still TBD (tracked in Section 20, Open Decisions).
 
 ## Employee Portal V1 — Planned Functionality
@@ -503,7 +515,7 @@ This formalizes, and is the authoritative source for, the direction noted inform
 
 - An employee/person record **must** be independent from an application login account.
 - IT must be able to create and assign equipment to an employee who has never logged into the system.
-- A Supabase Auth user **may optionally** link to an employee record.
+- A user of the eventual shared authentication provider (TBD) **may optionally** link to an employee record.
 - A verified employee login should link to the existing employee record rather than create a duplicate employee record.
 - Admin users may also be linked to employee records (an admin is not architecturally distinct from "a person," just a role/permission).
 
@@ -571,7 +583,7 @@ Preferred future behavior:
 - The employee portal may persist the authenticated session on the user's device/browser so the user can stay signed in, per the eventual product/session preference.
 - Persistent login must still require a valid authenticated session — cached/local browser state is **never**, by itself, proof of authorization.
 - Avoid designing broad offline caching of sensitive inventory data; session persistence and data caching are separate concerns and should not be conflated.
-- Exact session duration, refresh behavior, and "remember me" UX will be finalized during the Supabase Auth phase (Phase 4) — not decided here.
+- Exact session duration, refresh behavior, and "remember me" UX will be finalized during the authentication phase (Phase 4), once a provider is chosen — not decided here.
 
 ## Admin Portal Rule (reinforced, 2026-09-28)
 
@@ -581,12 +593,12 @@ Preferred future behavior:
 
 ## Auth Direction
 
-- Planned shared authentication provider: **Supabase Auth**.
-- Google authentication is expected to be the primary employee login method.
+- Planned shared authentication provider: **TBD** (revised 2026-09-28 — previously assumed to be Supabase Auth; no specific provider is assumed now, see Section 19 Decisions Log). Whatever provider is chosen will serve both the admin and employee portals.
+- Google authentication is expected to be the primary employee login method, regardless of which provider is ultimately chosen.
 - Email magic-link/passwordless login is expected as a fallback.
 - Public/open employee self-registration should **not** be assumed.
 - Preferred direction: **pre-provisioned** employees/accounts — only approved/known employees should gain employee-portal access.
-- Exact onboarding/linking behavior (how a Supabase Auth user gets matched to an existing employee record) will be finalized during the authentication/data-model phases (Phase 1 and Phase 4), not here.
+- Exact onboarding/linking behavior (how an authenticated user gets matched to an existing employee record) will be finalized during the authentication/data-model phases (Phase 1 and Phase 4), not here.
 
 ## Repository Direction (future option, not current implementation)
 
@@ -596,13 +608,13 @@ Preferred future behavior:
 
 ## Roadmap Placement
 
-Employee Portal V1 is planned future work, sequenced **after** the shared database/auth/backend foundation is established (i.e., after Phase 2 — Supabase PostgreSQL, Phase 3 — Supabase Storage, and Phase 4 — Authentication in Section 10's roadmap). It is not scheduled ahead of, or in place of, any current Phase 0 work.
+Employee Portal V1 is planned future work, sequenced **after** the shared database/auth/backend foundation is established (i.e., after Phase 2 — Managed PostgreSQL Migration, Phase 3 — Object Storage Migration, and Phase 4 — Authentication in Section 10's roadmap). It is not scheduled ahead of, or in place of, any current Phase 0 work.
 
 ---
 
 # 9. Initial Dummy Data Plan
 
-Before Supabase migration, create a repeatable development dataset.
+Before the managed-PostgreSQL migration (Phase 2), create a repeatable development dataset.
 
 Target:
 
@@ -704,7 +716,7 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 Before moving production data to PostgreSQL:
 
 - [ ] Define employee/person model — *must be independent of login account; see Section 8a*
-- [ ] Define login/profile model — *Supabase Auth user optionally links to an employee record; see Section 8a*
+- [ ] Define login/profile model — *a user of the eventual shared auth provider (TBD) optionally links to an employee record; see Section 8a*
 - [ ] Define asset identifier model
 - [ ] Resolve serial duplicate behavior
 - [ ] Replace destructive asset deletion
@@ -718,11 +730,13 @@ Before moving production data to PostgreSQL:
 
 ---
 
-# 12. Phase 2 — Supabase PostgreSQL
+# 12. Phase 2 — Managed PostgreSQL Migration
+
+*(Renamed 2026-09-28, was "Phase 2 — Supabase PostgreSQL" — see Section 19 Decisions Log. Railway PostgreSQL is the current preferred host; tasks below are written provider-neutrally so they hold regardless of final host.)*
 
 **Status:** Not Started
 
-- [ ] Create Supabase DEV project
+- [ ] Create a DEV PostgreSQL instance (Railway PostgreSQL preferred)
 - [ ] Establish migration workflow
 - [ ] Convert SQLite schema to PostgreSQL
 - [ ] Add constraints
@@ -732,16 +746,19 @@ Before moving production data to PostgreSQL:
 - [ ] Add seed data
 - [ ] Replace `better-sqlite3` data access
 - [ ] Preserve existing frontend/API behavior
-- [ ] Run Supabase database advisors
+- [ ] Run available database advisors/linters for the chosen host
 - [ ] Verify database migration
+- [ ] Establish and test backup/restore procedure (see Section 4 "Backup / Restore")
 
 ---
 
-# 13. Phase 3 — Supabase Storage
+# 13. Phase 3 — Object Storage Migration
+
+*(Renamed 2026-09-28, was "Phase 3 — Supabase Storage" — see Section 19 Decisions Log. Railway object storage, or another S3-compatible provider, is the current preferred direction; tasks below are written provider-neutrally.)*
 
 **Status:** Not Started
 
-- [ ] Create private asset-photo bucket
+- [ ] Create a private asset-photo bucket (S3-compatible object storage)
 - [ ] Define file naming strategy
 - [ ] Define access policies
 - [ ] Replace local filesystem upload storage
@@ -758,7 +775,7 @@ Before moving production data to PostgreSQL:
 
 Preferred direction:
 
-Supabase Auth.
+**TBD.** No specific authentication provider is assumed as of 2026-09-28 (previously Supabase Auth — see Section 19 Decisions Log for why that assumption was dropped). The admin and employee portals (Section 8a) will share one authentication system, whatever it turns out to be.
 
 Tasks:
 
@@ -775,13 +792,39 @@ Tasks:
 
 ---
 
+# 14a. External Dependency: Railway Access
+
+**Status:** Recorded 2026-09-28. External dependency / staging blocker — not a blocker on current development.
+
+- The project team does not currently have Railway account/project access.
+- An administrator is setting up Railway access.
+- There is currently no confirmed completion date.
+
+**NOT blocked by this:**
+- Phase 1 — Data Model Hardening
+- Provider-neutral architecture work
+- Local PostgreSQL migration/development
+- Automated testing
+
+**Blocked by this (deferred until Railway access exists):**
+- Creating Railway services
+- Railway PostgreSQL provisioning
+- Railway object-storage provisioning
+- Railway staging deployment
+- Production/staging domain and HTTPS verification
+- Real phone-camera scanner QA that requires an HTTPS-accessible environment (see Section 10, Phase 0D — this is the same HTTPS dependency noted there)
+
+No Railway resources were created and no workaround was attempted for the missing access.
+
+---
+
 # 15. Phase 5 — Railway Staging
 
-**Status:** Not Started
+**Status:** Not Started — additionally blocked on Railway account/project access not yet being available to the team (see Section 14a). No confirmed completion date for that access as of 2026-09-28.
 
 - [ ] Create Railway service
 - [ ] Configure environment variables
-- [ ] Configure Supabase connection
+- [ ] Configure database connection (to whichever managed PostgreSQL host is chosen — Railway PostgreSQL preferred)
 - [ ] Add `/health` endpoint
 - [ ] Configure deployment health check
 - [ ] Configure domain/HTTPS
@@ -999,7 +1042,7 @@ Then:
 
 **Bluetooth scanner:** **NOT TESTED — hardware unavailable at current location.** Per the project owner: the company owns Bluetooth keyboard-wedge scanners, but none are on hand at this campus. Not a failure or blocker — carried forward as future QA when the hardware is accessible.
 
-**Phone camera:** **BLOCKED — environment requirement.** Precheck found no existing safe HTTPS-accessible path to the app: `docker-compose.yml` only exposes plain HTTP on port 3000, and no reverse proxy, mkcert, or tunnel tooling is installed/configured. Per scope restrictions, no tunnel was created and Railway was not deployed. This blocks only the phone-camera leg; it is being carried forward as an explicit staging/Railway-phase prerequisite, not treated as a failure. See Section 8 exit-status note below.
+**Phone camera:** **BLOCKED — environment requirement.** Precheck found no existing safe HTTPS-accessible path to the app: `docker-compose.yml` only exposes plain HTTP on port 3000, and no reverse proxy, mkcert, or tunnel tooling is installed/configured. Per scope restrictions, no tunnel was created and Railway was not deployed. This blocks only the phone-camera leg; it is being carried forward as an explicit staging/Railway-phase prerequisite, not treated as a failure. See Section 8 exit-status note below, and Section 14a for the underlying Railway-access dependency.
 
 **Software-level scanner-lookup verification (no physical hardware required — the same backend lookup path and, for manual entry, the exact same UI the wedge-scanner code path uses):**
 - **Manual/wedge-equivalent entry — PASS.** On the real Scan page, the "type it" input is confirmed auto-focused (matches the README's claim about wedge scanners). Typed `NC-00001` + `Enter` (the literal keystroke sequence a wedge scanner sends) correctly navigated to the Dell Latitude 5440 detail page, showing status "Checked out" and holder "Indigo Ibarra" — exactly matching the recorded state above.
@@ -1035,6 +1078,8 @@ The existing source already contains most MVP workflows.
 
 ## 2026-09-28 — Preferred Production Architecture
 
+**⚠ SUPERSEDED later the same day — see "2026-09-28 — Railway-First, Provider-Neutral Architecture" below. Kept here for history, not current direction.**
+
 Direction:
 
 **Railway + Supabase**
@@ -1050,6 +1095,27 @@ Railway intended for:
 - Node/Express application hosting
 
 Final implementation details remain subject to testing.
+
+---
+
+## 2026-09-28 — Railway-First, Provider-Neutral Architecture
+
+Decision:
+
+Supersede the earlier same-day "Railway + Supabase" direction above. Supabase is no longer assumed as the database, storage, or authentication provider.
+
+New direction:
+
+- **Application hosting:** Railway (unchanged).
+- **Database:** managed PostgreSQL, described and built provider-neutrally. **Railway PostgreSQL is the current preferred host.**
+- **Object/photo storage:** S3-compatible object storage, described provider-neutrally. **Railway object storage (or another S3-compatible provider) is the current preferred direction.**
+- **Authentication:** **TBD** — no specific provider assumed. Will be decided during Phase 4.
+- Admin and employee portals (Section 8a) share one backend, one database, and one authentication system, independent of which specific vendor is chosen for each.
+- Roadmap phases renamed accordingly: "Phase 2 — Supabase PostgreSQL" → "Phase 2 — Managed PostgreSQL Migration"; "Phase 3 — Supabase Storage" → "Phase 3 — Object Storage Migration" (Section 10).
+
+Reason:
+
+Avoid hard-locking the data layer and auth system to one vendor's proprietary client/SDK before the team has confirmed Railway account access (see Section 14a) or made a deliberate auth-provider choice. Provider-neutral design keeps local development, automated testing, and Phase 1 data-model work fully unblocked regardless of when external infrastructure access lands.
 
 ---
 
@@ -1087,10 +1153,24 @@ Multiple contributors/agents (Claude Code, Codex) working in parallel need a sha
 
 ---
 
+## 2026-09-28 — Scanner Strategy, Including a Future Paired-Phone Concept
+
+Decision:
+
+Formalize the current scanner strategy as four input methods — desktop USB barcode scanner, desktop Bluetooth barcode scanner, manual entry, and native phone-camera scanning — all already implemented, feeding the same backend lookup path. Additionally, record a **future** concept: a **paired phone scanner**, where a phone acts as a dedicated wireless scanner input for a desktop/kiosk session, as a lower-friction alternative to owning a dedicated USB/Bluetooth scanner.
+
+Reason:
+
+Staff without a dedicated barcode scanner still need a fast, low-friction way to scan equipment; a paired-phone input could serve that need without requiring native phone-camera scanning during every session. Not designed or scoped yet — recorded here as a direction to revisit, not committed work (see Section 1 for where this sits alongside the four implemented methods).
+
+---
+
 # 20. Open Decisions
 
 - [x] Repository branching strategy — *resolved 2026-09-28: `stage` (integration/default) → `main` (release), see Section 3a.*
-- [ ] Supabase organization/project naming
+- [ ] Final managed-PostgreSQL host / project naming — *Railway PostgreSQL currently preferred (revised 2026-09-28, was "Supabase organization/project naming"); see Section 19.*
+- [ ] Final object storage provider — *Railway/S3-compatible currently preferred; see Section 19.*
+- [ ] Final authentication provider — *TBD, revised 2026-09-28 (was assumed to be Supabase Auth); see Section 14 and Section 19.*
 - [ ] Employee vs login-account schema
 - [ ] Asset identifier schema
 - [ ] Asset-tag numbering convention
@@ -1101,6 +1181,7 @@ Multiple contributors/agents (Claude Code, Codex) working in parallel need a sha
 - [ ] Barcode label dimensions/printer
 - [ ] Whether QR codes are needed in addition to Code 128
 - [ ] Inventory/cycle-count V1 scope
+- [ ] Paired-phone-scanner concept — design/scope not started; see Section 19.
 
 ---
 
@@ -1113,14 +1194,15 @@ Multiple contributors/agents (Claude Code, Codex) working in parallel need a sha
 - Existing feature inventory completed
 - Scanner implementation inspected
 - Initial production risks identified
-- Railway + Supabase architecture direction selected
+- Production architecture direction selected: Railway-first, provider-neutral for database/storage, authentication TBD (initially "Railway + Supabase," revised same day 2026-09-28 — see Section 19 Decisions Log)
 - Development workflow established
 - Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`, merged into `main` via reviewed PR)
 - Phase 0A — Local Baseline verification (clean install, fresh-DB boot, runtime smoke check, asset CRUD, scanner surface check — see Section 10 log; 2026-09-28)
 - Phase 0B — Deterministic Development Seed (`npm run seed:dev`; 9 users, 48 assets, full history/requests coverage; 6 new automated tests; merged into `main` via PR #1; 2026-09-28)
 - Git branch strategy established: `stage` (shared integration, GitHub default branch) → `main` (stable/release) — see Section 3a; `stage` created and pushed, GitHub default branch changed via `gh repo edit`, 2026-09-28
 - Phase 0C — Golden Workflow Automation (`test/golden-workflow.test.js`; full lookup → assign → re-lookup → check-in → re-lookup lifecycle + historical-integrity assertions + 3 guard cases; 55/55 suite passing — see Section 10 log; 2026-09-28, merged into `stage`)
-- Phase 0D — Physical Scanner QA, software/desktop baseline (label generation verified visually in a real browser; manual/wedge-equivalent entry, unknown-barcode handling, and rapid-repeat lookup safety all verified against the seeded dataset — see Section 10 log; 2026-09-28, on `chore/phase-0d-physical-scanner-qa`, branched from `stage`)
+- Phase 0D — Physical Scanner QA, software/desktop baseline (label generation verified visually in a real browser; manual/wedge-equivalent entry, unknown-barcode handling, and rapid-repeat lookup safety all verified against the seeded dataset — see Section 10 log; 2026-09-28, merged into `stage`)
+- Infrastructure architecture revised to Railway-first / provider-neutral: PostgreSQL and object storage no longer assume Supabase (Railway currently preferred for both), authentication provider set to TBD, roadmap Phases 2–3 renamed accordingly, Railway-access external dependency recorded (Section 14a), scanner strategy formalized including a future paired-phone-scanner concept, and PostgreSQL backup/restore made an explicit requirement — see Section 19 Decisions Log; 2026-09-28, on `docs/railway-first-architecture`, branched from `stage`
 
 ### In Progress
 
