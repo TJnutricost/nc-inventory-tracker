@@ -520,7 +520,7 @@ All dummy email addresses should use safe non-deliverable/test domains such as `
 
 ## Phase 0 — Baseline & Test Harness
 
-**Status:** NEXT
+**Status:** IN PROGRESS — Phase 0A (local baseline verification) completed 2026-09-28 by Claude Code. Golden path below has not yet been walked end-to-end against a live server; that + Phase 0B/0C/0D remain open.
 
 Goal:
 
@@ -528,20 +528,20 @@ Prove the current application works before replacing infrastructure.
 
 ### Tasks
 
-- [ ] Confirm project runs locally from a clean checkout
-- [ ] Confirm Node/package versions
-- [ ] Confirm dependency installation
-- [ ] Confirm database initialization
-- [ ] Document local startup procedure
-- [ ] Create deterministic dummy-data seed
-- [ ] Create test users/employees
-- [ ] Create test assets
+- [x] Confirm project runs locally from a clean checkout — *verified 2026-09-28: `npm ci` clean install + `node src/server.js` booted with no errors.*
+- [x] Confirm Node/package versions — *Node v26.8.2, npm 11.19.1 (package.json requires Node >=20.12 — satisfied).*
+- [x] Confirm dependency installation — *`npm ci` succeeded, 96 packages, `package-lock.json` unchanged.*
+- [x] Confirm database initialization — *fresh SQLite DB auto-created 11 tables on first boot (see Section 21 verification log).*
+- [x] Document local startup procedure — *README Quick Start verified accurate against actual behavior; no changes needed.*
+- [ ] Create deterministic dummy-data seed — *not done; still ephemeral only (see Phase 0B).*
+- [ ] Create test users/employees — *not done as persistent local dev data; a temporary admin/asset were created and torn down against an isolated throwaway DB during verification only.*
+- [ ] Create test assets — *same as above.*
 - [x] Add minimal automated smoke tests — *already present (45 tests in `test/`); see correction in Section 6.*
-- [ ] Verify current scanner workflow
-- [ ] Verify assignment workflow
-- [ ] Verify check-in workflow
-- [ ] Verify asset photos
-- [ ] Verify CSV import/export
+- [ ] Verify current scanner workflow — *surface-level only so far (scanner page, JS libraries, manual input, lookup endpoint — see Section 21). Physical device / full scan-to-checkout flow not yet verified.*
+- [ ] Verify assignment workflow — *covered by the automated suite; not yet manually exercised against a live server.*
+- [ ] Verify check-in workflow — *covered by the automated suite; not yet manually exercised against a live server.*
+- [ ] Verify asset photos — *not exercised this slice.*
+- [ ] Verify CSV import/export — *covered by the automated suite; not yet manually exercised against a live server.*
 
 ### Golden Path
 
@@ -720,24 +720,78 @@ Test using actual hardware.
 
 ### Phase 0A — Local Baseline
 
+**Status:** COMPLETE (verification-only scope) — 2026-09-28, Claude Code.
+
 Goal:
 
 Establish a repeatable, verified local version of the existing application without changing architecture.
 
 Expected work:
 
-1. Inspect repository state.
-2. Confirm startup instructions.
-3. Install dependencies.
-4. Launch application.
-5. Initialize SQLite database.
-6. Document current database tables.
-7. Confirm administrator login.
-8. Confirm asset list loads.
-9. Confirm scanner page loads.
-10. Confirm asset CRUD works.
-11. Record any runtime errors.
-12. Do not migrate to Supabase yet.
+1. [x] Inspect repository state.
+2. [x] Confirm startup instructions.
+3. [x] Install dependencies.
+4. [x] Launch application.
+5. [x] Initialize SQLite database.
+6. [x] Document current database tables.
+7. [x] Confirm administrator login.
+8. [x] Confirm asset list loads.
+9. [x] Confirm scanner page loads.
+10. [x] Confirm asset CRUD works.
+11. [x] Record any runtime errors. — *none found.*
+12. [x] Do not migrate to Supabase yet. — *not touched.*
+
+### Phase 0A Verification Log (2026-09-28, Claude Code)
+
+All verification was run against an isolated `DATA_DIR` (a scratch temp directory) and port 3179, so the real local `data/` directory was never touched — confirmed by unchanged file timestamps on `data/assets.db` and `data/.session-secret` before/after. A pre-existing developer instance of the app was already running locally (`node src/server.js`, PID 27573, started 08:53 that day) throughout this work and was left untouched.
+
+**Environment**
+- Node v26.8.2, npm 11.19.1 (engines requires Node >=20.12 — satisfied)
+- Install: `npm ci` (lockfile-backed clean install) — 96 packages, 0 vulnerabilities, `package-lock.json` unchanged (verified by checksum before/after)
+- Note: npm printed `install-scripts` warning that `better-sqlite3`'s `node-gyp rebuild` postinstall script was not run under this npm's script-allow policy. Not a blocker — the package ships prebuilt native binaries (`prebuilds/darwin-arm64.node`, etc.) and both the fresh boot and the full test suite worked correctly against it.
+- Start command: `node src/server.js` (or `npm start`); dev watch mode: `npm --watch`
+- Default port: 3000 (`PORT` env var)
+- Required env vars: none strictly required to boot — `SESSION_SECRET` self-generates and persists to `<DATA_DIR>/.session-secret` if unset; `APP_URL` defaults are not set (affects secure-cookie flag and email links); SMTP vars are optional (mail falls back to the in-app Outbox when unset, confirmed working)
+- SQLite DB path: `<DATA_DIR>/assets.db` (default `DATA_DIR` = `./data`)
+- Upload/photo path: `<DATA_DIR>/uploads`
+
+**Automated test baseline**
+- Command: `npm test` (`node --test test/`)
+- Test files: 5 (`assets`, `auth`, `import-export`, `requests`, `settings-and-dashboard`)
+- Tests: 45 run, 45 passed, 0 failed, 0 warnings — matches the prior audit's expected baseline, reconfirmed after the clean `npm ci` install.
+
+**Fresh database boot**
+- Server started cleanly with no errors or warnings against an empty `DATA_DIR`.
+- Tables auto-created on first boot: `activity, assets, assignments, outbox, photos, requests, sessions, settings, sqlite_sequence, tokens, users` (matches schema in `src/db.js`).
+
+**Runtime smoke check (manual, via HTTP against the isolated instance)**
+- `/api/setup-needed`, `/api/setup` (create first admin), `/api/login`, `/api/me`, `/api/dashboard`, `/api/assets`, `/api/users`, `/api/requests`, `/api/next-tag` — all 200 after auth.
+- Note: non-GET requests require header `X-Requested-With: fetch` (a lightweight CSRF guard in `src/server.js`) or they return `403 Bad request origin` — this is intentional existing behavior, not a bug; documented here since it wasn't obvious from the README.
+- Static/SPA surfaces all 200: `/`, `/app.js`, `/app.css`, `/manifest.webmanifest`, `/sw.js`, `/icon-192.png`, `/logo.svg`, and the SPA catch-all route `/scan`.
+- Scanner vendor libraries served correctly: `/vendor/html5-qrcode.min.js`, `/vendor/JsBarcode.all.min.js` (200, `text/javascript`).
+
+**Basic asset runtime check (temporary data only, cleaned up)**
+- Create → `POST /api/assets` → 200, auto-assigned tag `NC-00001`.
+- Read → `GET /api/assets/:id` → 200, includes activity log entry for creation.
+- Update → `PUT /api/assets/:id` → 200.
+- Tag lookup → `GET /api/assets/lookup/NC-00001` → `{"found":true}`.
+- Serial lookup → `GET /api/assets/lookup/<serial>` → `{"found":true}`.
+- Cleanup → `DELETE /api/assets/:id` → 200; follow-up `GET` → 404 confirms removal.
+- All temporary records lived only in the isolated throwaway DB; nothing persisted to real dev data.
+
+**Scanner surface check (no physical device)**
+- Scanner page loads (SPA route `/scan` → 200).
+- `html5-qrcode` and `jsbarcode` libraries load successfully.
+- Manual/keyboard entry input exists in the UI (`#sc-manual` field in `public/app.js`, auto-focused so USB/Bluetooth "keyboard wedge" scanners work without a camera).
+- Barcode/tag lookup endpoint (`/api/assets/lookup/:code`) reachable and functioning.
+- Deferred to later scanner QA slice: physical camera behavior, real USB/Bluetooth hardware, print-label round-trip, low-light/glare/damaged-barcode cases.
+
+**Documentation**
+- README Quick Start (`npm install` → `cp .env.example .env` → `npm start` → `http://localhost:3000` → first-visit admin setup) matches actual verified behavior exactly. No README changes made.
+
+**Issues found**
+- Technical debt: `better-sqlite3` postinstall (`node-gyp rebuild`) is being skipped by npm's script-allow policy on this machine; currently harmless because prebuilt binaries are used, but worth a deliberate `npm install-scripts approve better-sqlite3` (or equivalent) decision before relying on this in CI/production images where the target platform might lack a matching prebuild.
+- No blockers. No bugs found in this slice beyond the previously-logged known issues (Section 7), which were not re-tested here.
 
 After this passes, proceed to:
 
@@ -837,14 +891,17 @@ First establish a known-good local baseline and verify the scanner/assignment li
 - Initial production risks identified
 - Railway + Supabase architecture direction selected
 - Development workflow established
+- Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`)
+- Phase 0A — Local Baseline verification (clean install, fresh-DB boot, runtime smoke check, asset CRUD, scanner surface check — see Section 10 log; 2026-09-28)
 
 ### In Progress
 
-- Project tracking setup
+- Phase 0 golden path (scan → assign → check-in) not yet walked end-to-end against a live server
+- Phase 0B — Deterministic Development Seed (not started)
 
 ### Next
 
-**Phase 0A — Local Baseline**
+**Phase 0B — Deterministic Development Seed**, then **Phase 0C — Core Workflow Smoke Tests**, then **Phase 0D — Physical Scanner Verification**
 
 ### Blocked
 
