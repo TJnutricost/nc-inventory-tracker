@@ -660,7 +660,7 @@ All dummy email addresses should use safe non-deliverable/test domains such as `
 
 ## Phase 0 — Baseline & Test Harness
 
-**Status:** IN PROGRESS — Phase 0A (local baseline), 0B (deterministic dev seed) and 0C (golden-workflow automation) complete, all 2026-09-28. Only physical scanner hardware (Phase 0D) and CSV import/export / photo verification remain open before Phase 0 can be called done.
+**Status:** IN PROGRESS — Phase 0A (local baseline), 0B (deterministic dev seed) and 0C (golden-workflow automation) complete; Phase 0D (physical scanner QA) partially complete — software/desktop scanner behavior verified, physical USB/Bluetooth/camera hardware verification still pending (not a failure, just not yet accessible), all 2026-09-28. CSV import/export and photo verification also remain open before Phase 0 can be called fully done.
 
 Goal:
 
@@ -980,6 +980,43 @@ Then:
 
 ### Phase 0D — Physical Scanner Verification
 
+**Status:** PARTIAL — software/desktop-scanner baseline verified 2026-09-28 by Claude Code; physical hardware scanning (USB, Bluetooth, phone camera) is NOT YET TESTED / BLOCKED, carried forward. Not merged/pushed; left on `chore/phase-0d-physical-scanner-qa` (branched from `stage`) for review.
+
+**Environment.** `npm test` baseline reconfirmed (55/55 passing) before any testing. `npm run seed:dev` reconfirmed the deterministic dataset (9 users, 48 assets, tags `NC-00001`–`NC-00048`). App started against `./data-dev` on an isolated port (3181); real `./data/assets.db` and `.session-secret` timestamps confirmed unchanged before and after this entire slice.
+
+**Known test assets selected** (state recorded 2026-09-28, before any test mutation):
+
+| Tag | Name | Status | Serial | Current holder |
+|---|---|---|---|---|
+| `NC-00001` | Dell Latitude 5440 | `checked_out` | `LAP-1000` | Indigo Ibarra |
+| `NC-00011` | Dell OptiPlex 7010 | `available` | `DES-1010` | — |
+| `NC-00035` | Apple iPad (9th gen) | `available` | `TAB-1034` | — |
+| `NC-00048` | Rode NT-USB Mic + Tripod Kit | `available` | `OTH-1047` | — |
+
+**Physical barcode.** Opened the app's real, unmodified label page (`#/labels?ids=1`, no new barcode-generation code) in an actual browser (Chrome via chrome-devtools MCP) and visually confirmed the rendered Code 128 label for `NC-00001`: barcode + displayed text "NC-00001" + "Dell Latitude 5440" + category "Laptop", all matching the seeded asset exactly. Label is real and print-ready (Avery 5160/8160 layout); it has not yet been physically printed, since no scanner hardware is currently available to scan a printout.
+
+**USB / keyboard-wedge scanner:** **NOT YET TESTED — hardware unavailable.** No USB scanner hardware was available this session.
+
+**Bluetooth scanner:** **NOT TESTED — hardware unavailable at current location.** Per the project owner: the company owns Bluetooth keyboard-wedge scanners, but none are on hand at this campus. Not a failure or blocker — carried forward as future QA when the hardware is accessible.
+
+**Phone camera:** **BLOCKED — environment requirement.** Precheck found no existing safe HTTPS-accessible path to the app: `docker-compose.yml` only exposes plain HTTP on port 3000, and no reverse proxy, mkcert, or tunnel tooling is installed/configured. Per scope restrictions, no tunnel was created and Railway was not deployed. This blocks only the phone-camera leg; it is being carried forward as an explicit staging/Railway-phase prerequisite, not treated as a failure. See Section 8 exit-status note below.
+
+**Software-level scanner-lookup verification (no physical hardware required — the same backend lookup path and, for manual entry, the exact same UI the wedge-scanner code path uses):**
+- **Manual/wedge-equivalent entry — PASS.** On the real Scan page, the "type it" input is confirmed auto-focused (matches the README's claim about wedge scanners). Typed `NC-00001` + `Enter` (the literal keystroke sequence a wedge scanner sends) correctly navigated to the Dell Latitude 5440 detail page, showing status "Checked out" and holder "Indigo Ibarra" — exactly matching the recorded state above.
+- **Unknown barcode — PASS.** Typed an unseeded code (`NC-99999-UNKNOWN`) + `Enter` on the Scan page: the app did not mismatch it to any existing asset, and correctly offered "Add a new asset with this tag." Dismissed via "Scan again" without creating a record — asset count confirmed unchanged (48 before and after).
+- **Rapid/repeated lookups — PASS.** Looked up `NC-00001` 10 times in quick succession via the same lookup endpoint the scanner uses. All 10 resolved correctly and identically; the asset's activity-log count (6) and the total asset count (48) were confirmed unchanged before vs. after — no duplicate records, assignments, or side effects from repeated lookups.
+- **Serial-number physical lookup:** deferred — there's currently no scanner hardware to scan a printed serial barcode with, so this was not attempted (per the brief's own guidance to skip/defer rather than add new barcode-generation code for it).
+
+**Bugs found:** none.
+
+**Issues:**
+- **Blocker:** none.
+- **Bug:** none.
+- **Technical debt:** none new.
+- **Future QA (explicitly carried forward, not failures):** physical printing of the `NC-00001` label and a real hardware scan of that printout; serial-number barcode physical lookup. Real-world scanner testing by the project owner is currently expected to be **phone-camera based**, once an HTTPS staging environment exists (blocked on that environment — revisit during the Railway/staging phase). USB/Bluetooth barcode-scanner hardware testing remains future QA **only if** that physical hardware becomes available (the company owns Bluetooth keyboard-wedge scanners, not on hand at this campus) — lack of that hardware is **not** treated as a blocker for Phase 0D or Phase 0.
+
+**Phase 0 exit status (2026-09-28):** the local baseline (0A), deterministic seed (0B), and golden workflow (0C) are all verified, and the software/desktop side of scanner behavior (manual entry, unknown-code handling, rapid-lookup safety, label generation) now passes as well. **Phase 0's software/desktop-scanner baseline is complete.** Phase 0 as a whole is **not yet fully closed**, because physical-device scanning — USB, Bluetooth, and phone camera — remains genuinely unverified on real hardware; USB/Bluetooth await hardware access, and phone camera additionally awaits a secure HTTPS-accessible environment. These are carried forward explicitly, not marked complete.
+
 ---
 
 # 19. Decisions Log
@@ -1082,16 +1119,17 @@ Multiple contributors/agents (Claude Code, Codex) working in parallel need a sha
 - Phase 0A — Local Baseline verification (clean install, fresh-DB boot, runtime smoke check, asset CRUD, scanner surface check — see Section 10 log; 2026-09-28)
 - Phase 0B — Deterministic Development Seed (`npm run seed:dev`; 9 users, 48 assets, full history/requests coverage; 6 new automated tests; merged into `main` via PR #1; 2026-09-28)
 - Git branch strategy established: `stage` (shared integration, GitHub default branch) → `main` (stable/release) — see Section 3a; `stage` created and pushed, GitHub default branch changed via `gh repo edit`, 2026-09-28
-- Phase 0C — Golden Workflow Automation (`test/golden-workflow.test.js`; full lookup → assign → re-lookup → check-in → re-lookup lifecycle + historical-integrity assertions + 3 guard cases; 55/55 suite passing — see Section 10 log; 2026-09-28, on `chore/phase-0c-golden-workflow`, branched from `stage`)
+- Phase 0C — Golden Workflow Automation (`test/golden-workflow.test.js`; full lookup → assign → re-lookup → check-in → re-lookup lifecycle + historical-integrity assertions + 3 guard cases; 55/55 suite passing — see Section 10 log; 2026-09-28, merged into `stage`)
+- Phase 0D — Physical Scanner QA, software/desktop baseline (label generation verified visually in a real browser; manual/wedge-equivalent entry, unknown-barcode handling, and rapid-repeat lookup safety all verified against the seeded dataset — see Section 10 log; 2026-09-28, on `chore/phase-0d-physical-scanner-qa`, branched from `stage`)
 
 ### In Progress
 
-- Phase 0 golden path — business-logic/API leg now fully proven by automated test (Phase 0C); the literal physical-device scan leg still needs Phase 0D
+- Phase 0 golden path — business-logic/API leg fully proven (Phase 0C); software/desktop scanner behavior verified (Phase 0D); the literal physical-hardware scan (USB, Bluetooth, camera) is what remains
 
 ### Next
 
-**Phase 0D — Physical Scanner Verification** (plus CSV import/export and photo-upload verification, still open from Phase 0's task list)
+Physical hardware scanner QA, when available: USB scanner, Bluetooth scanner (company hardware exists, not on hand at current campus), and phone camera (blocked on secure HTTPS access — revisit during Railway/staging). Also still open from Phase 0's task list: CSV import/export and photo-upload verification.
 
 ### Blocked
 
-None currently.
+- Phone-camera scanner QA — blocked on a secure HTTPS-accessible staging/dev environment (no tunnel was created, per scope restrictions). Not a Phase 0D failure; carried forward as a Railway/staging-phase prerequisite.
