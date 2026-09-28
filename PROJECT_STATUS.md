@@ -716,9 +716,30 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 
 # 11. Phase 1 — Data Model Hardening
 
-**Status:** Not Started
+**Status:** Phase 1A (audit + target design) complete and **approved** — 2026-09-28. Phase 1B–1G implementation **not started**; nothing below is implemented. Full detail: [`docs/DATA_MODEL_PHASE_1.md`](docs/DATA_MODEL_PHASE_1.md).
 
-Before moving production data to PostgreSQL:
+### Phase 1A — Audit & Design (2026-09-28, `feature/phase-1a-data-model-design`)
+
+**Design phase complete; target decisions APPROVED. Implementation: NOT STARTED (Phase 1B–1G are Planned).** Full detail: [`docs/DATA_MODEL_PHASE_1.md`](docs/DATA_MODEL_PHASE_1.md).
+
+**Confirmed findings** (reproduced with a throwaway probe unless noted): F1 asset delete cascade-erases assignments/activity/photos, even while checked out (critical); F2 cover photo accepts foreign/nonexistent photo ids; F3 serials non-unique and lookup first-match-wins, incl. tag/serial cross-collision; F4 `nextTag()` is max+1 so the top tag is reissued after removal and isn't atomic on PostgreSQL (*read + probe*); F5 DB allows multiple open assignments on a single-capacity asset; F7 requests lack an "opened by IT" state, employees can cancel through `approved` (*read*); F8 request asset/user ids unvalidated → 500 (*read*); F9 everything keys on `users.id` (*read*). No custom-barcode column exists; labels are Code 128 of the tag.
+
+**Approved Phase 1 target decisions** (all Planned / not implemented):
+
+- **Employees/accounts:** separate `employees` (person/assignee, may have no login) and `accounts` (login/authorization; optional unique link; at most one account per employee; admin may also be an employee). Roles `admin`/`employee` (legacy `user`→`employee`). Future verified login: normalize email (trim+lowercase), match only an existing employee work email, link by IDs thereafter, never auto-create employees; unmatched login is blocked ("contact IT"); no open registration. Auth provider remains TBD.
+- **Serials:** no hard global unique constraint. Keep raw value, match on normalized (trim, case-insensitive), conservative placeholder set (empty, N/A, NA, NONE, UNKNOWN, NO SERIAL, NOT AVAILABLE, `-`) treated as missing. Duplicates warn and need explicit admin override; duplicate-serial report on real data first. Lookup **never** silently picks the first match — any value resolving to multiple distinct assets (incl. tag/serial collisions) returns an ambiguity result. Tag is canonical.
+- **Identifiers:** no barcode column, no `asset_identifiers` table; scanner types are input methods, not identifiers; Code 128 keeps encoding the tag.
+- **Lifecycle:** add `disposed` and `archived_at`; Delete→Archive; history retained; no UI purge; mistaken assets archived with reason in activity. `lost` may stay assigned; retired/disposed/archive require assignments resolved.
+- **Tags:** monotonic, never reused (archiving the top asset doesn't lower the sequence); prefix change affects only future tags and doesn't reset the number (`NC-00048` → `IT-00049`); existing tags immutable; SQLite durable high-water counter now, PostgreSQL-safe sequence/counter in Phase 2 (none built in Phase 1).
+- **Assignments:** unique active `(asset_id, employee_id)`; `seat_capacity` enforced inside the check-out transaction with asset-row locking; no global `UNIQUE(asset_id)` (multi-seat licenses); assignee = employee, actor = account.
+- **Requests:** `submitted`, `in_review`, `approved`, `denied`, `fulfilled`, `rescinded`, `cancelled`; employee may rescind only from `submitted` (a transition, never a delete); IT's explicit open action sets `opened_at` and ends rescind; open-vs-rescind must be atomic; no GET side effects.
+- **Self-checkout:** default becomes OFF for NEW databases (currently ON, `src/db.js:140`); existing settings not overwritten.
+- **Audit:** indefinite retention by default; single append-only activity table, no event sourcing; history FKs RESTRICT.
+- **Categories/locations:** stay free text; light server-side validation.
+
+**Remaining unresolved:** duplicate-serial report results; tag-correction workflow (deferred); session/`sessions` design (Phase 4); auth provider, unmatched-login experience and `issue` request scope (out of Phase 1); concrete production tag prefix/width.
+
+**Phase 1 sequence (all Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
 
 - [ ] Define employee/person model — *must be independent of login account; see Section 8a*
 - [ ] Define login/profile model — *a user of the eventual shared auth provider (TBD) optionally links to an employee record; see Section 8a*
@@ -1188,11 +1209,13 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 - [ ] Final managed-PostgreSQL host / project naming — *Railway PostgreSQL currently preferred (revised 2026-09-28, was "Supabase organization/project naming"); see Section 19.*
 - [ ] Final object storage provider — *Railway/S3-compatible currently preferred; see Section 19.*
 - [ ] Final authentication provider — *TBD, revised 2026-09-28 (was assumed to be Supabase Auth); see Section 14 and Section 19.*
-- [ ] Employee vs login-account schema
-- [ ] Asset identifier schema
-- [ ] Asset-tag numbering convention
-- [ ] Asset lifecycle statuses
-- [ ] Self-checkout behavior
+- [x] Employee vs login-account schema — *resolved (approved) 2026-09-28; implementation Planned in Phase 1D. See `docs/DATA_MODEL_PHASE_1.md` §3.1.*
+- [x] Asset identifier / serial policy — *resolved 2026-09-28: no identifier table or barcode column; normalized-serial warning + ambiguity handling, Phase 1F.*
+- [ ] Concrete production asset-tag prefix/width — *numbering rules approved (monotonic, never reused, prefix change doesn't reset); the production prefix value is a setting.*
+- [x] Asset lifecycle statuses — *resolved 2026-09-28: `disposed` + `archived_at`, Archive replaces Delete, Phase 1C.*
+- [x] Request status set / rescind rule — *resolved 2026-09-28, Phase 1G.*
+- [x] Self-checkout behavior — *resolved 2026-09-28: default OFF for new databases (Phase 1B); existing settings untouched.*
+- [ ] Duplicate-serial report against real data (before Phase 1F)
 - [ ] Email provider
 - [ ] Production domain — *revised 2026-09-28: parent domain, admin subdomain, and employee subdomain are each individually TBD; expected to be subdomains of an existing hosted parent domain rather than a new domain; DNS/CNAME/proxy/hosting details also TBD; see Section 8a.*
 - [ ] Barcode label dimensions/printer
@@ -1223,6 +1246,7 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ### In Progress
 
+- Phase 1A — Data Model Audit & Target Design: audit complete and target decisions approved on `feature/phase-1a-data-model-design` (documentation only); implementation not started; see Section 11 and `docs/DATA_MODEL_PHASE_1.md`
 - Phase 0 golden path — business-logic/API leg fully proven (Phase 0C); software/desktop scanner behavior verified (Phase 0D); the literal physical-hardware scan (USB, Bluetooth, camera) is what remains
 
 ### Next
