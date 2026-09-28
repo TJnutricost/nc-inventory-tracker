@@ -397,7 +397,7 @@ The cover-photo operation should verify that the selected photo belongs to the a
 
 ## Employee vs. Login Account
 
-**Status:** Architecture decision required.
+**Status:** Architecture decision required. Direction now formalized in Section 8a (Employee Portal V1) — this entry remains as the original audit note.
 
 Currently user/account concepts are closely tied to equipment assignment.
 
@@ -471,6 +471,135 @@ This should be treated as a separate feature milestone after the core asset-mana
 
 ---
 
+# 8a. Future Architecture: Employee Portal V1
+
+**Status:** Newly agreed direction, 2026-09-28. Not implemented. No employee UI, auth, schema, or directory changes have been made — this section is planning/documentation only.
+
+To be scheduled as planned future work **after** the shared Supabase database/auth/backend foundation (Phases 2–4) is established — not the next phase after Phase 0/1.
+
+## Domain / Application Split
+
+- `admin.<domain>` — hosts the IT/admin inventory-management application currently being built.
+- `<domain>` (root/apex) — will host a separate, employee-facing web experience (Employee Portal).
+- Both applications share the **same** backend, Supabase project, database, authentication system, and inventory data. There is no separate inventory database for the employee app.
+- Exact production domain is still TBD (tracked in Section 20, Open Decisions).
+
+## Employee Portal V1 — Planned Functionality
+
+- Google sign-in
+- Email/magic-link sign-in (fallback)
+- My Equipment (assets currently assigned to the signed-in employee)
+- View basic assignment history (their own)
+- Request equipment
+- Request return / check-in
+- Report an equipment issue
+- View their own request statuses
+- Profile / account
+- Sign out
+
+## Employee vs. Login Account (Phase 1 data-model requirement)
+
+This formalizes, and is the authoritative source for, the direction noted informally in Section 7 ("Employee vs. Login Account") and the corresponding task in Section 11 (Phase 1 — Data Model Hardening):
+
+- An employee/person record **must** be independent from an application login account.
+- IT must be able to create and assign equipment to an employee who has never logged into the system.
+- A Supabase Auth user **may optionally** link to an employee record.
+- A verified employee login should link to the existing employee record rather than create a duplicate employee record.
+- Admin users may also be linked to employee records (an admin is not architecturally distinct from "a person," just a role/permission).
+
+## Access Model (high-level, planning only)
+
+**Admin:**
+- Manage assets
+- Scan inventory
+- Assign / check in equipment
+- Manage employees
+- Manage requests
+- Access administrative history/reporting
+
+**Employee:**
+- Access only their own employee/profile data
+- Access equipment currently or historically assigned to them, as allowed
+- Create/read their own equipment and return requests
+- No inventory administration
+- No browsing other employees
+- No ability to grant themselves admin access
+
+**Important:** admin authorization must be enforced independently of the `admin.<domain>` hostname — the hostname is a UX/routing convenience, not a security boundary.
+
+## Employee Permission Model (2026-09-28 clarification)
+
+The employee portal is intentionally **read/create oriented**, not general CRUD.
+
+Employees **may**:
+- Read their own employee/profile information
+- Read equipment currently assigned to them
+- Read their own permitted assignment history
+- Read their own requests
+- Create equipment requests
+- Create return/check-in requests
+- Create issue/problem reports
+- Rescind an eligible request they themselves submitted (see Request Rescind / Opened Rule below)
+
+Employees **may NOT**:
+- Edit or delete assets
+- Edit or delete assignments
+- Reassign equipment
+- Browse or edit other employees
+- Modify administrative inventory fields
+- Change their own role/permissions
+- Edit submitted request contents after submission, unless a future explicitly approved workflow is added
+
+"Rescind request" is a narrow workflow action and must **not** be treated as general UPDATE or DELETE permission.
+
+## Request Rescind / Opened Rule (Phase 1 data-model/business-rule requirement, 2026-09-28)
+
+Product rule: **an employee may rescind their own request only if IT has not opened/reviewed it yet.**
+
+Preferred future behavior:
+- A new employee request begins in a `submitted` / unopened state.
+- The first administrative opening/review of the request records an `opened_at` timestamp and/or transitions it to an explicit `in_review` state.
+- Once opened by IT, the employee can no longer rescind it.
+- Rescinding must **not** delete the request.
+- A rescinded request remains in historical/audit data with a state such as `rescinded_by_employee`, plus a rescinded timestamp.
+- The backend must enforce rescind eligibility **atomically**, so a simultaneous IT-open / employee-rescind race cannot produce an invalid state.
+- Exact request-status names will be finalized during the data-model hardening phase (Phase 1) — the names above are illustrative, not final.
+
+## Authentication / Session Rules (2026-09-28 clarification)
+
+- Both the admin portal and the employee portal **always** require authentication — there is no unauthenticated access to either.
+- The employee portal may persist the authenticated session on the user's device/browser so the user can stay signed in, per the eventual product/session preference.
+- Persistent login must still require a valid authenticated session — cached/local browser state is **never**, by itself, proof of authorization.
+- Avoid designing broad offline caching of sensitive inventory data; session persistence and data caching are separate concerns and should not be conflated.
+- Exact session duration, refresh behavior, and "remember me" UX will be finalized during the Supabase Auth phase (Phase 4) — not decided here.
+
+## Admin Portal Rule (reinforced, 2026-09-28)
+
+- `admin.<domain>` always requires authentication.
+- Reaching `admin.<domain>` does **not** itself grant admin rights.
+- Admin authorization must be determined by trusted application/backend authorization data, not by hostname, route, or client-side state.
+
+## Auth Direction
+
+- Planned shared authentication provider: **Supabase Auth**.
+- Google authentication is expected to be the primary employee login method.
+- Email magic-link/passwordless login is expected as a fallback.
+- Public/open employee self-registration should **not** be assumed.
+- Preferred direction: **pre-provisioned** employees/accounts — only approved/known employees should gain employee-portal access.
+- Exact onboarding/linking behavior (how a Supabase Auth user gets matched to an existing employee record) will be finalized during the authentication/data-model phases (Phase 1 and Phase 4), not here.
+
+## Repository Direction (future option, not current implementation)
+
+- Keep admin and employee applications in the same repository for now.
+- They may eventually become separate application surfaces/packages sharing backend/types/utilities.
+- The repository is **not** to be restructured yet — this is a noted future option only.
+
+## Roadmap Placement
+
+Employee Portal V1 is planned future work, sequenced **after** the shared database/auth/backend foundation is established (i.e., after Phase 2 — Supabase PostgreSQL, Phase 3 — Supabase Storage, and Phase 4 — Authentication in Section 10's roadmap). It is not scheduled ahead of, or in place of, any current Phase 0 work.
+
+---
+
 # 9. Initial Dummy Data Plan
 
 Before Supabase migration, create a repeatable development dataset.
@@ -531,7 +660,7 @@ All dummy email addresses should use safe non-deliverable/test domains such as `
 
 ## Phase 0 — Baseline & Test Harness
 
-**Status:** IN PROGRESS — Phase 0A (local baseline, 2026-09-28) and Phase 0B (deterministic dev seed, 2026-09-28) complete. Physical scanner hardware (Phase 0D) and CSV import/export / photo verification remain open.
+**Status:** IN PROGRESS — Phase 0A (local baseline), 0B (deterministic dev seed) and 0C (golden-workflow automation) complete, all 2026-09-28. Only physical scanner hardware (Phase 0D) and CSV import/export / photo verification remain open before Phase 0 can be called done.
 
 Goal:
 
@@ -560,9 +689,11 @@ The following workflow must work before infrastructure migration:
 
 **Asset exists → Scan asset → Open correct asset → Assign employee → Scan again → Confirm assignment → Check asset in → Scan again → Confirm available**
 
+**Status (2026-09-28):** the business-logic half of this path is now proven end-to-end by an automated integration test (`test/golden-workflow.test.js`, Phase 0C) — lookup, assignment, re-lookup, check-in, final re-lookup, and historical integrity all pass against the real Express app. The remaining piece is the literal "scan" step on physical hardware (camera / USB / Bluetooth), which is Phase 0D and has not started.
+
 ### Exit Criteria
 
-Phase 0 is complete when the current SQLite version has a repeatable development environment and the golden workflow has been verified.
+Phase 0 is complete when the current SQLite version has a repeatable development environment and the golden workflow has been verified — the backend/API leg is now verified (Phase 0C); physical-device scanning verification (Phase 0D) is still required to close this out.
 
 ---
 
@@ -572,8 +703,8 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 
 Before moving production data to PostgreSQL:
 
-- [ ] Define employee/person model
-- [ ] Define login/profile model
+- [ ] Define employee/person model — *must be independent of login account; see Section 8a*
+- [ ] Define login/profile model — *Supabase Auth user optionally links to an employee record; see Section 8a*
 - [ ] Define asset identifier model
 - [ ] Resolve serial duplicate behavior
 - [ ] Replace destructive asset deletion
@@ -830,6 +961,21 @@ Then:
 
 ### Phase 0C — Core Workflow Smoke Tests
 
+**Status:** COMPLETE (golden-path automation scope) — 2026-09-28, Claude Code. Not merged/pushed; left on `chore/phase-0c-golden-workflow` (branched from `stage`) for review.
+
+**What was added.** `test/golden-workflow.test.js` (4 new tests, using the existing `test/helpers.js` harness — an isolated throwaway SQLite DB per run, never `./data` or `./data-dev`), driving the real Express app over HTTP exactly the way the front end does:
+
+1. **Golden path, full lifecycle in one test:** create asset (`NC-GOLDEN1`, initially `available`, no holder) → scan/lookup via `GET /api/assets/lookup/:code` (`found:true`, correct id) → assign via `POST /api/assets/:id/checkout` (asset flips to `checked_out`, holder is the correct employee, `checked_out` activity entry recorded) → re-lookup by the same tag (still resolves, detail now shows the holder) → check in via `POST /api/assets/:id/checkin` (asset back to `available`, no holder, `checked_in` activity recorded) → final re-lookup (still resolves, still available). **Historical integrity** is asserted directly against the `assignments` row: the completed assignment is *not* deleted — it's still present with `checked_out_at`, `returned_at`, `user_id` and `condition_in` all intact, and both lifecycle activity entries remain visible.
+2. **Guard cases** (3 small, targeted tests, not exhaustive business-rule coverage): an unknown tag lookup returns `found:false`; checking in an asset with no active assignment returns `400` rather than corrupting state; checking out an already-checked-out single-capacity asset is rejected with exactly one active assignment row remaining (no duplicate).
+
+No new npm script was added — `node --test test/golden-workflow.test.js` already runs it in isolation cleanly, and adding `verify:golden` on top would have been redundant per the brief's own guidance.
+
+**Verification:** ran the new file alone (4/4 passing), then the full suite (`npm test`): **55/55 passing** (51 prior + 4 new). Confirmed via file mtimes that neither `./data` nor `./data-dev` were touched by the run. Since the golden-workflow test already drives the real Express app over HTTP end-to-end — not a mock — this doubles as the runtime verification the brief asked for; no separate manual curl session was needed or performed (per the brief's own "prefer progress over redundant verification" guidance).
+
+**Deferred / explicitly out of scope this slice:** physical scanner hardware (camera, USB, Bluetooth, label printer) — Phase 0D; CSV import/export and photo-upload verification; any fix to the pre-existing known issues in Section 7 (hard delete, serial uniqueness, etc.) — none were newly exposed by this slice.
+
+**Issues found:** none. No blockers, no bugs, no new technical debt.
+
 Then:
 
 ### Phase 0D — Physical Scanner Verification
@@ -932,17 +1078,19 @@ Multiple contributors/agents (Claude Code, Codex) working in parallel need a sha
 - Initial production risks identified
 - Railway + Supabase architecture direction selected
 - Development workflow established
-- Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`, merged locally into `main`)
+- Project tracking setup (`PROJECT_STATUS.md` committed on `chore/phase-0a-local-baseline`, merged into `main` via reviewed PR)
 - Phase 0A — Local Baseline verification (clean install, fresh-DB boot, runtime smoke check, asset CRUD, scanner surface check — see Section 10 log; 2026-09-28)
-- Phase 0B — Deterministic Development Seed (`npm run seed:dev`; 9 users, 48 assets, full history/requests coverage; 6 new automated tests, 51/51 suite passing — see Section 10 log; 2026-09-28, on `chore/phase-0b-dev-seed`)
+- Phase 0B — Deterministic Development Seed (`npm run seed:dev`; 9 users, 48 assets, full history/requests coverage; 6 new automated tests; merged into `main` via PR #1; 2026-09-28)
+- Git branch strategy established: `stage` (shared integration, GitHub default branch) → `main` (stable/release) — see Section 3a; `stage` created and pushed, GitHub default branch changed via `gh repo edit`, 2026-09-28
+- Phase 0C — Golden Workflow Automation (`test/golden-workflow.test.js`; full lookup → assign → re-lookup → check-in → re-lookup lifecycle + historical-integrity assertions + 3 guard cases; 55/55 suite passing — see Section 10 log; 2026-09-28, on `chore/phase-0c-golden-workflow`, branched from `stage`)
 
 ### In Progress
 
-- Phase 0 golden path (scan → assign → check-in) — assignment and check-in legs now verified live (Phase 0B); the scan leg still needs a physical device (Phase 0D)
+- Phase 0 golden path — business-logic/API leg now fully proven by automated test (Phase 0C); the literal physical-device scan leg still needs Phase 0D
 
 ### Next
 
-**Phase 0C — Core Workflow Smoke Tests**, then **Phase 0D — Physical Scanner Verification**
+**Phase 0D — Physical Scanner Verification** (plus CSV import/export and photo-upload verification, still open from Phase 0's task list)
 
 ### Blocked
 
