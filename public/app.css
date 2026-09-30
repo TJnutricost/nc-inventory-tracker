@@ -177,6 +177,9 @@ a.item:active, a.item:hover { background: var(--surface-2); }
 .btn.primary:hover { filter: brightness(1.06); }
 .btn.dark { background: var(--brand-ink); border-color: var(--brand-ink); color: #fff; }
 .btn.danger { color: var(--bad); }
+.btn.toggle { color: var(--muted); }
+.btn.toggle.on { background: var(--ok); border-color: var(--ok); color: #fff; }
+.btn.toggle.on:hover { filter: brightness(1.06); }
 .btn.danger.solid { background: var(--bad); border-color: var(--bad); color: #fff; }
 .btn.block { width: 100%; }
 .btn.lg { min-height: 52px; font-size: 16px; border-radius: 13px; }

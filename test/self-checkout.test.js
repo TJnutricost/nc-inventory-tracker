@@ -205,3 +205,18 @@ test('the People data carries self-checkout state for login holders, and no-logi
   // the employee directory (non-admin) stays minimal
   assert.deepEqual(Object.keys((await withLogin.client.get('/api/users')).body[0]).sort(), ['id', 'name']);
 });
+
+// ---------------------------------------------------------------- stale-UI guard
+test("the app's own JS/CSS/HTML are always revalidated, so a browser can't keep running older UI code", async () => {
+  const base = `http://127.0.0.1:${server.address().port}`;
+  for (const f of ['/app.js', '/app.css', '/sw.js']) {
+    const r = await fetch(base + f);
+    assert.equal(r.headers.get('cache-control'), 'no-cache', f);
+    assert.ok(r.headers.get('etag'), `${f} still has an ETag so revalidation is a cheap 304`);
+  }
+  // one-time bust for browsers that cached the old assets under the previous 1h max-age
+  const html = await (await fetch(base + '/')).text();
+  assert.match(html, /\/app\.js\?v=/);
+  assert.match(html, /\/app\.css\?v=/);
+  assert.equal((await fetch(base + '/app.js?v=anything')).headers.get('cache-control'), 'no-cache');
+});
