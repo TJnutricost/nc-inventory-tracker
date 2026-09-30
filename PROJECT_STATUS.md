@@ -459,6 +459,34 @@ Future schema changes must preserve this principle.
 
 ---
 
+## Assignment Mode + Admin Equipment Roster (approved future requirements, 2026-09-30)
+
+**Status:** Approved input only. **Not implemented** — no schema, application or UI change was made for either item (Phase 1D is unchanged by them).
+
+### Assignment mode — input to Phase 1E (Assignment + Historical Integrity)
+
+The system must distinguish two kinds of current equipment relationship:
+
+1. **Permanent / ongoing assignment** — equipment primarily assigned to an employee for ongoing use: desktop computer, monitor, keyboard, mouse, dock, normal daily-use equipment.
+2. **Temporary checkout** — temporary custody for a day, shoot, project or short period: cameras, lenses, lighting, photo/video equipment, TVs, other borrowed equipment.
+
+Rules:
+
+- The distinction belongs to the **assignment**, not permanently to the asset or category.
+- Do **not** infer it from category alone; the same type of asset could be permanently assigned in one situation and temporarily checked out in another.
+- Historical records must **preserve which mode was used**.
+- Likely implementation: an assignment-level field such as `assignment_type` with values conceptually `permanent` / `checkout`. Exact naming, legacy-row default, and whether a checkout needs a due date are decided in Phase 1E. **The field is not added in 1D.**
+
+### Admin employee/equipment roster — future admin reporting/UI (after the assignment model supports it)
+
+An admin must be able to view a complete employee/equipment roster in a flat, spreadsheet/CSV-like format and ultimately export it to CSV. It should answer: who has what equipment; what is permanently assigned to each employee; what is only temporarily checked out; and which asset tags belong to those items. **Permanent assignments and temporary checkouts must be clearly separated.**
+
+Conceptual columns (exact UI/export columns TBD): Employee, Department, Permanent equipment, Temporary checkouts, Asset tags, Checkout date, Return/due information where applicable.
+
+Placement: the data-model portion (assignment mode) is recorded under Phase 1E; the report/UI/CSV export is later work that depends on it. Not implemented. See `docs/DATA_MODEL_PHASE_1.md` §3.4 and §4a.
+
+---
+
 # 8. Future Feature: Physical Inventory Audits
 
 Not part of the current MVP implementation.
@@ -765,7 +793,26 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 - **Tests added:** 18 — `test/lifecycle.test.js` (16: archive preservation/visibility/reservation, assignment guards, `disposed`, tag immutability, tag issuance incl. restart, prefix change, preview, concurrency) and `test/migrations.test.js` (2: 1B→1C upgrade with child rows/ids/counter seeding, and the `disableForeignKeys` runner option). Suite: 89 passing / 0 failing. One existing test ("deleting an asset removes it") was rewritten to assert the DELETE alias archives.
 - **Deferred / notes:** no Archived-assets UI or unarchive endpoint (admin can list with `include_archived`); tag-correction workflow; assignments/activity/requests FKs are still CASCADE/SET NULL (Phase 1E), so DB-level protection against a raw hard delete is not yet in place — the application no longer offers one. Not touched: employee/account split, seat capacity, audit schema, serial normalization, request states, PostgreSQL/Railway/auth.
 
-**Phase 1 sequence (1B merged; 1C implemented on its branch; rest Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
+### Phase 1D — Employee / Account Split (implemented, 2026-09-28, `feature/phase-1d-employee-account-split`; pending review/merge)
+
+- **Final schema** (migration 5; `users` no longer exists):
+  - `employees(id, name, work_email NOCASE nullable + unique partial index, department, title, phone, status active|inactive, created_at)` — a person / equipment assignee; may never log in.
+  - `accounts(id, employee_id UNIQUE nullable → employees, login_email UNIQUE NOCASE, password_hash, role admin|employee, active, created_at, last_login_at)` — login + authorization. Role lives only here. At most one account per employee. `auth_provider`/`auth_subject` placeholders were **not** added (nothing uses them; add when a provider is chosen).
+- **Legacy migration (exact):** each `users` row → one employee and one account **with the same numeric id** (`employee.id = account.id = old user id`), `employee_id` linking them. Email → `lower(trim(email))` for both `work_email` and `login_email` (if two users collide after normalization the migration aborts with the ids listed and changes nothing — none exist in dev data). `role`: `admin`→`admin`, `user`→`employee`. `active` → `accounts.active` and `employees.status` (`active`/`inactive`). Password hash, timestamps, department/title/phone carried over. Dependent tables rebuilt with all other constraints unchanged (assets FKs still CASCADE/SET NULL — Phase 1E), AUTOINCREMENT marks preserved, `foreign_key_check` enforced by the runner, then `users` dropped. Sessions (`uid`) and tokens are untouched and still resolve because account id = legacy user id.
+- **References by meaning (column names unchanged for now — rename is Phase 1E):**
+  - PERSON → `employees`: `assignments.user_id`, `requests.user_id`, `activity.subject_user_id`.
+  - ACTOR → `accounts`: `assignments.checked_out_by`, `assignments.returned_to`, `requests.created_by`, `requests.resolved_by`, `photos.uploaded_by`, `activity.actor_id`, and `tokens.user_id` (reset/invite tokens belong to accounts).
+- **Login/session:** login is by `accounts.login_email` + `password_hash` (unchanged credentials); the session `uid` is the **account** id; access requires `accounts.active` and (if linked) `employees.status = 'active'`. `req.user` intentionally has no plain `id` (`account_id` = who acted, `employee_id` = the person). `/api/me` returns the combined identity (`id` = employee id, `account_id`, name from the employee, email/role from the account); an account with no employee has `id: null` and cannot hold equipment. Authorization is `accounts.role` only. No auth provider, OAuth or magic link added. Future rule (documented in code, not implemented): a verified external login links to a pre-provisioned employee by normalized work email only; unknown logins never create an employee and are blocked.
+- **Employee without login (works):** `POST /api/users` with `login:false` creates only an employee (email optional). Such a person appears in People and every assignee picker, can receive assets, requests can be raised for them, and cannot sign in (no account row exists; no fake credentials).
+- **Add a login to an existing employee:** `POST /api/users/:id/account {email?, role, invite}` links by explicit employee id; 400 if they already have one, on a bad/duplicate login email, or if the email belongs to a different employee; never creates an employee. UI: "Give login access" button on the person page; the Add-person sheet has a "Can sign in" checkbox (default on).
+- **Compatibility endpoints retained:** `/api/users`, `/api/users/:id` (+`/invite`, +`/account`) — now backed by employees + accounts; ids are **employee** ids; role input `user` is accepted as `employee`; output roles are `admin`/`employee`. `PUT` toggling `active` disables/enables both the account and the person's active status and signs the account out; nothing deletes a person or their history (there is still no delete).
+- **Seed:** now 10 people (9 with logins, 1 admin) plus **Jules Jaramillo, an employee with no login**, who holds one assigned keyboard/mouse; reseeding stays deterministic.
+- **Verified on a copy of `data-dev`:** 9 employees, 9 accounts, 0 unlinked employees, 0 accounts without an employee, `foreign_key_check` clean, `users` table gone, migrations 1–5 applied, 13 assignments intact. Real `data/` not touched.
+- **Tests added:** 13 in `test/people.test.js` (migration incl. FK shapes/ids/roles/credentials/idempotence/duplicate-email refusal; identity and role authorization; employee without account; account linking and validation; deactivation keeps the person), seed/auth tests adjusted. Suite: 102 passing / 0 failing.
+- **Deferred:** People screen polish (no dedicated employee-vs-account views, no bulk tools); an employee lifecycle beyond active/inactive (no archive/offboarding workflow); separate employee-email vs login-email editing in the UI (editing email updates both); renaming legacy `user_id` columns and history-safe/RESTRICT FKs (Phase 1E); external-auth linking and the "access not provisioned" page (auth phase).
+- **Newly approved future requirements (2026-09-30, documentation only — 1D code/schema unchanged):** assignment mode (permanent vs temporary checkout, an assignment-level field preserved in history) is recorded as input to **Phase 1E**; an admin employee/equipment roster with CSV export is recorded as later admin reporting work that depends on it. See "Assignment Mode + Admin Equipment Roster" (next to "Historical Integrity") and `docs/DATA_MODEL_PHASE_1.md` §3.4/§4a. Neither is implemented; 1D assignments remain undifferentiated.
+
+**Phase 1 sequence (1B–1C merged; 1D implemented on its branch; rest Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
 
 - [ ] Define employee/person model — *must be independent of login account; see Section 8a*
 - [ ] Define login/profile model — *a user of the eventual shared auth provider (TBD) optionally links to an employee record; see Section 8a*
