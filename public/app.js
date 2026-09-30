@@ -913,20 +913,19 @@ function personSheet(u, done) {
       <label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
       <label class="field"><span>Access</span><select name="role"><option value="employee" ${u.role !== 'admin' ? 'selected' : ''}>Employee — sees their own equipment, can request &amp; self check-out</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin — full access to manage assets &amp; people</option></select></label>
-      ${!editing ? `<label class="check"><input type="checkbox" name="login" id="login" checked><span>Can sign in (creates a login for them)</span></label>
-      <label class="check" id="inv-row"><input type="checkbox" name="invite" checked><span>Email them an invite to set a password</span></label>` : ''}
+      ${!editing ? `<label class="check"><input type="checkbox" name="login" id="login" checked><span>Create login and send invite</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${editing ? 'Save' : 'Add person'}</button></div>
     </form><datalist id="depts">${['IT', 'Marketing', 'Operations', 'Sales', 'Finance', 'Customer Service', 'Warehouse', 'Product', 'HR'].map((d) => `<option value="${d}">`).join('')}</datalist>`);
   const loginBox = $('#login', el);
   if (loginBox) loginBox.onchange = () => {
     const on = loginBox.checked;
     $('[name=email]', el).required = on; $('#em-req', el).style.display = on ? '' : 'none';
-    $('#inv-row', el).style.display = on ? '' : 'none'; $('[name=role]', el).closest('label').style.display = on ? '' : 'none';
+    $('[name=role]', el).disabled = !on; // the role has no effect without a login; the selection is kept for when it's re-checked
   };
   $('#f', el).onsubmit = (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
-    if (!editing) { fd.login = !!fd.login; fd.invite = fd.login && !!fd.invite; }
+    if (!editing) { fd.login = !!fd.login; fd.invite = fd.login; } // one checkbox: login account + invite email, or neither
     busy($('#go', el), async () => {
       const saved = await api(editing ? 'PUT' : 'POST', editing ? `/api/users/${u.id}` : '/api/users', fd);
       usersCache = null; close(); toast(editing ? 'Saved' : fd.invite ? `Added — invite sent to ${saved.email}` : fd.login ? 'Added' : 'Added (no login)'); done && done(saved);
