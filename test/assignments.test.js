@@ -475,9 +475,22 @@ test('front end: employees are sent to the approval notice instead of a permanen
   assert.ok(fn.indexOf('if (!ok) return false') > -1 && fn.indexOf('if (!ok) return false') < fn.indexOf('/api/requests'), 'Cancel returns before anything is created');
   assert.match(fn, /requested_assignment_type: 'permanent'/);
   // the self check-out submit path: permanent goes through the request helper; its checkout POST never carries assignment_type
-  const self = src.slice(src.indexOf("on('#act-self'"), src.indexOf("on('#act-request'"));
+  const self = src.slice(src.indexOf('function selfCheckoutSheet'), src.indexOf('// Shown after an admin assigns equipment;'));
   assert.match(self, /mode === 'permanent'\) \{ if \(await requestPermanentAssignment\(a\)\)/);
   const checkoutCall = /api\('POST', `\/api\/assets\/\$\{a\.id\}\/checkout`, (\{[^}]*\})\)/.exec(self);
   assert.ok(checkoutCall && !/assignment_type/.test(checkoutCall[1]));
   assert.doesNotMatch(src, /Request failed \(\$\{res\.status\}\)/, 'no bare status codes in user-facing errors');
+});
+
+test('front end: the self-checkout sheet offers Scan barcode through the one existing scanner and lookup', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  assert.equal((src.match(/function openScanner\(/g) || []).length, 1, 'there is still exactly one scanner implementation');
+  const self = src.slice(src.indexOf('function selfCheckoutSheet'), src.indexOf('// Shown after an admin assigns equipment;'));
+  assert.match(self, /Scan barcode/);
+  assert.match(self, /openScanner\(\{/);
+  assert.match(self, /\/api\/assets\/lookup\//, 'resolved with the existing tag/serial lookup');
+  assert.match(self, /No asset found for/, 'unknown codes use the existing friendly message');
+  assert.match(self, /close\(\); selfCheckoutSheet\(n\)/, 'a found, available asset reopens the same sheet for the scanned asset');
+  assert.match(self, /available to check out right now/, 'unavailable assets get a friendly message');
+  assert.match(self, /returnFields\(\)/, 'the same return-date fields (date required) are used');
 });

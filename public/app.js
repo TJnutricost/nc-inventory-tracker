@@ -613,31 +613,7 @@ async function viewAsset(id) {
   on('#act-in', () => checkinSheet(a, d.holders, reload));
   on('#act-ret', () => requestReturnSheet(a, d.holders, reload));
   $$('[data-in]').forEach((b) => b.onclick = () => checkinSheet(a, d.holders.filter((h) => h.id === Number(b.dataset.in)), reload));
-  on('#act-self', () => {
-    const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
-      <form class="form-grid" id="f">
-      <div class="field"><span>How long do you need it?</span><div class="chips" data-self-type><button type="button" class="chip on" data-t="checkout">Temporary checkout</button><button type="button" class="chip" data-t="permanent">Permanent</button></div>
-        <div class="small muted" data-self-hint style="margin-top:6px">Borrow it and bring it back by the return date.</div></div>
-      <div data-self-due class="form-grid">${returnFields()}</div>
-      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out to me</button></div></form>`);
-    wireReturnFields(el);
-    let mode = 'checkout';
-    const dueWrap = $('[data-self-due]', el);
-    $('[data-self-type]', el).onclick = (e) => {
-      const b = e.target.closest('.chip'); if (!b) return;
-      mode = b.dataset.t;
-      $$('[data-self-type] .chip', el).forEach((c) => c.classList.toggle('on', c === b));
-      dueWrap.style.display = mode === 'checkout' ? '' : 'none';
-      $$('input', dueWrap).forEach((i) => { i.disabled = mode !== 'checkout'; });
-      $('[data-self-hint]', el).textContent = mode === 'checkout' ? 'Borrow it and bring it back by the return date.' : 'Permanent assignments must be approved by IT. You can send a request.';
-      $('#go', el).textContent = mode === 'checkout' ? 'Check out to me' : 'Request permanent assignment';
-    };
-    $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
-      busy($('#go', el), async () => {
-        if (mode === 'permanent') { if (await requestPermanentAssignment(a)) { close(); reload(); } return; }
-        await api('POST', `/api/assets/${a.id}/checkout`, { due_date: fd.due_date, due_time: fd.due_time }); close(); toast("It's yours! Check your email for details."); reload();
-      }); };
-  });
+  on('#act-self', () => selfCheckoutSheet(a));
   on('#act-request', () => requestEquipmentSheet({ asset: a }));
   on('#act-similar', (e) => { e.preventDefault(); requestEquipmentSheet({ category: a.category }); });
   on('#act-return', async () => {
@@ -765,6 +741,47 @@ async function checkoutSheet(asset, done, presetUser) {
       assignedSheet(asset, picked, fd);
     });
   };
+}
+// Employee self-checkout details for `a` (always a temporary checkout; permanent turns into a request to IT).
+// "Scan barcode" reuses the app's one scanner (openScanner) and the same tag/serial lookup as everywhere else; a scan
+// swaps the sheet to the scanned asset, so the return-date rules and the server's permission check stay the same.
+function selfCheckoutSheet(a) {
+  const back = () => (location.hash === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id));
+  const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
+    <button type="button" class="btn sm" id="self-scan" style="margin-bottom:12px">${icon('scan')} Scan barcode</button>
+    <form class="form-grid" id="f">
+    <div class="field"><span>How long do you need it?</span><div class="chips" data-self-type><button type="button" class="chip on" data-t="checkout">Temporary checkout</button><button type="button" class="chip" data-t="permanent">Permanent</button></div>
+      <div class="small muted" data-self-hint style="margin-top:6px">Borrow it and bring it back by the return date.</div></div>
+    <div data-self-due class="form-grid">${returnFields()}</div>
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out to me</button></div></form>`);
+  wireReturnFields(el);
+  $('#self-scan', el).onclick = () => openScanner({ title: 'Scan the item to check out', onResult: async (code) => {
+    try {
+      const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
+      if (!r.found) return toast(`No asset found for ${code}`, true);
+      const d = await api('GET', '/api/assets/' + r.id);
+      const n = d.asset;
+      if (d.is_mine) return toast(`${n.name} is already checked out to you.`, true);
+      if (n.archived_at || n.status !== 'available' || d.capacity - d.seats_used < 1) return toast(`${n.name} isn't available to check out right now. You can request it from IT.`, true);
+      close(); selfCheckoutSheet(n);
+    } catch (e) { fail(e); }
+  } });
+  let mode = 'checkout';
+  const dueWrap = $('[data-self-due]', el);
+  $('[data-self-type]', el).onclick = (e) => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    mode = b.dataset.t;
+    $$('[data-self-type] .chip', el).forEach((c) => c.classList.toggle('on', c === b));
+    dueWrap.style.display = mode === 'checkout' ? '' : 'none';
+    $$('input', dueWrap).forEach((i) => { i.disabled = mode !== 'checkout'; });
+    $('[data-self-hint]', el).textContent = mode === 'checkout' ? 'Borrow it and bring it back by the return date.' : 'Permanent assignments must be approved by IT. You can send a request.';
+    $('#go', el).textContent = mode === 'checkout' ? 'Check out to me' : 'Request permanent assignment';
+  };
+  $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
+    busy($('#go', el), async () => {
+      if (mode === 'permanent') { if (await requestPermanentAssignment(a)) { close(); back(); } return; }
+      await api('POST', `/api/assets/${a.id}/checkout`, { due_date: fd.due_date, due_time: fd.due_time }); close(); toast("It's yours! Check your email for details."); back();
+    }); };
 }
 // Shown after an admin assigns equipment; the admin chooses where to go next (nothing redirects on its own).
 function assignedSheet(asset, person, fd) {
@@ -1076,7 +1093,7 @@ async function viewPerson(id) {
       <div class="grow"><h1>${esc(u.name)}</h1><div class="muted">${esc([u.title, u.department].filter(Boolean).join(' · '))}</div>${u.building ? `<div class="small muted">Building: ${esc(u.building)}</div>` : ''}
       <div class="small" style="margin-top:4px">${u.email ? `<a href="mailto:${esc(u.email)}">${esc(u.email)}</a>` : '<span class="muted">No email</span>'}${u.phone ? ` · <a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : ''}</div>
       <div class="row wrap" style="margin-top:8px;gap:6px">${u.role === 'admin' ? pill('checked_out', 'Admin') : ''}${u.has_account ? pill('available', 'Login access') : pill('retired', 'No login')}${!u.active ? pill('lost', 'Inactive') : ''}${u.has_account && !u.has_password ? pill('open', 'Invite pending') : ''}</div></div></div>
-      <div class="small" style="margin-top:10px"><span class="muted">Self-checkout:</span> <strong>${u.can_self_checkout ? 'Enabled' : 'Disabled'}</strong>${u.has_account ? '' : ' <span class="muted">(no effect until they have a login)</span>'}</div>
+      ${u.has_account ? '' : '<div class="small muted" style="margin-top:10px">Self-checkout has no effect until they have a login.</div>'}
       <div class="row wrap" style="margin-top:14px;gap:8px"><button class="btn sm" id="edit">${icon('edit')} Edit</button>
         ${u.has_account ? `<button class="btn sm" id="invite">${icon('mail')} ${u.has_password ? 'Send password reset' : 'Resend invite'}</button>` : `<button class="btn sm" id="give-login">${icon('user')} Give login access</button>`}
         <button type="button" class="btn sm toggle ${u.can_self_checkout ? 'on' : ''}" id="selfco" aria-pressed="${u.can_self_checkout ? 'true' : 'false'}" title="Click to ${u.can_self_checkout ? 'turn off' : 'turn on'}">${icon(u.can_self_checkout ? 'check' : 'x')} Self-checkout ${u.can_self_checkout ? 'enabled' : 'disabled'}</button>
