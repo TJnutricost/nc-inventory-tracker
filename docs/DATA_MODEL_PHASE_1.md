@@ -53,7 +53,7 @@ Not a problem (verified): user hard-delete is blocked by FKs (`FOREIGN KEY const
 
 Every subsection is **Approved / Planned (not implemented)** unless it says otherwise. The slice that delivers it is noted.
 
-### 3.1 Employees and accounts (Phase 1D)
+### 3.1 Employees and accounts (Phase 1D — implemented; see PROJECT_STATUS.md for the as-built schema and the notes below)
 
 - **Current:** `users` is person + login + role + assignee at once (F9).
 - **Approved model:**
@@ -103,6 +103,11 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
   4. A given employee cannot hold two simultaneous **active** assignments of the same asset: DB partial unique index on `(asset_id, employee_id) WHERE returned_at IS NULL`.
   5. **Capacity is not expressible as one unique index.** Physical assets have `seat_capacity = 1`; multi-seat software licenses may have `seat_capacity > 1`. Capacity is enforced **inside the assignment (check-out) transaction**: the transaction locks/serializes the asset row (`SELECT … FOR UPDATE` on PostgreSQL; a write-locking transaction on SQLite), counts active assignments, and only then inserts. **A global `UNIQUE(asset_id)` on active assignments is explicitly rejected** because it would break multi-seat licenses.
 - `assets.seat_capacity INTEGER NOT NULL DEFAULT 1` is introduced in 1E; today's `license_seats` maps into it. No software-license redesign.
+- **Assignment mode (Approved 2026-09-30 — Planned for Phase 1E; NOT implemented, no schema change in 1D):** every current equipment relationship is one of two kinds, and the kind belongs to the **assignment**, not to the asset or its category:
+  - **Permanent / ongoing assignment** — equipment primarily assigned to an employee for ongoing use (desktop, monitor, keyboard, mouse, dock, other normal daily-use gear).
+  - **Temporary checkout** — temporary custody for a day, shoot, project or short period (cameras, lenses, lighting, photo/video gear, TVs, other borrowed equipment).
+  - Rules: the mode is **never inferred from category** (the same kind of asset may be permanently assigned in one case and checked out temporarily in another); **history preserves the mode that was used** (closed assignments keep it; it is not rewritten later); it is an assignment-level field. Likely shape: `assignments.assignment_type` with values conceptually `permanent` / `checkout` — **exact name, values, default for legacy rows, and whether a checkout requires a due date are decided during Phase 1E.** Interaction with the existing self-checkout and `due_date` behavior is also a 1E design point. The 1D migration and code do not touch this: today every assignment is undifferentiated.
+- **Admin employee/equipment roster (Approved 2026-09-30 — future admin reporting/UI; NOT implemented):** see §4a. It depends on assignment mode, so the data-model portion is 1E and the report/export comes after 1E.
 
 ### 3.5 Asset-tag generation (Phase 1C — implemented for SQLite; PostgreSQL later)
 
@@ -212,7 +217,7 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **Tests:** archive preserves assignments/activity/photos/requests; guards; lost-while-assigned allowed; tag not reissued after archiving the top asset; prefix change continues the number; tag edit refused; dashboard counts.
 - **Risk:** medium (touches many queries). Depends on 1B.
 
-### Phase 1D — Employee / Account Split
+### Phase 1D — Employee / Account Split — **IMPLEMENTED** (as-built details in PROJECT_STATUS.md; `auth_provider`/`auth_subject` placeholders intentionally not added yet)
 - **Goal:** `employees` + `accounts`; migrate `users` 1:1 keeping ids; update references; preserve current local login; roles `admin`/`employee`; IT can create employees with no account and assign to them.
 - **Affects:** `users` → two tables, all joins on `users`, People/Accounts admin UI, CSV import `assigned_email`, seed script, mailer recipients, sessions (`uid` → account).
 - **User-visible:** "Users" becomes people with optional login; assets assignable to no-login people. Login behaves as today.
@@ -220,10 +225,10 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **Risk:** highest (large surface, no external auth). Depends on 1C (and 1B runner).
 
 ### Phase 1E — Assignment + Historical Integrity
-- **Goal:** history-safe FKs (assignments/activity/requests → assets RESTRICT; cover-photo FK path); assignments reference employees, actors reference accounts; active `(asset_id, employee_id)` unique index; `seat_capacity` with transactional capacity enforcement; durable activity/audit improvements (3.10).
+- **Goal:** history-safe FKs (assignments/activity/requests → assets RESTRICT; cover-photo FK path); assignments reference employees, actors reference accounts; active `(asset_id, employee_id)` unique index; `seat_capacity` with transactional capacity enforcement; durable activity/audit improvements (3.10); **assignment mode** — an assignment-level permanent-vs-checkout distinction that history preserves (3.4; approved 2026-09-30, exact field name TBD in 1E, not inferred from category).
 - **Affects:** `assignments`, `activity`, `requests`, `assets` (SQLite table rebuilds), `log()` and `doCheckout`.
-- **User-visible:** none directly; richer activity entries.
-- **Tests:** asset with history can't be hard-deleted at DB level; same employee can't hold an asset twice; capacity 1 vs multi-seat enforced in-transaction; every audited action writes a row with actor snapshot and employee subject.
+- **User-visible:** none directly; richer activity entries. (Whether check-out/assign flows expose the mode is decided in 1E.)
+- **Tests:** asset with history can't be hard-deleted at DB level; same employee can't hold an asset twice; capacity 1 vs multi-seat enforced in-transaction; every audited action writes a row with actor snapshot and employee subject; assignment mode is stored per assignment, is not derived from category, survives check-in unchanged, and legacy rows get the chosen default.
 - **Risk:** medium-high (table rebuilds). Depends on 1D.
 - **Runner prerequisite:** already delivered in Phase 1C (`disableForeignKeys` migration option: FKs off around the transaction, `foreign_key_check`, always re-enabled); reuse it for these table rebuilds.
 
@@ -240,6 +245,11 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **User-visible:** employees can withdraw only untouched requests; IT sees opened time.
 - **Tests:** rescind ok from `submitted`; refused after open; open-vs-rescind race (exactly one wins); rescind never deletes; GET doesn't mutate; timestamps/history preserved; approve/deny/cancel/fulfil transitions; return-request flow unchanged.
 - **Risk:** medium. Depends on 1E (and 1D employee identity).
+
+### 4a. Future work after Phase 1E (approved 2026-09-30, not scheduled into a Phase 1 slice) — Admin employee/equipment roster
+- **Requirement:** an admin can view a complete employee/equipment roster in a flat, spreadsheet/CSV-like layout and export it to CSV. It must make it easy to answer: who has what equipment; what is permanently assigned to each employee; what is only temporarily checked out; and which asset tags belong to those items. **Permanent assignments and temporary checkouts must be clearly separated.**
+- **Conceptual columns (final UI and export columns TBD):** Employee; Department; Permanent equipment; Temporary checkouts; Asset tags; Checkout date; Return/due information where applicable.
+- **Dependency:** needs the assignment-mode field from Phase 1E, so it cannot be built correctly before then. The data-model portion is recorded under 1E; this report/UI/export is separate later work. Not implemented in 1D.
 
 ---
 

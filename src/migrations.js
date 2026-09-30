@@ -209,5 +209,147 @@ module.exports = [
       db.prepare('INSERT INTO asset_tag_counter (id, last_number) VALUES (1, ?)').run(max);
     },
   },
+  {
+    // Phase 1D: split the legacy `users` table (person + login in one row) into `employees` (people / assignees, may
+    // never log in) and `accounts` (login + authorization, optionally linked to one employee). Every legacy user
+    // becomes one employee AND one linked account, both keeping the legacy numeric id, so sessions, tokens and every
+    // stored reference stay valid without rewriting a single id. References are then re-pointed by meaning:
+    //   person   -> employees: assignments.user_id, requests.user_id, activity.subject_user_id
+    //   actor    -> accounts:  assignments.checked_out_by/returned_to, requests.created_by/resolved_by,
+    //                          photos.uploaded_by, activity.actor_id, tokens.user_id (reset/invite tokens)
+    // (column names are unchanged for now; renaming is Phase 1E). The dependent tables are rebuilt with all other
+    // constraints kept exactly as they were (assets still CASCADE — that is Phase 1E), then `users` is dropped.
+    id: 5,
+    name: 'split users into employees and accounts',
+    disableForeignKeys: true,
+    up: (db) => {
+      const users = db.prepare('SELECT id, name, email FROM users').all();
+      const seen = new Map();
+      const dups = [];
+      for (const u of users) {
+        const k = u.email.trim().toLowerCase();
+        if (seen.has(k)) dups.push(`${seen.get(k)} / ${u.id} (${k})`); else seen.set(k, u.id);
+      }
+      if (dups.length) throw new Error(`Cannot split users: duplicate emails after normalization (user ids): ${dups.join(', ')}. Resolve them manually; nothing was changed.`);
+      const seqOf = (t) => (db.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(t) || {}).seq || 0;
+      const seqs = Object.fromEntries(['users', 'assignments', 'photos', 'requests', 'activity'].map((t) => [t, seqOf(t)]));
+
+      db.exec(`
+        CREATE TABLE employees (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          work_email TEXT COLLATE NOCASE,
+          department TEXT,
+          title TEXT,
+          phone TEXT,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        CREATE UNIQUE INDEX idx_employees_work_email ON employees(work_email) WHERE work_email IS NOT NULL;
+
+        CREATE TABLE accounts (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          employee_id INTEGER UNIQUE REFERENCES employees(id),
+          login_email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          password_hash TEXT,
+          role TEXT NOT NULL DEFAULT 'employee' CHECK (role IN ('admin','employee')),
+          active INTEGER NOT NULL DEFAULT 1,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          last_login_at TEXT
+        );
+
+        INSERT INTO employees (id, name, work_email, department, title, phone, status, created_at)
+          SELECT id, name, lower(trim(email)), department, title, phone, CASE WHEN active = 1 THEN 'active' ELSE 'inactive' END, created_at FROM users;
+        INSERT INTO accounts (id, employee_id, login_email, password_hash, role, active, created_at, last_login_at)
+          SELECT id, id, lower(trim(email)), password_hash, CASE role WHEN 'admin' THEN 'admin' ELSE 'employee' END, active, created_at, last_login_at FROM users;
+
+        CREATE TABLE assignments_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          user_id INTEGER NOT NULL REFERENCES employees(id),
+          checked_out_at TEXT NOT NULL DEFAULT (datetime('now')),
+          checked_out_by INTEGER REFERENCES accounts(id),
+          due_date TEXT,
+          condition_out TEXT,
+          notes TEXT,
+          returned_at TEXT,
+          returned_to INTEGER REFERENCES accounts(id),
+          condition_in TEXT,
+          return_notes TEXT,
+          last_overdue_notice TEXT
+        );
+        INSERT INTO assignments_new SELECT id, asset_id, user_id, checked_out_at, checked_out_by, due_date, condition_out, notes, returned_at, returned_to, condition_in, return_notes, last_overdue_notice FROM assignments;
+        DROP TABLE assignments;
+        ALTER TABLE assignments_new RENAME TO assignments;
+        CREATE INDEX idx_assign_open ON assignments(asset_id, returned_at);
+        CREATE INDEX idx_assign_user ON assignments(user_id, returned_at);
+
+        CREATE TABLE photos_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL,
+          thumb TEXT NOT NULL,
+          caption TEXT,
+          uploaded_by INTEGER REFERENCES accounts(id),
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO photos_new SELECT id, asset_id, filename, thumb, caption, uploaded_by, created_at FROM photos;
+        DROP TABLE photos;
+        ALTER TABLE photos_new RENAME TO photos;
+
+        CREATE TABLE requests_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL CHECK (type IN ('equipment','return')),
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK (status IN ('open','approved','denied','dropped_off','completed','cancelled')),
+          user_id INTEGER NOT NULL REFERENCES employees(id),
+          asset_id INTEGER REFERENCES assets(id) ON DELETE SET NULL,
+          category TEXT,
+          message TEXT,
+          needed_by TEXT,
+          created_by INTEGER REFERENCES accounts(id),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by INTEGER REFERENCES accounts(id),
+          resolved_at TEXT,
+          resolution_note TEXT
+        );
+        INSERT INTO requests_new SELECT id, type, status, user_id, asset_id, category, message, needed_by, created_by, created_at, resolved_by, resolved_at, resolution_note FROM requests;
+        DROP TABLE requests;
+        ALTER TABLE requests_new RENAME TO requests;
+
+        CREATE TABLE activity_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER REFERENCES assets(id) ON DELETE CASCADE,
+          actor_id INTEGER REFERENCES accounts(id),
+          subject_user_id INTEGER REFERENCES employees(id),
+          action TEXT NOT NULL,
+          details TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO activity_new SELECT id, asset_id, actor_id, subject_user_id, action, details, created_at FROM activity;
+        DROP TABLE activity;
+        ALTER TABLE activity_new RENAME TO activity;
+        CREATE INDEX idx_activity_asset ON activity(asset_id, created_at);
+
+        CREATE TABLE tokens_new (
+          token TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+          purpose TEXT NOT NULL,
+          expires_at TEXT NOT NULL
+        );
+        INSERT INTO tokens_new SELECT token, user_id, purpose, expires_at FROM tokens;
+        DROP TABLE tokens;
+        ALTER TABLE tokens_new RENAME TO tokens;
+
+        DROP TABLE users;`);
+
+      // Keep every AUTOINCREMENT high-water mark so ids are never reused.
+      const setSeq = db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?");
+      const addSeq = db.prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)');
+      for (const [t, seq] of [['employees', seqs.users], ['accounts', seqs.users], ['assignments', seqs.assignments], ['photos', seqs.photos], ['requests', seqs.requests], ['activity', seqs.activity]]) {
+        if (seq && !setSeq.run(seq, t).changes) addSeq.run(t, seq);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

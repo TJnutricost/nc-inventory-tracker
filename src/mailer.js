@@ -62,7 +62,7 @@ async function send(to, subject, html) {
 }
 
 function adminEmails() {
-  return db.prepare("SELECT email FROM users WHERE role='admin' AND active=1").all().map((r) => r.email);
+  return db.prepare("SELECT login_email FROM accounts WHERE role='admin' AND active=1").all().map((r) => r.login_email);
 }
 
 const fmtDate = (d) => (d ? new Date(d + (d.length === 10 ? 'T12:00:00' : 'Z')).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '');

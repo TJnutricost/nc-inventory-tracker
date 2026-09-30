@@ -31,6 +31,8 @@ const USERS = [
   { name: 'Harper Hughes', email: 'harper.hughes@example.com', department: 'Operations', title: 'Warehouse Lead' },
   { name: 'Indigo Ibarra', email: 'indigo.ibarra@example.com', department: 'Marketing', title: 'Designer' },
 ];
+// An employee who exists only as an equipment assignee: no login account is ever created for them.
+const NO_LOGIN_EMPLOYEE = { name: 'Jules Jaramillo', email: 'jules.jaramillo@example.com', department: 'Warehouse', title: 'Forklift Operator', login: false };
 
 const LOCATIONS = ['HQ - IT Room', 'HQ - Office', 'Warehouse', 'Remote'];
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
@@ -246,6 +248,8 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
       await resetClient.post('/api/reset', { token, password: DEV_PASSWORD });
     }
 
+    const jules = await admin.post('/api/users', NO_LOGIN_EMPLOYEE);
+
     const defs = buildAssetDefs();
     if (defs.length !== EXPECTED_ASSET_COUNT) throw new Error(`Asset def count drifted: ${defs.length} vs ${EXPECTED_ASSET_COUNT}`);
     const special = applySpecialCases(defs);
@@ -276,6 +280,8 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     await checkoutThenCheckin(admin, wellUsed, finley, { condition: 'Fair' });
     await checkout(admin, wellUsed, indigo, { due_date: '2027-01-01' });
 
+    await checkout(admin, assetFor(defs.find((d) => d.category === 'Keyboard & Mouse')), jules);
+
     await checkoutThenCheckin(admin, assetFor(special.availableOptiplex), harper, { condition: 'Good' });
 
     await admin.post('/api/requests', { user_id: emerson.id, category: 'Monitor', message: 'Need a second monitor for my desk.' });
@@ -300,8 +306,10 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
 
     const summary = {
       dataDir,
-      users: db.prepare('SELECT COUNT(*) c FROM users').get().c,
-      admins: db.prepare("SELECT COUNT(*) c FROM users WHERE role = 'admin'").get().c,
+      people: db.prepare('SELECT COUNT(*) c FROM employees').get().c,
+      accounts: db.prepare('SELECT COUNT(*) c FROM accounts').get().c,
+      admins: db.prepare("SELECT COUNT(*) c FROM accounts WHERE role = 'admin'").get().c,
+      employeesWithoutLogin: db.prepare('SELECT COUNT(*) c FROM employees e WHERE NOT EXISTS (SELECT 1 FROM accounts a WHERE a.employee_id = e.id)').get().c,
       assets: db.prepare('SELECT COUNT(*) c FROM assets').get().c,
       currentAssignments: db.prepare('SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL').get().c,
       historicalAssignments: db.prepare('SELECT COUNT(*) c FROM assignments WHERE returned_at IS NOT NULL').get().c,
@@ -324,7 +332,7 @@ if (require.main === module) {
       console.log('');
       console.log('Seed complete.');
       console.log(`  Data dir:               ${s.dataDir}`);
-      console.log(`  Users:                  ${s.users} (${s.admins} admin)`);
+      console.log(`  People:                 ${s.people} (${s.accounts} with a login, ${s.admins} admin, ${s.employeesWithoutLogin} without a login)`);
       console.log(`  Assets:                 ${s.assets} (tags ${s.firstAssetTag} .. next unused ${s.nextTag})`);
       console.log(`  Current assignments:    ${s.currentAssignments}`);
       console.log(`  Historical assignments: ${s.historicalAssignments}`);

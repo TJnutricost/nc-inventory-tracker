@@ -75,10 +75,17 @@ const num = (v) => (v === undefined || v === null || v === '' ? null : Number(v)
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
 const wrap = (fn) => (req, res, next) => { try { const r = fn(req, res, next); if (r && r.catch) r.catch(next); } catch (e) { next(e); } };
 
+// Identity model (Phase 1D): a session identifies an ACCOUNT (login + authorization; role lives here).
+// An account optionally links to an EMPLOYEE (the person who holds equipment / makes requests).
+// req.user deliberately has no plain `id`: use account_id when recording who ACTED, employee_id when
+// referring to the PERSON (assignee / requester).
 function currentUser(req) {
   if (!req.session.uid) return null;
-  const u = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(req.session.uid);
-  return u || null;
+  return db.prepare(`
+    SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
+      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.created_at
+    FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
+    WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(req.session.uid) || null;
 }
 function auth(req, res, next) {
   const u = currentUser(req);
@@ -89,12 +96,33 @@ function auth(req, res, next) {
 function admin(req, res, next) {
   auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
 }
-const publicUser = (u) => u && ({ id: u.id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, active: !!u.active, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
+// The signed-in user as the UI sees it: `id` is the EMPLOYEE (person) id, null for an account with no employee record.
+const publicMe = (u) => ({ id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
-function log(assetId, actorId, action, details, subjectUserId = null) {
+// A person (employee) with their optional account. `email` = where to reach them (work email, else login email).
+const PERSON_SQL = `
+  SELECT e.*, COALESCE(e.work_email, a.login_email) AS email,
+    a.id AS account_id, a.login_email, a.role, a.active AS account_active, a.password_hash, a.last_login_at
+  FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id`;
+const getPerson = (id) => db.prepare(`${PERSON_SQL} WHERE e.id = ?`).get(id);
+const publicPerson = (p) => p && ({
+  id: p.id, name: p.name, email: p.email, work_email: p.work_email, department: p.department, title: p.title, phone: p.phone,
+  active: p.status === 'active', created_at: p.created_at,
+  has_account: !!p.account_id, account_id: p.account_id || null, login_email: p.login_email || null,
+  login_enabled: !!p.account_id && !!p.account_active, role: p.role || null,
+  last_login_at: p.last_login_at || null, has_password: !!p.password_hash,
+});
+// Who did it: an account, shown by its employee's name (or login email if unlinked).
+const ACTOR_JOIN = 'LEFT JOIN accounts aa ON aa.id = ac.actor_id LEFT JOIN employees u ON u.id = aa.employee_id';
+const ACTOR_NAME = 'COALESCE(u.name, aa.login_email) AS actor_name';
+const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+const normEmail = (v) => { const c = clean(v); return c ? c.toLowerCase() : null; };
+
+function log(assetId, actorAccountId, action, details, subjectEmployeeId = null) {
   db.prepare('INSERT INTO activity (asset_id, actor_id, subject_user_id, action, details) VALUES (?, ?, ?, ?, ?)')
-    .run(assetId, actorId, subjectUserId, action, details || null);
+    .run(assetId, actorAccountId, subjectEmployeeId, action, details || null);
 }
+// Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id.
 function makeToken(userId, purpose, hours) {
   const token = crypto.randomBytes(24).toString('base64url');
   const exp = new Date(Date.now() + hours * 3600e3).toISOString();
@@ -105,8 +133,8 @@ function makeToken(userId, purpose, hours) {
 const getAsset = (id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
 const capacity = (a) => Math.max(1, Number(a.license_seats) || 1);
 const openAssignments = (assetId) => db.prepare(`
-  SELECT s.*, u.name AS user_name, u.email AS user_email, u.department AS user_department
-  FROM assignments s JOIN users u ON u.id = s.user_id
+  SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email, u.department AS user_department
+  FROM assignments s JOIN employees u ON u.id = s.user_id LEFT JOIN accounts ac ON ac.employee_id = u.id
   WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);
 
 function refreshStatus(assetId) {
@@ -142,12 +170,13 @@ function allocateTag() { // call only inside a transaction
 function sanitizeAsset(a, user) {
   if (!a) return a;
   if (user.role === 'admin') return a;
-  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(a.id, user.id);
+  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
   const { purchase_cost, vendor, notes, ...rest } = a;
   if (!mine) delete rest.license_key;
   return rest;
 }
 
+// `user` = the employee receiving the asset; `actor` = the signed-in account performing it.
 function doCheckout({ asset, user, actor, due_date, notes, condition }) {
   if (asset.archived_at) throw httpError(400, 'This asset is archived and can\'t be checked out.');
   if (['retired', 'lost', 'maintenance', 'disposed'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
@@ -162,27 +191,31 @@ function doCheckout({ asset, user, actor, due_date, notes, condition }) {
     if (days > 0) due = new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
   }
   const info = db.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by, due_date, notes, condition_out) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(asset.id, user.id, actor.id, due, clean(notes), clean(condition) || asset.condition);
+    .run(asset.id, user.id, actor.account_id, due, clean(notes), clean(condition) || asset.condition);
   if (clean(condition)) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(clean(condition), asset.id);
   refreshStatus(asset.id);
-  log(asset.id, actor.id, 'checked_out', `To ${user.name}${due ? ` · due ${due}` : ''}${notes ? ` · ${notes}` : ''}`, user.id);
+  log(asset.id, actor.account_id, 'checked_out', `To ${user.name}${due ? ` · due ${due}` : ''}${notes ? ` · ${notes}` : ''}`, user.id);
   const assignment = db.prepare('SELECT * FROM assignments WHERE id = ?').get(info.lastInsertRowid);
   notify.checkedOut(user, getAsset(asset.id), assignment);
-  if (actor.id === user.id && actor.role !== 'admin') notify.selfCheckoutToAdmins(user, asset);
+  if (actor.employee_id === user.id && actor.role !== 'admin') notify.selfCheckoutToAdmins(user, asset);
   return assignment;
 }
 
 // ---------- setup & auth ----------
 app.get('/api/setup-needed', (req, res) => {
-  res.json({ needed: db.prepare('SELECT COUNT(*) c FROM users').get().c === 0 });
+  res.json({ needed: db.prepare('SELECT COUNT(*) c FROM accounts').get().c === 0 });
 });
 app.post('/api/setup', wrap(async (req, res) => {
-  if (db.prepare('SELECT COUNT(*) c FROM users').get().c > 0) throw httpError(400, 'Setup already completed');
+  if (db.prepare('SELECT COUNT(*) c FROM accounts').get().c > 0) throw httpError(400, 'Setup already completed');
   const { name, email, password } = req.body;
   if (!clean(name) || !clean(email) || !password || password.length < 8) throw httpError(400, 'Name, email and a password of at least 8 characters are required');
   const hash = await bcrypt.hash(password, 10);
-  const info = db.prepare("INSERT INTO users (name, email, password_hash, role, department) VALUES (?, ?, ?, 'admin', 'IT')").run(clean(name), clean(email).toLowerCase(), hash);
-  req.session.uid = info.lastInsertRowid;
+  const mail = normEmail(email);
+  const accountId = db.transaction(() => {
+    const emp = db.prepare("INSERT INTO employees (name, work_email, department) VALUES (?, ?, 'IT')").run(clean(name), mail).lastInsertRowid;
+    return db.prepare("INSERT INTO accounts (employee_id, login_email, password_hash, role) VALUES (?, ?, ?, 'admin')").run(emp, mail, hash).lastInsertRowid;
+  })();
+  req.session.uid = accountId;
   res.json({ ok: true });
 }));
 
@@ -193,39 +226,43 @@ app.post('/api/login', wrap(async (req, res) => {
   const att = loginAttempts.get(key) || { n: 0, t: Date.now() };
   if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
   if (att.n >= 10) throw httpError(429, 'Too many attempts. Try again in 15 minutes.');
-  const u = db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(email);
+  const u = db.prepare(`SELECT a.* FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
+    WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(email);
   const ok = u && u.password_hash && (await bcrypt.compare(String(req.body.password || ''), u.password_hash));
   if (!ok) { att.n++; loginAttempts.set(key, att); throw httpError(401, 'Email or password is incorrect'); }
   loginAttempts.delete(key);
-  db.prepare("UPDATE users SET last_login_at = datetime('now') WHERE id = ?").run(u.id);
+  db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(u.id);
   req.session.regenerate((err) => {
     if (err) throw err;
-    req.session.uid = u.id;
+    req.session.uid = u.id; // the session identifies the ACCOUNT
     res.json({ ok: true });
   });
 }));
 app.post('/api/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
 
 app.get('/api/me', auth, (req, res) => {
-  res.json({ user: publicUser(req.user), settings: getSettings(), mailConfigured: mailConfigured() });
+  res.json({ user: publicMe(req.user), settings: getSettings(), mailConfigured: mailConfigured() });
 });
 app.post('/api/me/password', auth, wrap(async (req, res) => {
   const { current, password } = req.body;
   if (!password || password.length < 8) throw httpError(400, 'New password must be at least 8 characters');
   if (req.user.password_hash && !(await bcrypt.compare(String(current || ''), req.user.password_hash))) throw httpError(400, 'Current password is incorrect');
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), req.user.id);
+  db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), req.user.account_id);
   res.json({ ok: true });
 }));
 app.put('/api/me', auth, (req, res) => {
   const { name, phone, department, title } = req.body;
-  db.prepare('UPDATE users SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
-    .run(clean(name), clean(phone), clean(department), clean(title), req.user.id);
+  if (req.user.employee_id) {
+    db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
+      .run(clean(name), clean(phone), clean(department), clean(title), req.user.employee_id);
+  }
   res.json({ ok: true });
 });
 
 app.post('/api/forgot', (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE email = ? AND active = 1').get(String(req.body.email || '').trim().toLowerCase());
-  if (u) notify.passwordReset(u, `${APP_URL}/#/reset/${makeToken(u.id, 'reset', 1)}`);
+  const a = db.prepare(`SELECT a.id, a.login_email, COALESCE(e.name, a.login_email) AS name FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
+    WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(String(req.body.email || '').trim().toLowerCase());
+  if (a) notify.passwordReset({ name: a.name, email: a.login_email }, `${APP_URL}/#/reset/${makeToken(a.id, 'reset', 1)}`);
   res.json({ ok: true }); // never reveal whether an account exists
 });
 app.post('/api/reset', wrap(async (req, res) => {
@@ -233,36 +270,67 @@ app.post('/api/reset', wrap(async (req, res) => {
   if (!password || password.length < 8) throw httpError(400, 'Password must be at least 8 characters');
   const t = db.prepare('SELECT * FROM tokens WHERE token = ?').get(String(token || ''));
   if (!t || t.expires_at < new Date().toISOString()) throw httpError(400, 'This link has expired. Ask for a new one.');
-  db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), t.user_id);
+  db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), t.user_id);
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(t.user_id);
   req.session.uid = t.user_id;
   res.json({ ok: true });
 }));
 
-// ---------- users ----------
+// ---------- people (employees, with their optional login account) ----------
+// /api/users is kept as the compatibility surface for the People screen; ids in it are EMPLOYEE ids.
+// Future rule (not implemented — no external auth yet): a verified external login may link to a pre-provisioned
+// employee by normalized (trim + lowercase) work email only; unknown logins never create an employee and are blocked.
 app.get('/api/users', auth, (req, res) => {
   // Everyone can see a minimal directory (names) — admins get details + counts
   const rows = db.prepare(`
-    SELECT u.*, (SELECT COUNT(*) FROM assignments s WHERE s.user_id = u.id AND s.returned_at IS NULL) AS asset_count
-    FROM users u ORDER BY u.active DESC, u.name COLLATE NOCASE`).all();
-  if (req.user.role !== 'admin') return res.json(rows.filter((r) => r.active).map((r) => ({ id: r.id, name: r.name })));
-  res.json(rows.map((r) => ({ ...publicUser(r), asset_count: r.asset_count })));
+    SELECT p.*, (SELECT COUNT(*) FROM assignments s WHERE s.user_id = p.id AND s.returned_at IS NULL) AS asset_count
+    FROM (${PERSON_SQL}) p ORDER BY (p.status = 'active') DESC, p.name COLLATE NOCASE`).all();
+  if (req.user.role !== 'admin') return res.json(rows.filter((r) => r.status === 'active').map((r) => ({ id: r.id, name: r.name })));
+  res.json(rows.map((r) => ({ ...publicPerson(r), asset_count: r.asset_count })));
 });
+
+// Creates the employee and, unless `login: false`, a linked login account (role admin|employee; legacy 'user' = employee).
 app.post('/api/users', admin, (req, res) => {
-  const name = clean(req.body.name); const email = clean(req.body.email)?.toLowerCase();
-  if (!name || !email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError(400, 'Name and a valid email are required');
-  if (db.prepare('SELECT 1 FROM users WHERE email = ?').get(email)) throw httpError(400, 'A user with that email already exists');
-  const role = req.body.role === 'admin' ? 'admin' : 'user';
-  const info = db.prepare('INSERT INTO users (name, email, role, department, title, phone) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(name, email, role, clean(req.body.department), clean(req.body.title), clean(req.body.phone));
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
-  if (req.body.invite !== false) notify.welcome(u, `${APP_URL}/#/reset/${makeToken(u.id, 'reset', 24 * 7)}`);
-  res.json(publicUser(u));
+  const name = clean(req.body.name); const email = normEmail(req.body.email);
+  const wantsLogin = req.body.login !== false;
+  if (!name) throw httpError(400, 'Name is required');
+  if (email ? !isEmail(email) : wantsLogin) throw httpError(400, wantsLogin ? 'Name and a valid email are required' : 'That email address is not valid');
+  if (email && db.prepare('SELECT 1 FROM employees WHERE work_email = ?').get(email)) throw httpError(400, 'A person with that email already exists');
+  if (email && wantsLogin && db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) throw httpError(400, 'A login with that email already exists');
+  const role = req.body.role === 'admin' ? 'admin' : 'employee';
+  const id = db.transaction(() => {
+    const empId = db.prepare('INSERT INTO employees (name, work_email, department, title, phone) VALUES (?, ?, ?, ?, ?)')
+      .run(name, email, clean(req.body.department), clean(req.body.title), clean(req.body.phone)).lastInsertRowid;
+    if (wantsLogin) db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(empId, email, role);
+    return empId;
+  })();
+  const p = getPerson(id);
+  if (wantsLogin && req.body.invite !== false) notify.welcome({ name: p.name, email: p.login_email }, `${APP_URL}/#/reset/${makeToken(p.account_id, 'reset', 24 * 7)}`);
+  res.json(publicPerson(p));
+});
+
+// Give an existing employee a login. Links by explicit employee id; never creates a second employee.
+app.post('/api/users/:id/account', admin, (req, res) => {
+  const p = getPerson(Number(req.params.id));
+  if (!p) throw httpError(404, 'Person not found');
+  if (p.account_id) throw httpError(400, 'This person already has a login.');
+  const email = normEmail(req.body.email) || p.work_email;
+  if (!email || !isEmail(email)) throw httpError(400, 'A valid login email is required');
+  if (db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) throw httpError(400, 'A login with that email already exists');
+  if (email !== p.work_email && db.prepare('SELECT 1 FROM employees WHERE work_email = ? AND id != ?').get(email, p.id)) throw httpError(400, 'That email belongs to another person');
+  const role = req.body.role === 'admin' ? 'admin' : 'employee';
+  db.transaction(() => {
+    if (!p.work_email) db.prepare('UPDATE employees SET work_email = ? WHERE id = ?').run(email, p.id);
+    db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(p.id, email, role);
+  })();
+  const q = getPerson(p.id);
+  if (req.body.invite !== false) notify.welcome({ name: q.name, email: q.login_email }, `${APP_URL}/#/reset/${makeToken(q.account_id, 'reset', 24 * 7)}`);
+  res.json(publicPerson(q));
 });
 app.get('/api/users/:id', auth, (req, res) => {
   const id = Number(req.params.id);
-  if (req.user.role !== 'admin' && id !== req.user.id) throw httpError(403, 'Not allowed');
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  if (req.user.role !== 'admin' && id !== req.user.employee_id) throw httpError(403, 'Not allowed');
+  const u = getPerson(id);
   if (!u) throw httpError(404, 'User not found');
   const current = db.prepare(`
     SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial,
@@ -272,27 +340,36 @@ app.get('/api/users/:id', auth, (req, res) => {
   const past = db.prepare(`
     SELECT s.*, a.name AS asset_name, a.tag FROM assignments s JOIN assets a ON a.id = s.asset_id
     WHERE s.user_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT 50`).all(id);
-  res.json({ user: publicUser(u), current, past });
+  res.json({ user: publicPerson(u), current, past });
 });
+// Updates the person and, when they have one, their account (role, login email, login enabled). Nothing here deletes a person.
 app.put('/api/users/:id', admin, (req, res) => {
   const id = Number(req.params.id);
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  const u = getPerson(id);
   if (!u) throw httpError(404, 'User not found');
-  const role = req.body.role === 'admin' ? 'admin' : req.body.role === 'user' ? 'user' : u.role;
-  const active = req.body.active === undefined ? u.active : req.body.active ? 1 : 0;
-  if (id === req.user.id && (role !== 'admin' || !active)) throw httpError(400, "You can't remove your own admin access");
-  const email = clean(req.body.email)?.toLowerCase() || u.email;
-  if (email !== u.email && db.prepare('SELECT 1 FROM users WHERE email = ? AND id != ?').get(email, id)) throw httpError(400, 'That email is already in use');
-  db.prepare('UPDATE users SET name = ?, email = ?, role = ?, department = ?, title = ?, phone = ?, active = ? WHERE id = ?')
-    .run(clean(req.body.name) || u.name, email, role, clean(req.body.department), clean(req.body.title), clean(req.body.phone), active, id);
-  if (!active) db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"uid":${id}}%`);
-  res.json(publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(id)));
+  const role = req.body.role === 'admin' ? 'admin' : (req.body.role === 'employee' || req.body.role === 'user') ? 'employee' : u.role;
+  const active = req.body.active === undefined ? u.status === 'active' : !!req.body.active;
+  if (u.account_id && u.account_id === req.user.account_id && (role !== 'admin' || !active)) throw httpError(400, "You can't remove your own admin access");
+  const email = normEmail(req.body.email);
+  if (email && !isEmail(email)) throw httpError(400, 'That email address is not valid');
+  const workEmail = email || u.work_email;
+  if (email && email !== u.work_email && db.prepare('SELECT 1 FROM employees WHERE work_email = ? AND id != ?').get(email, id)) throw httpError(400, 'That email is already in use');
+  const loginEmail = u.account_id ? (email || u.login_email) : null;
+  if (u.account_id && loginEmail !== u.login_email && db.prepare('SELECT 1 FROM accounts WHERE login_email = ? AND id != ?').get(loginEmail, u.account_id)) throw httpError(400, 'That email is already in use');
+  db.transaction(() => {
+    db.prepare('UPDATE employees SET name = ?, work_email = ?, department = ?, title = ?, phone = ?, status = ? WHERE id = ?')
+      .run(clean(req.body.name) || u.name, workEmail, clean(req.body.department), clean(req.body.title), clean(req.body.phone), active ? 'active' : 'inactive', id);
+    if (u.account_id) db.prepare('UPDATE accounts SET login_email = ?, role = ?, active = ? WHERE id = ?').run(loginEmail, role, active ? 1 : 0, u.account_id);
+  })();
+  if (!active && u.account_id) db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"uid":${u.account_id}}%`);
+  res.json(publicPerson(getPerson(id)));
 });
 app.post('/api/users/:id/invite', admin, (req, res) => {
-  const u = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(req.params.id));
+  const u = getPerson(Number(req.params.id));
   if (!u) throw httpError(404, 'User not found');
-  const link = `${APP_URL}/#/reset/${makeToken(u.id, 'reset', 24 * 7)}`;
-  notify.welcome(u, link);
+  if (!u.account_id) throw httpError(400, 'This person has no login. Give them one first.');
+  const link = `${APP_URL}/#/reset/${makeToken(u.account_id, 'reset', 24 * 7)}`;
+  notify.welcome({ name: u.name, email: u.login_email }, link);
   res.json({ ok: true, link: mailConfigured() ? undefined : link });
 });
 
@@ -300,7 +377,7 @@ app.post('/api/users/:id/invite', admin, (req, res) => {
 const ASSET_LIST_SQL = `
   SELECT a.*,
     (SELECT COUNT(*) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS seats_used,
-    (SELECT group_concat(u.name, ', ') FROM assignments s JOIN users u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS holder_names,
+    (SELECT group_concat(u.name, ', ') FROM assignments s JOIN employees u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS holder_names,
     (SELECT MIN(s.due_date) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS due_date,
     (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb
   FROM assets a`;
@@ -310,7 +387,7 @@ app.get('/api/assets', auth, (req, res) => {
   const { q, category, status, user_id } = req.query;
   if (q) {
     where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?
-      OR EXISTS (SELECT 1 FROM assignments s JOIN users u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
+      OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
     const like = `%${q}%`; params.push(like, like, like, like, like, like, like);
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
@@ -322,7 +399,7 @@ app.get('/api/assets', auth, (req, res) => {
   if (req.user.role !== 'admin') {
     // Users see what they hold and what's available to borrow
     where.push(`(a.status = 'available' OR EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.user_id = ? AND s.returned_at IS NULL))`);
-    params.push(req.user.id);
+    params.push(req.user.employee_id);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
   res.json(db.prepare(sql).all(...params).map((a) => sanitizeAsset(a, req.user)));
@@ -343,19 +420,19 @@ app.get('/api/assets/:id', auth, (req, res) => {
   const a = getAsset(Number(req.params.id));
   if (!a) throw httpError(404, 'Asset not found');
   const holders = openAssignments(a.id);
-  const isMine = holders.some((h) => h.user_id === req.user.id);
+  const isMine = holders.some((h) => h.user_id === req.user.employee_id);
   const isAdmin = req.user.role === 'admin';
   const photos = db.prepare('SELECT * FROM photos WHERE asset_id = ? ORDER BY id').all(a.id);
   const requests = db.prepare(`
-    SELECT r.*, u.name AS user_name FROM requests r JOIN users u ON u.id = r.user_id
+    SELECT r.*, u.name AS user_name FROM requests r JOIN employees u ON u.id = r.user_id
     WHERE r.asset_id = ? AND r.status IN ('open','dropped_off') ORDER BY r.created_at DESC`).all(a.id)
-    .filter((r) => isAdmin || r.user_id === req.user.id);
+    .filter((r) => isAdmin || r.user_id === req.user.employee_id);
   const activity = isAdmin ? db.prepare(`
-    SELECT ac.*, u.name AS actor_name FROM activity ac LEFT JOIN users u ON u.id = ac.actor_id
+    SELECT ac.*, ${ACTOR_NAME} FROM activity ac ${ACTOR_JOIN}
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
   res.json({
     asset: sanitizeAsset(a, req.user),
-    holders: isAdmin ? holders : holders.filter((h) => h.user_id === req.user.id),
+    holders: isAdmin ? holders : holders.filter((h) => h.user_id === req.user.employee_id),
     held_by_other: !isAdmin && !isMine && holders.length >= capacity(a),
     seats_used: holders.length,
     capacity: capacity(a),
@@ -391,7 +468,7 @@ app.post('/api/assets', admin, (req, res) => {
     if (used) throw httpError(400, used.archived_at ? `Tag ${tag} belongs to an archived asset and can't be reused` : `Tag ${tag} is already used by another asset`);
     const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
       .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]));
-    log(info.lastInsertRowid, req.user.id, 'created', `${tag} · ${v.name}`);
+    log(info.lastInsertRowid, req.user.account_id, 'created', `${tag} · ${v.name}`);
     return info.lastInsertRowid;
   });
   res.json(getAsset(create.immediate()));
@@ -421,7 +498,7 @@ app.put('/api/assets/:id', admin, (req, res) => {
   db.prepare(`UPDATE assets SET tag = ?, status = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
     .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]), a.id);
   const changed = ['tag', 'status', ...ASSET_FIELDS].filter((f) => String((f === 'tag' ? tag : f === 'status' ? status : v[f]) ?? '') !== String(a[f] ?? ''));
-  if (changed.length) log(a.id, req.user.id, 'edited', changed.filter((f) => f !== 'license_key').join(', ') || 'license key');
+  if (changed.length) log(a.id, req.user.account_id, 'edited', changed.filter((f) => f !== 'license_key').join(', ') || 'license key');
   refreshStatus(a.id);
   res.json(getAsset(a.id));
 });
@@ -436,7 +513,7 @@ function archiveAsset(req, res) {
   const reason = clean(req.body && req.body.reason);
   db.transaction(() => {
     db.prepare("UPDATE assets SET archived_at = datetime('now'), updated_at = datetime('now') WHERE id = ?").run(a.id);
-    log(a.id, req.user.id, 'archived', `${a.tag} · ${a.name}${reason ? ` · ${reason}` : ''}`);
+    log(a.id, req.user.account_id, 'archived', `${a.tag} · ${a.name}${reason ? ` · ${reason}` : ''}`);
   })();
   res.json({ ok: true });
 }
@@ -448,16 +525,17 @@ app.post('/api/assets/:id/checkout', auth, (req, res) => {
   if (!asset) throw httpError(404, 'Asset not found');
   let target;
   if (req.user.role === 'admin') {
-    target = db.prepare('SELECT * FROM users WHERE id = ? AND active = 1').get(Number(req.body.user_id));
-    if (!target) throw httpError(400, 'Choose who this is going to');
+    target = getPerson(Number(req.body.user_id));
+    if (!target || target.status !== 'active') throw httpError(400, 'Choose who this is going to');
   } else {
     if (!getSettings().self_checkout) throw httpError(403, 'Self check-out is turned off. Send IT a request instead.');
-    target = req.user;
+    target = req.user.employee_id && getPerson(req.user.employee_id);
+    if (!target) throw httpError(403, "Your login isn't linked to an employee record. Ask IT.");
   }
   const assignment = doCheckout({ asset, user: target, actor: req.user, due_date: req.body.due_date, notes: req.body.notes, condition: req.body.condition });
   // Close any open equipment request from this user that named this asset
   db.prepare("UPDATE requests SET status='completed', resolved_by=?, resolved_at=datetime('now') WHERE type='equipment' AND status IN ('open','approved') AND user_id=? AND asset_id=?")
-    .run(req.user.id, target.id, asset.id);
+    .run(req.user.account_id, target.id, asset.id);
   res.json({ ok: true, assignment });
 });
 
@@ -470,15 +548,15 @@ app.post('/api/assets/:id/checkin', admin, (req, res) => {
   if (!target) throw httpError(400, 'Choose which person is returning it');
   const condition = clean(req.body.condition);
   db.prepare("UPDATE assignments SET returned_at = datetime('now'), returned_to = ?, condition_in = ?, return_notes = ? WHERE id = ?")
-    .run(req.user.id, condition, clean(req.body.notes), target.id);
+    .run(req.user.account_id, condition, clean(req.body.notes), target.id);
   if (condition) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(condition, asset.id);
   if (req.body.to_maintenance) db.prepare("UPDATE assets SET status = 'maintenance' WHERE id = ?").run(asset.id);
   else if (asset.status === 'lost') db.prepare("UPDATE assets SET status = 'available' WHERE id = ?").run(asset.id);
   refreshStatus(asset.id);
   if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
   db.prepare("UPDATE requests SET status = 'completed', resolved_by = ?, resolved_at = datetime('now') WHERE type = 'return' AND asset_id = ? AND user_id = ? AND status IN ('open','dropped_off')")
-    .run(req.user.id, asset.id, target.user_id);
-  log(asset.id, req.user.id, 'checked_in', `From ${target.user_name}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.user_id);
+    .run(req.user.account_id, asset.id, target.user_id);
+  log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.user_id);
   notify.checkedIn({ name: target.user_name, email: target.user_email }, asset);
   res.json({ ok: true });
 });
@@ -493,9 +571,9 @@ app.post('/api/assets/:id/request-return', admin, (req, res) => {
   for (const t of targets) {
     if (db.prepare("SELECT 1 FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, t.user_id)) continue;
     const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, message, needed_by, created_by) VALUES ('return', ?, ?, ?, ?, ?)")
-      .run(t.user_id, asset.id, clean(req.body.message), clean(req.body.needed_by), req.user.id);
+      .run(t.user_id, asset.id, clean(req.body.message), clean(req.body.needed_by), req.user.account_id);
     const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-    log(asset.id, req.user.id, 'return_requested', `From ${t.user_name}${r.needed_by ? ` · by ${r.needed_by}` : ''}`, t.user_id);
+    log(asset.id, req.user.account_id, 'return_requested', `From ${t.user_name}${r.needed_by ? ` · by ${r.needed_by}` : ''}`, t.user_id);
     notify.returnRequested({ name: t.user_name, email: t.user_email }, asset, r);
     created.push(r);
   }
@@ -513,7 +591,7 @@ app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async 
   const asset = getAsset(Number(req.params.id));
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
   if (!asset) { cleanup(); throw httpError(404, 'Asset not found'); }
-  const holder = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, req.user.id);
+  const holder = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }
   if (!req.files?.length) throw httpError(400, 'No image received');
   const saved = [];
@@ -525,11 +603,11 @@ app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async 
     } catch (e) { fs.rm(f.path, () => {}); continue; }
     fs.rm(f.path, () => {});
     const info = db.prepare('INSERT INTO photos (asset_id, filename, thumb, caption, uploaded_by) VALUES (?, ?, ?, ?, ?)')
-      .run(asset.id, base + '.jpg', base + '_t.jpg', clean(req.body.caption), req.user.id);
+      .run(asset.id, base + '.jpg', base + '_t.jpg', clean(req.body.caption), req.user.account_id);
     saved.push(info.lastInsertRowid);
   }
   if (!saved.length) throw httpError(400, "Couldn't read that image");
-  log(asset.id, req.user.id, 'photo_added', `${saved.length} photo${saved.length > 1 ? 's' : ''}`);
+  log(asset.id, req.user.account_id, 'photo_added', `${saved.length} photo${saved.length > 1 ? 's' : ''}`);
   db.prepare("UPDATE assets SET updated_at = datetime('now') WHERE id = ?").run(asset.id);
   res.json({ ok: true, ids: saved });
 }));
@@ -562,14 +640,16 @@ app.use('/uploads', (req, res, next) => (currentUser(req) ? next() : res.status(
 // ---------- requests ----------
 app.get('/api/requests', auth, (req, res) => {
   const where = []; const params = [];
-  if (req.user.role !== 'admin') { where.push('r.user_id = ?'); params.push(req.user.id); }
+  if (req.user.role !== 'admin') { where.push('r.user_id = ?'); params.push(req.user.employee_id); }
   if (req.query.status === 'open') where.push("r.status IN ('open','approved','dropped_off')");
   else if (req.query.status === 'closed') where.push("r.status IN ('denied','completed','cancelled')");
   if (req.query.type) { where.push('r.type = ?'); params.push(req.query.type); }
   res.json(db.prepare(`
-    SELECT r.*, u.name AS user_name, u.department AS user_department, a.name AS asset_name, a.tag AS asset_tag, c.name AS created_by_name, rv.name AS resolved_by_name
-    FROM requests r JOIN users u ON u.id = r.user_id
-    LEFT JOIN assets a ON a.id = r.asset_id LEFT JOIN users c ON c.id = r.created_by LEFT JOIN users rv ON rv.id = r.resolved_by
+    SELECT r.*, u.name AS user_name, u.department AS user_department, a.name AS asset_name, a.tag AS asset_tag, COALESCE(c.name, ca.login_email) AS created_by_name, COALESCE(rv.name, ra.login_email) AS resolved_by_name
+    FROM requests r JOIN employees u ON u.id = r.user_id
+    LEFT JOIN assets a ON a.id = r.asset_id
+    LEFT JOIN accounts ca ON ca.id = r.created_by LEFT JOIN employees c ON c.id = ca.employee_id
+    LEFT JOIN accounts ra ON ra.id = r.resolved_by LEFT JOIN employees rv ON rv.id = ra.employee_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY CASE WHEN r.status IN ('open','dropped_off','approved') THEN 0 ELSE 1 END, r.created_at DESC LIMIT 500`).all(...params));
 });
@@ -577,17 +657,18 @@ app.post('/api/requests', auth, (req, res) => {
   const category = clean(req.body.category);
   const message = clean(req.body.message);
   if (!category && !message) throw httpError(400, 'Tell IT what you need');
-  const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.id;
+  const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.employee_id;
+  if (forUser === null) throw httpError(400, "Your login isn't linked to an employee record. Choose who the request is for.");
   const assetId = num(req.body.asset_id);
   if (!Number.isInteger(forUser) || forUser < 1) throw httpError(400, 'Choose a valid person for this request');
   if (assetId !== null && (!Number.isInteger(assetId) || assetId < 1)) throw httpError(400, 'Choose a valid asset');
-  if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(forUser)) throw httpError(404, 'User not found');
+  if (!db.prepare('SELECT 1 FROM employees WHERE id = ?').get(forUser)) throw httpError(404, 'User not found');
   if (assetId !== null && !getAsset(assetId)) throw httpError(404, 'Asset not found');
   const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by) VALUES ('equipment', ?, ?, ?, ?, ?, ?)")
-    .run(forUser, assetId, category, message, clean(req.body.needed_by), req.user.id);
+    .run(forUser, assetId, category, message, clean(req.body.needed_by), req.user.account_id);
   const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-  if (assetId) log(assetId, req.user.id, 'requested', message || category, forUser);
-  notify.equipmentRequested(db.prepare('SELECT * FROM users WHERE id = ?').get(forUser), r);
+  if (assetId) log(assetId, req.user.account_id, 'requested', message || category, forUser);
+  notify.equipmentRequested(getPerson(forUser), r);
   res.json(r);
 });
 function loadRequest(id) {
@@ -598,7 +679,7 @@ function loadRequest(id) {
 app.post('/api/requests/:id/approve', admin, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.type !== 'equipment' || !['open', 'approved'].includes(r.status)) throw httpError(400, 'This request is not open');
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id);
+  const user = getPerson(r.user_id);
   let asset = null;
   const rawAssetId = num(req.body.asset_id);
   if (rawAssetId !== null && (!Number.isInteger(rawAssetId) || rawAssetId < 0)) throw httpError(400, 'Choose a valid asset');
@@ -610,7 +691,7 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
   }
   const status = asset ? 'completed' : 'approved';
   db.prepare("UPDATE requests SET status = ?, asset_id = COALESCE(?, asset_id), resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?")
-    .run(status, assetId, req.user.id, clean(req.body.note), r.id);
+    .run(status, assetId, req.user.account_id, clean(req.body.note), r.id);
   // When an asset is attached the checkout email already went out; only send the approval note if no asset yet or a note was added
   if (!asset || clean(req.body.note)) notify.requestResolved(user, { ...r, status, resolution_note: clean(req.body.note) }, asset);
   res.json({ ok: true });
@@ -618,26 +699,26 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
 app.post('/api/requests/:id/deny', admin, (req, res) => {
   const r = loadRequest(req.params.id);
   if (!['open', 'approved'].includes(r.status)) throw httpError(400, 'This request is not open');
-  db.prepare("UPDATE requests SET status = 'denied', resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?").run(req.user.id, clean(req.body.note), r.id);
-  if (r.type === 'equipment') notify.requestResolved(db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id), { ...r, status: 'denied', resolution_note: clean(req.body.note) });
+  db.prepare("UPDATE requests SET status = 'denied', resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?").run(req.user.account_id, clean(req.body.note), r.id);
+  if (r.type === 'equipment') notify.requestResolved(getPerson(r.user_id), { ...r, status: 'denied', resolution_note: clean(req.body.note) });
   res.json({ ok: true });
 });
 app.post('/api/requests/:id/cancel', auth, (req, res) => {
   const r = loadRequest(req.params.id);
-  if (req.user.role !== 'admin' && (r.user_id !== req.user.id || r.type !== 'equipment')) throw httpError(403, 'Not allowed');
+  if (req.user.role !== 'admin' && (r.user_id !== req.user.employee_id || r.type !== 'equipment')) throw httpError(403, 'Not allowed');
   if (!['open', 'approved', 'dropped_off'].includes(r.status)) throw httpError(400, 'This request is already closed');
-  db.prepare("UPDATE requests SET status = 'cancelled', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?").run(req.user.id, r.id);
+  db.prepare("UPDATE requests SET status = 'cancelled', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?").run(req.user.account_id, r.id);
   res.json({ ok: true });
 });
 app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
   const r = loadRequest(req.params.id);
-  if (r.user_id !== req.user.id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
+  if (r.user_id !== req.user.employee_id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
   if (r.type !== 'return' || r.status !== 'open') throw httpError(400, 'This request is not open');
   db.prepare("UPDATE requests SET status = 'dropped_off' WHERE id = ?").run(r.id);
   const asset = getAsset(r.asset_id);
   if (asset) {
-    log(asset.id, req.user.id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
-    notify.droppedOff(db.prepare('SELECT * FROM users WHERE id = ?').get(r.user_id), asset);
+    log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
+    notify.droppedOff(getPerson(r.user_id), asset);
   }
   res.json({ ok: true });
 });
@@ -645,13 +726,14 @@ app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
 app.post('/api/assets/:id/return-notice', auth, (req, res) => {
   const asset = getAsset(Number(req.params.id));
   if (!asset) throw httpError(404, 'Asset not found');
-  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, req.user.id);
+  const me = req.user.employee_id;
+  const mine = me && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, me);
   if (!mine) throw httpError(400, "This isn't checked out to you");
-  const existing = db.prepare("SELECT * FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, req.user.id);
+  const existing = db.prepare("SELECT * FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, me);
   if (existing) db.prepare("UPDATE requests SET status='dropped_off' WHERE id = ?").run(existing.id);
   else db.prepare("INSERT INTO requests (type, status, user_id, asset_id, message, created_by) VALUES ('return', 'dropped_off', ?, ?, ?, ?)")
-    .run(req.user.id, asset.id, clean(req.body.note) || 'Returned by user', req.user.id);
-  log(asset.id, req.user.id, 'dropped_off', clean(req.body.note) || 'User returned it to IT', req.user.id);
+    .run(me, asset.id, clean(req.body.note) || 'Returned by user', req.user.account_id);
+  log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User returned it to IT', me);
   notify.droppedOff(req.user, asset);
   res.json({ ok: true });
 });
@@ -666,8 +748,8 @@ app.get('/api/dashboard', auth, (req, res) => {
       (SELECT r.needed_by FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_by,
       (SELECT r.message FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_message
     FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.user_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at DESC`).all(req.user.id);
-  const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.id);
+    WHERE s.user_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at DESC`).all(req.user.employee_id);
+  const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.employee_id);
   const out = { mine, myRequests };
   if (req.user.role === 'admin') {
     const c = (sql, ...p) => db.prepare(sql).get(...p).c;
@@ -678,7 +760,7 @@ app.get('/api/dashboard', auth, (req, res) => {
       maintenance: c("SELECT COUNT(*) c FROM assets WHERE status = 'maintenance' AND archived_at IS NULL"),
       overdue: c("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND due_date < date('now')"),
       open_requests: c("SELECT COUNT(*) c FROM requests WHERE status IN ('open','approved','dropped_off')"),
-      users: c('SELECT COUNT(*) c FROM users WHERE active = 1'),
+      users: c("SELECT COUNT(*) c FROM employees WHERE status = 'active'"),
       value: db.prepare("SELECT COALESCE(SUM(purchase_cost),0) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL").get().c,
       warranty_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND warranty_expires BETWEEN date('now') AND date('now','+60 day')"),
       licenses_soon: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND license_expires BETWEEN date('now') AND date('now','+60 day')"),
@@ -686,19 +768,19 @@ app.get('/api/dashboard', auth, (req, res) => {
     out.byCategory = db.prepare("SELECT category, COUNT(*) n FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL GROUP BY category ORDER BY n DESC").all();
     out.overdue = db.prepare(`
       SELECT s.*, a.name AS asset_name, a.tag, u.name AS user_name FROM assignments s
-      JOIN assets a ON a.id = s.asset_id JOIN users u ON u.id = s.user_id
+      JOIN assets a ON a.id = s.asset_id JOIN employees u ON u.id = s.user_id
       WHERE s.returned_at IS NULL AND s.due_date < date('now') ORDER BY s.due_date LIMIT 20`).all();
     out.openRequests = db.prepare(`
       SELECT r.*, u.name AS user_name, a.name AS asset_name, a.tag AS asset_tag FROM requests r
-      JOIN users u ON u.id = r.user_id LEFT JOIN assets a ON a.id = r.asset_id
+      JOIN employees u ON u.id = r.user_id LEFT JOIN assets a ON a.id = r.asset_id
       WHERE r.status IN ('open','approved','dropped_off') ORDER BY r.created_at DESC LIMIT 20`).all();
     out.expiring = db.prepare(`
       SELECT id, tag, name, category, warranty_expires, license_expires FROM assets
       WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND (warranty_expires BETWEEN date('now') AND date('now','+60 day') OR license_expires BETWEEN date('now') AND date('now','+60 day'))
       ORDER BY MIN(COALESCE(warranty_expires,'9999'), COALESCE(license_expires,'9999')) LIMIT 20`).all();
     out.activity = db.prepare(`
-      SELECT ac.*, u.name AS actor_name, a.name AS asset_name, a.tag FROM activity ac
-      LEFT JOIN users u ON u.id = ac.actor_id LEFT JOIN assets a ON a.id = ac.asset_id
+      SELECT ac.*, ${ACTOR_NAME}, a.name AS asset_name, a.tag FROM activity ac
+      ${ACTOR_JOIN} LEFT JOIN assets a ON a.id = ac.asset_id
       ORDER BY ac.id DESC LIMIT 15`).all();
   }
   res.json(out);
@@ -726,8 +808,8 @@ app.get('/api/outbox', admin, (req, res) => {
 });
 app.get('/api/activity', admin, (req, res) => {
   res.json(db.prepare(`
-    SELECT ac.*, u.name AS actor_name, a.name AS asset_name, a.tag FROM activity ac
-    LEFT JOIN users u ON u.id = ac.actor_id LEFT JOIN assets a ON a.id = ac.asset_id
+    SELECT ac.*, ${ACTOR_NAME}, a.name AS asset_name, a.tag FROM activity ac
+    ${ACTOR_JOIN} LEFT JOIN assets a ON a.id = ac.asset_id
     ORDER BY ac.id DESC LIMIT ?`).all(Math.min(1000, Number(req.query.limit) || 200)));
 });
 
@@ -765,7 +847,11 @@ app.post('/api/import/assets', admin, (req, res) => {
   const alias = { asset_tag: 'tag', serial_number: 'serial', s_n: 'serial', type: 'category', manufacturer: 'brand', cost: 'purchase_cost', price: 'purchase_cost', warranty: 'warranty_expires', seats: 'license_seats', assigned_to: 'assigned_email', email: 'assigned_email' };
   const keys = header.map((h) => alias[h] || h);
   let created = 0, updated = 0; const errors = [];
-  const users = new Map(db.prepare('SELECT id, email, name FROM users WHERE active = 1').all().map((u) => [u.email.toLowerCase(), u]));
+  // assigned_email matches an active employee by work email (or their login email); no login is needed to receive equipment.
+  const users = new Map();
+  for (const u of db.prepare("SELECT e.id, e.name, e.work_email, a.login_email FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id WHERE e.status = 'active'").all()) {
+    for (const k of [u.work_email, u.login_email]) if (k) users.set(k.toLowerCase(), u);
+  }
   const tx = db.transaction(() => {
     rows.slice(1).forEach((r, idx) => {
       const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
@@ -784,14 +870,14 @@ app.post('/api/import/assets', admin, (req, res) => {
       } else {
         const cols = ['tag', ...ASSET_FIELDS];
         id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
-        log(id, req.user.id, 'created', 'Imported from CSV'); created++;
+        log(id, req.user.account_id, 'created', 'Imported from CSV'); created++;
       }
       const em = clean(o.assigned_email)?.toLowerCase();
       if (em && users.has(em) && !openAssignments(id).length) {
         const u = users.get(em);
-        db.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by, notes) VALUES (?, ?, ?, ?)').run(id, u.id, req.user.id, 'Imported');
+        db.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by, notes) VALUES (?, ?, ?, ?)').run(id, u.id, req.user.account_id, 'Imported');
         refreshStatus(id);
-        log(id, req.user.id, 'checked_out', `To ${u.name} (import)`, u.id);
+        log(id, req.user.account_id, 'checked_out', `To ${u.name} (import)`, u.id);
       } else if (em && !users.has(em)) errors.push(`Row ${idx + 2}: no user with email ${em} — imported unassigned`);
     });
   });
@@ -803,9 +889,10 @@ app.post('/api/import/assets', admin, (req, res) => {
 function overdueSweep() {
   if (!getSettings().overdue_reminders) return;
   const rows = db.prepare(`
-    SELECT s.*, u.name AS user_name, u.email AS user_email FROM assignments s JOIN users u ON u.id = s.user_id
+    SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email FROM assignments s
+    JOIN employees u ON u.id = s.user_id LEFT JOIN accounts ac ON ac.employee_id = u.id
     WHERE s.returned_at IS NULL AND s.due_date IS NOT NULL AND s.due_date < date('now')
-      AND (s.last_overdue_notice IS NULL OR s.last_overdue_notice <= date('now','-3 day')) AND u.active = 1`).all();
+      AND (s.last_overdue_notice IS NULL OR s.last_overdue_notice <= date('now','-3 day')) AND u.status = 'active'`).all();
   for (const s of rows) {
     const a = getAsset(s.asset_id);
     notify.overdue({ name: s.user_name, email: s.user_email }, a, s);

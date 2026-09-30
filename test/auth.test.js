@@ -90,7 +90,7 @@ test('forgot-password never reveals whether the account exists', async () => {
 });
 
 test('reset-password works with a freshly issued token and then invalidates it', async () => {
-  const admin = db.prepare('SELECT id FROM users WHERE email = ?').get('ada@nutricost.com');
+  const admin = db.prepare('SELECT id FROM accounts WHERE login_email = ?').get('ada@nutricost.com');
   const crypto = require('node:crypto');
   const token = crypto.randomBytes(24).toString('base64url');
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(admin.id);
@@ -110,7 +110,7 @@ test('reset-password works with a freshly issued token and then invalidates it',
 });
 
 test('reset-password rejects an expired token', async () => {
-  const admin = db.prepare('SELECT id FROM users WHERE email = ?').get('ada@nutricost.com');
+  const admin = db.prepare('SELECT id FROM accounts WHERE login_email = ?').get('ada@nutricost.com');
   const token = 'expired-token-123';
   const exp = new Date(Date.now() - 3600e3).toISOString();
   db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(token, admin.id, exp);

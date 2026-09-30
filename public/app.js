@@ -895,8 +895,8 @@ async function viewPeople() {
     const ql = q.toLowerCase();
     const rows = users.filter((u) => !ql || [u.name, u.email, u.department, u.title].some((x) => (x || '').toLowerCase().includes(ql)));
     $('#list').innerHTML = rows.length ? `<ul class="list">${rows.map((u) => `<li><a class="item" href="#/person/${u.id}" style="${u.active ? '' : 'opacity:.55'}">
-      <div class="avatar">${esc(initials(u.name))}</div><div class="grow"><div class="title truncate">${esc(u.name)} ${u.role === 'admin' ? '<span class="pill checked_out plain" style="margin-left:4px">Admin</span>' : ''}${!u.active ? '<span class="pill plain" style="margin-left:4px">Inactive</span>' : ''}</div>
-      <div class="sub truncate">${esc(u.department ? u.department + ' · ' : '')}${esc(u.email)}</div></div>
+      <div class="avatar">${esc(initials(u.name))}</div><div class="grow"><div class="title truncate">${esc(u.name)} ${u.role === 'admin' ? '<span class="pill checked_out plain" style="margin-left:4px">Admin</span>' : ''}${!u.has_account ? '<span class="pill plain" style="margin-left:4px">No login</span>' : ''}${!u.active ? '<span class="pill plain" style="margin-left:4px">Inactive</span>' : ''}</div>
+      <div class="sub truncate">${esc(u.department ? u.department + ' · ' : '')}${esc(u.email || 'No email')}</div></div>
       ${u.asset_count ? `<span class="pill plain">${u.asset_count} item${u.asset_count > 1 ? 's' : ''}</span>` : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty">${icon('users')}<p>No people found.</p></div>`;
   };
   render();
@@ -904,25 +904,32 @@ async function viewPeople() {
   $('#add').onclick = () => personSheet(null, (u) => go('#/person/' + u.id));
 }
 function personSheet(u, done) {
-  const editing = !!u; u = u || { role: 'user' };
+  const editing = !!u; u = u || { role: 'employee', has_account: true };
   const { el, close } = sheet(`<h2>${editing ? 'Edit person' : 'Add a person'}</h2>
     <form class="form-grid" id="f" style="margin-top:12px">
       <label class="field"><span>Full name *</span><input name="name" required value="${esc(u.name || '')}" autocomplete="off"></label>
-      <label class="field"><span>Work email *</span><input name="email" type="email" required value="${esc(u.email || '')}" autocomplete="off"></label>
+      <label class="field"><span>Work email <span id="em-req">*</span></span><input name="email" type="email" ${editing && !u.has_account ? '' : 'required'} value="${esc(u.email || '')}" autocomplete="off"></label>
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}" list="depts"></label>
       <label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
-      <label class="field"><span>Access</span><select name="role"><option value="user" ${u.role === 'user' ? 'selected' : ''}>User — sees their own equipment, can request &amp; self check-out</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin — full access to manage assets &amp; people</option></select></label>
-      ${!editing ? `<label class="check"><input type="checkbox" name="invite" checked><span>Email them an invite to set a password</span></label>` : ''}
+      <label class="field"><span>Access</span><select name="role"><option value="employee" ${u.role !== 'admin' ? 'selected' : ''}>Employee — sees their own equipment, can request &amp; self check-out</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin — full access to manage assets &amp; people</option></select></label>
+      ${!editing ? `<label class="check"><input type="checkbox" name="login" id="login" checked><span>Can sign in (creates a login for them)</span></label>
+      <label class="check" id="inv-row"><input type="checkbox" name="invite" checked><span>Email them an invite to set a password</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${editing ? 'Save' : 'Add person'}</button></div>
     </form><datalist id="depts">${['IT', 'Marketing', 'Operations', 'Sales', 'Finance', 'Customer Service', 'Warehouse', 'Product', 'HR'].map((d) => `<option value="${d}">`).join('')}</datalist>`);
+  const loginBox = $('#login', el);
+  if (loginBox) loginBox.onchange = () => {
+    const on = loginBox.checked;
+    $('[name=email]', el).required = on; $('#em-req', el).style.display = on ? '' : 'none';
+    $('#inv-row', el).style.display = on ? '' : 'none'; $('[name=role]', el).closest('label').style.display = on ? '' : 'none';
+  };
   $('#f', el).onsubmit = (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
-    if (!editing) fd.invite = !!fd.invite;
+    if (!editing) { fd.login = !!fd.login; fd.invite = fd.login && !!fd.invite; }
     busy($('#go', el), async () => {
       const saved = await api(editing ? 'PUT' : 'POST', editing ? `/api/users/${u.id}` : '/api/users', fd);
-      usersCache = null; close(); toast(editing ? 'Saved' : fd.invite ? `Added — invite sent to ${saved.email}` : 'Added'); done && done(saved);
+      usersCache = null; close(); toast(editing ? 'Saved' : fd.invite ? `Added — invite sent to ${saved.email}` : fd.login ? 'Added' : 'Added (no login)'); done && done(saved);
     });
   };
 }
@@ -932,17 +939,28 @@ async function viewPerson(id) {
   main().innerHTML = `${backLink('#/people', 'People')}
     <div class="card pad"><div class="row" style="align-items:flex-start"><div class="avatar" style="width:56px;height:56px;font-size:18px">${esc(initials(u.name))}</div>
       <div class="grow"><h1>${esc(u.name)}</h1><div class="muted">${esc([u.title, u.department].filter(Boolean).join(' · '))}</div>
-      <div class="small" style="margin-top:4px"><a href="mailto:${esc(u.email)}">${esc(u.email)}</a>${u.phone ? ` · <a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : ''}</div>
-      <div class="row wrap" style="margin-top:8px;gap:6px">${u.role === 'admin' ? pill('checked_out', 'Admin') : pill('retired', 'User')}${!u.active ? pill('lost', 'Inactive') : ''}${!u.has_password ? pill('open', 'Invite pending') : ''}</div></div></div>
+      <div class="small" style="margin-top:4px">${u.email ? `<a href="mailto:${esc(u.email)}">${esc(u.email)}</a>` : '<span class="muted">No email</span>'}${u.phone ? ` · <a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : ''}</div>
+      <div class="row wrap" style="margin-top:8px;gap:6px">${u.role === 'admin' ? pill('checked_out', 'Admin') : u.has_account ? pill('retired', 'Employee') : pill('retired', 'No login')}${!u.active ? pill('lost', 'Inactive') : ''}${u.has_account && !u.has_password ? pill('open', 'Invite pending') : ''}</div></div></div>
       <div class="row wrap" style="margin-top:14px;gap:8px"><button class="btn sm" id="edit">${icon('edit')} Edit</button>
-        <button class="btn sm" id="invite">${icon('mail')} ${u.has_password ? 'Send password reset' : 'Resend invite'}</button>
+        ${u.has_account ? `<button class="btn sm" id="invite">${icon('mail')} ${u.has_password ? 'Send password reset' : 'Resend invite'}</button>` : `<button class="btn sm" id="give-login">${icon('user')} Give login access</button>`}
         ${u.id !== S.me.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" id="toggle">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</div></div>
     <div class="section-title">Has now (${d.current.length})</div>
     <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)}${m.due_date ? ` · due ${fmtDate(m.due_date)}` : ''}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
       ${u.active ? `<div class="card-body" style="border-top:1px solid var(--line)"><button class="btn block" id="give">${icon('out')} Check out something to ${esc(u.name.split(' ')[0])}</button></div>` : ''}</div>
     ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
   $('#edit').onclick = () => personSheet(u, () => route(true));
-  $('#invite').onclick = (e) => busy(e.currentTarget, async () => {
+  const gl = $('#give-login');
+  if (gl) gl.onclick = () => {
+    const { el, close } = sheet(`<h2>Give ${esc(u.name)} a login</h2><form class="form-grid" id="gl" style="margin-top:12px">
+      <label class="field"><span>Login email *</span><input name="email" type="email" required value="${esc(u.email || '')}"></label>
+      <label class="field"><span>Access</span><select name="role"><option value="employee">Employee</option><option value="admin">Admin</option></select></label>
+      <label class="check"><input type="checkbox" name="invite" checked><span>Email them an invite to set a password</span></label>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="glgo">Create login</button></div></form>`);
+    $('#gl', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target)); fd.invite = !!fd.invite;
+      busy($('#glgo', el), async () => { await api('POST', `/api/users/${u.id}/account`, fd); usersCache = null; close(); toast('Login created'); route(true); }); };
+  };
+  const inv = $('#invite');
+  if (inv) inv.onclick = (e) => busy(e.currentTarget, async () => {
     const r = await api('POST', `/api/users/${u.id}/invite`, {});
     if (r.link) sheet(`<h2>Email isn't set up yet</h2><p class="muted">Send this link to ${esc(u.name)} yourself. It expires in 7 days.</p><input readonly value="${esc(r.link)}" onclick="this.select()"><div class="sheet-actions"><button class="btn primary" data-close>Done</button></div>`);
     else toast('Email sent');

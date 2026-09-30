@@ -45,7 +45,9 @@ test('seeding produces the expected deterministic dataset, twice in a row, witho
   const dataDir = path.join(dir, 'data-dev');
   try {
     const first = await seedDatabase({ dataDir, quiet: true });
-    assert.equal(first.users, 9);
+    assert.equal(first.people, 10);
+    assert.equal(first.accounts, 9);
+    assert.equal(first.employeesWithoutLogin, 1);
     assert.equal(first.admins, 1);
     assert.equal(first.assets, EXPECTED_ASSET_COUNT);
     assert.equal(first.firstAssetTag, 'NC-00001');
