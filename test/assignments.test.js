@@ -98,8 +98,7 @@ async function makeLogin(name, email) {
 }
 
 test('a non-admin can never create a permanent assignment; self check-out is always a checkout', async () => {
-  await admin.put('/api/settings', { self_checkout: true });
-  try {
+  {
     const me = await makeLogin('Self Server', 'selfserve@nutricost.com');
     const a = await newAsset('Shared Tripod');
     const due = isoPlus(1);
@@ -117,7 +116,7 @@ test('a non-admin can never create a permanent assignment; self check-out is alw
     const b = await newAsset('Other Tripod');
     const r = await me.client.post(`/api/assets/${b.id}/checkout`, { employee_id: other.id, ...loan() });
     assert.equal(r.body.assignment.employee_id, me.id, 'a non-admin always checks out to themself');
-  } finally { await admin.put('/api/settings', { self_checkout: false }); }
+  }
 });
 
 // ---------------------------------------------------------------- history
@@ -308,7 +307,7 @@ test('migrating a pre-1E database: a legacy due date means checkout, none means 
   old.prepare("INSERT INTO requests (type, user_id, asset_id) VALUES ('equipment', 2, 3)").run();
   const assignSeq = old.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'assignments'").get().seq;
 
-  assert.deepEqual(runMigrations(old, migrations), [6]);
+  assert.deepEqual(runMigrations(old, migrations.filter((m) => m.id <= 6)), [6]);
   const rows = old.prepare('SELECT * FROM assignments ORDER BY id').all();
   assert.equal(rows.length, 4);
   assert.deepEqual(rows.map((r) => r.assignment_type), ['permanent', 'permanent', 'checkout', 'checkout'], 'decided by due_date alone, never by category');
@@ -333,7 +332,7 @@ test('a legacy database with no assignments at all still migrates cleanly', () =
   const old = new Database(':memory:');
   old.pragma('foreign_keys = ON');
   runMigrations(old, migrations.filter((m) => m.id <= 5));
-  assert.deepEqual(runMigrations(old, migrations), [6]);
+  assert.deepEqual(runMigrations(old, migrations.filter((m) => m.id <= 6)), [6]);
   assert.equal(old.prepare('SELECT COUNT(*) c FROM assignments').get().c, 0);
   assert.equal(old.pragma('foreign_key_check').length, 0);
 });
@@ -386,8 +385,7 @@ const asRow = (id) => db.prepare('SELECT * FROM requests WHERE id = ?').get(id);
 const requestPermanent = (client, asset, extra = {}) => client.post('/api/requests', { asset_id: asset.id, category: asset.category, requested_assignment_type: 'permanent', ...extra });
 
 test('an employee cannot directly create a permanent assignment, and the refusal is friendly text, not a status code', async () => {
-  await admin.put('/api/settings', { self_checkout: true });
-  try {
+  {
     const me = await makeLogin('Direct Attempt', 'directattempt@nutricost.com');
     const a = await newAsset('Direct Attempt Dock');
     const r = await me.client.post(`/api/assets/${a.id}/checkout`, { assignment_type: 'permanent' });
@@ -395,7 +393,7 @@ test('an employee cannot directly create a permanent assignment, and the refusal
     assert.match(r.body.error, /need IT approval/);
     assert.doesNotMatch(r.body.error, /403|forbidden/i);
     assert.equal(count('SELECT COUNT(*) c FROM assignments WHERE asset_id = ?', a.id), 0);
-  } finally { await admin.put('/api/settings', { self_checkout: false }); }
+  }
 });
 
 test('an employee asking for a permanent assignment creates a REQUEST, never an assignment', async () => {

@@ -56,6 +56,8 @@ test('seeding produces the expected deterministic dataset, twice in a row, witho
     assert.ok(first.historicalAssignments > 0);
     assert.ok(first.permanentAssignments >= 3, 'expected permanent everyday equipment');
     assert.ok(first.temporaryCheckouts >= 1, 'expected at least one temporary checkout');
+    assert.ok(first.selfCheckoutEnabled >= 1, 'expected login-enabled employees with self-checkout on');
+    assert.ok(first.selfCheckoutDisabled >= 1, 'expected a login-enabled employee with self-checkout off');
     assert.ok(first.requests > 0);
     assert.equal(first.devPassword, DEV_PASSWORD);
 

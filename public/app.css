@@ -103,6 +103,23 @@ main { flex: 1; min-width: 0; padding: 16px 16px calc(var(--tabbar-h) + 24px + e
 .back { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-weight: 600; margin-bottom: 8px; font-size: 14px; }
 .back svg { width: 18px; height: 18px; }
 
+/* compact sticky asset context: sits under the global top bar, spans the main column only (not clickable itself) */
+.asset-bar { position: sticky; top: var(--topbar-h, 56px); z-index: 15; background: var(--bg); margin: -16px -16px 14px; padding: 8px 16px 10px; border-bottom: 1px solid var(--line); }
+.asset-bar .back { margin-bottom: 2px; }
+.asset-bar .asset-id { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.asset-bar h1 { font-size: 19px; margin: 0; min-width: 0; max-width: 100%; }
+@media (min-width: 900px) { .asset-bar { margin: -24px -28px 18px; padding: 10px 28px 12px; } }
+
+/* avatar dropdown */
+.menu-wrap { position: relative; display: inline-flex; }
+.menu { position: absolute; right: 0; top: calc(100% + 10px); min-width: 210px; background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 28px rgba(16,24,40,.18); padding: 6px; z-index: 40; }
+.menu[hidden] { display: none; }
+.menu .menu-who { padding: 8px 10px 10px; border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+.menu a, .menu button { display: flex; align-items: center; gap: 10px; width: 100%; padding: 9px 10px; border: 0; background: none; border-radius: 8px; font: inherit; font-weight: 550; color: var(--text); cursor: pointer; text-align: left; }
+.topbar .menu a { color: var(--text); }
+.menu a:hover, .menu button:hover { background: var(--surface-2); }
+.menu svg { width: 18px; height: 18px; color: var(--muted); }
+
 /* ---------- cards ---------- */
 .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .card.pad { padding: 16px; }

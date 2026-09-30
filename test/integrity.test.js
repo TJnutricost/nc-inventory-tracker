@@ -78,7 +78,8 @@ test('asset category/location: trimmed, and non-text values rejected', async () 
   assert.equal(db.prepare('SELECT category FROM assets WHERE id = ?').get(ok.body.id).category, 'Laptop');
 });
 
-test('a fresh database has self-checkout OFF, so an employee cannot self check out until admin enables it', async () => {
+test('self-checkout is a per-employee permission: the admin starts enabled and no global setting is exposed', async () => {
   const me = (await admin.get('/api/me')).body;
-  assert.equal(me.settings.self_checkout, false);
+  assert.equal(me.user.can_self_checkout, true);
+  assert.equal(me.settings.self_checkout, undefined);
 });

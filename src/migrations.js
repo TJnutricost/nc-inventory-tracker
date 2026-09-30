@@ -446,5 +446,21 @@ module.exports = [
       }
     },
   },
+  {
+    // Employee columns added after Phase 1E QA (plain ADD COLUMNs, no rebuild):
+    //   can_self_checkout — self-checkout permission is per EMPLOYEE, default enabled for new employees and new databases.
+    //   building          — optional free-text location note; no list, table or settings behind it.
+    // The old global `self_checkout` setting (settings row, '1' = on; anything else = off, as the old code read it) is
+    // consumed ONCE, here, to preserve its intent: if it was OFF every existing employee starts disabled, if it was ON or
+    // absent they start enabled. After this migration nothing ever reads it again (it stays as unused, deprecated data).
+    id: 7,
+    name: 'employees: can_self_checkout and building',
+    up: (db) => {
+      const legacy = db.prepare("SELECT value FROM settings WHERE key = 'self_checkout'").get();
+      db.exec(`ALTER TABLE employees ADD COLUMN can_self_checkout INTEGER NOT NULL DEFAULT 1 CHECK (can_self_checkout IN (0,1))`);
+      db.exec('ALTER TABLE employees ADD COLUMN building TEXT');
+      if (legacy && legacy.value !== '1') db.exec('UPDATE employees SET can_self_checkout = 0');
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

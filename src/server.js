@@ -84,7 +84,7 @@ function currentUser(req) {
   if (!req.session.uid) return null;
   return db.prepare(`
     SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
-      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.created_at
+      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
     FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(req.session.uid) || null;
 }
@@ -98,7 +98,7 @@ function admin(req, res, next) {
   auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
 }
 // The signed-in user as the UI sees it: `id` is the EMPLOYEE (person) id, null for an account with no employee record.
-const publicMe = (u) => ({ id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
+const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email).
 const PERSON_SQL = `
@@ -112,6 +112,7 @@ const publicPerson = (p) => p && ({
   has_account: !!p.account_id, account_id: p.account_id || null, login_email: p.login_email || null,
   login_enabled: !!p.account_id && !!p.account_active, role: p.role || null,
   last_login_at: p.last_login_at || null, has_password: !!p.password_hash,
+  can_self_checkout: !!p.can_self_checkout, building: p.building || null,
 });
 // Who did it: an account, shown by its employee's name (or login email if unlinked).
 const ACTOR_JOIN = 'LEFT JOIN accounts aa ON aa.id = ac.actor_id LEFT JOIN employees u ON u.id = aa.employee_id';
@@ -281,8 +282,8 @@ app.post('/api/users', admin, (req, res) => {
   if (email && wantsLogin && db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) throw httpError(400, 'A login with that email already exists');
   const role = req.body.role === 'admin' ? 'admin' : 'employee';
   const id = db.transaction(() => {
-    const empId = db.prepare('INSERT INTO employees (name, work_email, department, title, phone) VALUES (?, ?, ?, ?, ?)')
-      .run(name, email, clean(req.body.department), clean(req.body.title), clean(req.body.phone)).lastInsertRowid;
+    const empId = db.prepare('INSERT INTO employees (name, work_email, department, title, phone, building) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(name, email, clean(req.body.department), clean(req.body.title), clean(req.body.phone), clean(req.body.building)).lastInsertRowid;
     if (wantsLogin) db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(empId, email, role);
     return empId;
   })();
@@ -339,12 +340,22 @@ app.put('/api/users/:id', admin, (req, res) => {
   const loginEmail = u.account_id ? (email || u.login_email) : null;
   if (u.account_id && loginEmail !== u.login_email && db.prepare('SELECT 1 FROM accounts WHERE login_email = ? AND id != ?').get(loginEmail, u.account_id)) throw httpError(400, 'That email is already in use');
   db.transaction(() => {
-    db.prepare('UPDATE employees SET name = ?, work_email = ?, department = ?, title = ?, phone = ?, status = ? WHERE id = ?')
-      .run(clean(req.body.name) || u.name, workEmail, clean(req.body.department), clean(req.body.title), clean(req.body.phone), active ? 'active' : 'inactive', id);
+    // building keeps its value when the client doesn't send the field; an empty string clears it
+    const building = req.body.building === undefined ? u.building : clean(req.body.building);
+    db.prepare('UPDATE employees SET name = ?, work_email = ?, department = ?, title = ?, phone = ?, building = ?, status = ? WHERE id = ?')
+      .run(clean(req.body.name) || u.name, workEmail, clean(req.body.department), clean(req.body.title), clean(req.body.phone), building, active ? 'active' : 'inactive', id);
     if (u.account_id) db.prepare('UPDATE accounts SET login_email = ?, role = ?, active = ? WHERE id = ?').run(loginEmail, role, active ? 1 : 0, u.account_id);
   })();
   if (!active && u.account_id) db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"uid":${u.account_id}}%`);
   res.json(publicPerson(getPerson(id)));
+});
+// Per-employee self-checkout permission (default on). Admin only; never touches the employee's other fields.
+app.put('/api/users/:id/self-checkout', admin, (req, res) => {
+  const p = getPerson(Number(req.params.id));
+  if (!p) throw httpError(404, 'Person not found');
+  if (typeof req.body.enabled !== 'boolean') throw httpError(400, 'enabled must be true or false');
+  db.prepare('UPDATE employees SET can_self_checkout = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, p.id);
+  res.json(publicPerson(getPerson(p.id)));
 });
 app.post('/api/users/:id/invite', admin, (req, res) => {
   const u = getPerson(Number(req.params.id));
@@ -416,7 +427,7 @@ app.get('/api/assets/:id', auth, (req, res) => {
     SELECT ac.*, ${ACTOR_NAME} FROM activity ac ${ACTOR_JOIN}
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
   res.json({
-    asset: sanitizeAsset(a, req.user),
+    asset: { ...sanitizeAsset(a, req.user), permanent_holders: holders.filter((h) => h.assignment_type === 'permanent').length, checkout_holders: holders.filter((h) => h.assignment_type === 'checkout').length },
     holders: isAdmin ? holders : holders.filter((h) => h.employee_id === req.user.employee_id),
     held_by_other: !isAdmin && !isMine && holders.length >= capacity(a),
     seats_used: holders.length,
@@ -513,9 +524,10 @@ app.post('/api/assets/:id/checkout', auth, (req, res) => {
     target = getPerson(Number(req.body.employee_id || req.body.user_id)); // user_id kept as a compatibility alias
     if (!target || target.status !== 'active') throw httpError(400, 'Choose who this is going to');
   } else {
-    if (!getSettings().self_checkout) throw httpError(403, 'Self check-out is turned off. Send IT a request instead.');
     target = req.user.employee_id && getPerson(req.user.employee_id);
     if (!target) throw httpError(403, "Your login isn't linked to an employee record. Ask IT.");
+    // Permission is per employee (admin-controlled, default on). The old global setting is deprecated and ignored.
+    if (!target.can_self_checkout) throw httpError(403, 'Self-checkout is not enabled for your account. Please request this item from IT.');
   }
   // Permanent assignments are admin-only (also enforced in createAssignment). A non-admin self check-out is always a
   // temporary checkout; explicitly asking for permanent is refused rather than silently changed.
@@ -783,7 +795,6 @@ app.get('/api/dashboard', auth, (req, res) => {
 app.get('/api/settings', admin, (req, res) => res.json({ ...getSettings(), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null }));
 app.put('/api/settings', admin, (req, res) => {
   const b = req.body;
-  if (b.self_checkout !== undefined) setSetting('self_checkout', b.self_checkout ? '1' : '0');
   if (b.overdue_reminders !== undefined) setSetting('overdue_reminders', b.overdue_reminders ? '1' : '0');
   if (b.default_loan_days !== undefined) setSetting('default_loan_days', String(Math.max(0, parseInt(b.default_loan_days, 10) || 0)));
   if (b.tag_prefix !== undefined) setSetting('tag_prefix', String(b.tag_prefix).trim().slice(0, 10));

@@ -98,19 +98,18 @@ test('a retired asset cannot be checked out', async () => {
   assert.equal(r.status, 400);
 });
 
-test('self check-out works when enabled and is blocked when disabled', async () => {
+test('self check-out works by default and is blocked once the admin disables it for that employee', async () => {
   const emp = await makeEmployee('Sam Selfserve', 'sam@nutricost.com');
   const asset = (await admin.post('/api/assets', { name: 'Spare Headset', tag: 'NC-SELF1' })).body;
 
-  await admin.put('/api/settings', { self_checkout: true });
   const ok = await emp.client.post(`/api/assets/${asset.id}/checkout`, { due_date: '2099-01-01' });
   assert.equal(ok.status, 200);
   await admin.post(`/api/assets/${asset.id}/checkin`, { condition: 'Good' });
 
-  await admin.put('/api/settings', { self_checkout: false });
-  const blocked = await emp.client.post(`/api/assets/${asset.id}/checkout`, {});
+  assert.equal((await admin.put(`/api/users/${emp.id}/self-checkout`, { enabled: false })).status, 200);
+  const blocked = await emp.client.post(`/api/assets/${asset.id}/checkout`, { due_date: '2099-01-01' });
   assert.equal(blocked.status, 403);
-  await admin.put('/api/settings', { self_checkout: true }); // restore for later tests
+  await admin.put(`/api/users/${emp.id}/self-checkout`, { enabled: true }); // restore for later tests
 });
 
 test('license-seat assets allow concurrent holders up to capacity', async () => {

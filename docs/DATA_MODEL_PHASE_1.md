@@ -55,6 +55,8 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
 
 ### 3.1 Employees and accounts (Phase 1D — implemented; see PROJECT_STATUS.md for the as-built schema and the notes below)
 
+> **Phase 1E additions to `employees`:** `can_self_checkout` (see §3.8) and optional free-text `building` (nullable; trimmed; no list/table/settings — Nutricost has 14+ buildings and IT types what applies). Login status is shown on the profile; the People list emphasizes self-checkout permission.
+
 - **Current:** `users` is person + login + role + assignee at once (F9).
 - **Approved model:**
   - `employees` — person / employment / inventory-assignee record: `id`, `name`, `work_email` (nullable, unique after normalization), `department`, `title`, `phone`, `status` (`active`/`inactive`), `created_at`.
@@ -157,7 +159,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
 - **History:** every transition writes an activity row (3.10).
 - **Migration mapping:** `open→submitted`, `completed→fulfilled`, others unchanged.
 
-### 3.8 Self-checkout (Phase 1B)
+### 3.8 Self-checkout (Phase 1B — superseded in Phase 1E: a per-employee permission, `employees.can_self_checkout`, default ON for new employees and databases. Migration 7 consumed the legacy global `self_checkout` setting exactly once (OFF → existing employees disabled; ON/absent → enabled); the setting is now deprecated, never read again, and left as unused data. The text below is historical.)
 
 - **Current:** `self_checkout` default `'1'` (**ON**) at `src/db.js:140` via `INSERT OR IGNORE`. Code paths: `POST /api/assets/:id/checkout` non-admin branch (`src/server.js:415`), `notify.selfCheckoutToAdmins` (`:157`, `mailer.js:91`), `PUT /api/settings` (`:655`), front-end action gating (`public/app.js:528`) and the Settings checkbox (`:1031`); tests at `test/assets.test.js:105-113`.
 - **Approved:** default for **NEW databases becomes OFF**. **Existing databases/settings must not be silently overwritten** by startup (`INSERT OR IGNORE` already preserves stored values). *Implemented in Phase 1B (2026-09-28): new databases default OFF; existing values are preserved.* Test fixtures that assume the ON default must set it explicitly.
