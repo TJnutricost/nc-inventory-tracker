@@ -9,6 +9,7 @@ const multer = require('multer');
 const sharp = require('sharp');
 const { db, DATA_DIR, getSettings, setSetting } = require('./db');
 const { notify, APP_URL, mailConfigured } = require('./mailer');
+const assignments = require('./assignments');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -131,19 +132,13 @@ function makeToken(userId, purpose, hours) {
   return token;
 }
 const getAsset = (id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
-const capacity = (a) => Math.max(1, Number(a.license_seats) || 1);
+const { capacity } = assignments;
 const openAssignments = (assetId) => db.prepare(`
   SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email, u.department AS user_department
-  FROM assignments s JOIN employees u ON u.id = s.user_id LEFT JOIN accounts ac ON ac.employee_id = u.id
+  FROM assignments s JOIN employees u ON u.id = s.employee_id LEFT JOIN accounts ac ON ac.employee_id = u.id
   WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);
 
-function refreshStatus(assetId) {
-  const a = getAsset(assetId);
-  if (!a || !['available', 'checked_out'].includes(a.status)) return;
-  const used = db.prepare('SELECT COUNT(*) c FROM assignments WHERE asset_id = ? AND returned_at IS NULL').get(assetId).c;
-  const status = used >= capacity(a) ? 'checked_out' : 'available';
-  db.prepare("UPDATE assets SET status = ?, updated_at = datetime('now') WHERE id = ?").run(status, assetId);
-}
+const refreshStatus = (assetId) => assignments.refreshStatus(db, assetId);
 
 // ---- asset tag issuance ----
 // Generated tags are prefix + a number from a durable, ever-increasing counter (asset_tag_counter). The counter is
@@ -170,32 +165,19 @@ function allocateTag() { // call only inside a transaction
 function sanitizeAsset(a, user) {
   if (!a) return a;
   if (user.role === 'admin') return a;
-  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
+  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
   const { purchase_cost, vendor, notes, ...rest } = a;
   if (!mine) delete rest.license_key;
   return rest;
 }
 
 // `user` = the employee receiving the asset; `actor` = the signed-in account performing it.
-function doCheckout({ asset, user, actor, due_date, notes, condition }) {
-  if (asset.archived_at) throw httpError(400, 'This asset is archived and can\'t be checked out.');
-  if (['retired', 'lost', 'maintenance', 'disposed'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
-  const open = openAssignments(asset.id);
-  if (open.some((o) => o.user_id === user.id)) throw httpError(400, `${user.name} already has this asset.`);
-  if (open.length >= capacity(asset)) {
-    throw httpError(400, capacity(asset) > 1 ? 'All license seats are in use.' : `Already checked out to ${open[0].user_name}. Check it in first.`);
-  }
-  let due = clean(due_date);
-  if (!due) {
-    const days = getSettings().default_loan_days;
-    if (days > 0) due = new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
-  }
-  const info = db.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by, due_date, notes, condition_out) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(asset.id, user.id, actor.account_id, due, clean(notes), clean(condition) || asset.condition);
-  if (clean(condition)) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(clean(condition), asset.id);
-  refreshStatus(asset.id);
-  log(asset.id, actor.account_id, 'checked_out', `To ${user.name}${due ? ` · due ${due}` : ''}${notes ? ` · ${notes}` : ''}`, user.id);
-  const assignment = db.prepare('SELECT * FROM assignments WHERE id = ?').get(info.lastInsertRowid);
+// The capacity check + insert + activity row are one immediate transaction (see assignments.js).
+function doCheckout({ asset, user, actor, assignment_type, due_date, due_time, notes, condition }) {
+  const { assignment } = assignments.createAssignment(db, {
+    assetId: asset.id, employeeId: user.id, actorAccountId: actor.account_id, actorIsAdmin: actor.role === 'admin',
+    type: assignment_type, dueDate: due_date, dueTime: due_time, notes, condition,
+  });
   notify.checkedOut(user, getAsset(asset.id), assignment);
   if (actor.employee_id === user.id && actor.role !== 'admin') notify.selfCheckoutToAdmins(user, asset);
   return assignment;
@@ -283,7 +265,7 @@ app.post('/api/reset', wrap(async (req, res) => {
 app.get('/api/users', auth, (req, res) => {
   // Everyone can see a minimal directory (names) — admins get details + counts
   const rows = db.prepare(`
-    SELECT p.*, (SELECT COUNT(*) FROM assignments s WHERE s.user_id = p.id AND s.returned_at IS NULL) AS asset_count
+    SELECT p.*, (SELECT COUNT(*) FROM assignments s WHERE s.employee_id = p.id AND s.returned_at IS NULL) AS asset_count
     FROM (${PERSON_SQL}) p ORDER BY (p.status = 'active') DESC, p.name COLLATE NOCASE`).all();
   if (req.user.role !== 'admin') return res.json(rows.filter((r) => r.status === 'active').map((r) => ({ id: r.id, name: r.name })));
   res.json(rows.map((r) => ({ ...publicPerson(r), asset_count: r.asset_count })));
@@ -336,10 +318,10 @@ app.get('/api/users/:id', auth, (req, res) => {
     SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial,
       (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb
     FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.user_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at DESC`).all(id);
+    WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(id);
   const past = db.prepare(`
     SELECT s.*, a.name AS asset_name, a.tag FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.user_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT 50`).all(id);
+    WHERE s.employee_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT 50`).all(id);
   res.json({ user: publicPerson(u), current, past });
 });
 // Updates the person and, when they have one, their account (role, login email, login enabled). Nothing here deletes a person.
@@ -377,17 +359,20 @@ app.post('/api/users/:id/invite', admin, (req, res) => {
 const ASSET_LIST_SQL = `
   SELECT a.*,
     (SELECT COUNT(*) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS seats_used,
-    (SELECT group_concat(u.name, ', ') FROM assignments s JOIN employees u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS holder_names,
+    (SELECT group_concat(u.name, ', ') FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS holder_names,
     (SELECT MIN(s.due_date) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL) AS due_date,
+    (SELECT COUNT(*) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.assignment_type = 'permanent') AS permanent_holders,
+    (SELECT COUNT(*) FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.assignment_type = 'checkout') AS checkout_holders,
     (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb
   FROM assets a`;
 
 app.get('/api/assets', auth, (req, res) => {
   const where = []; const params = [];
-  const { q, category, status, user_id } = req.query;
+  const { q, category, status } = req.query;
+  const employeeFilter = req.query.employee_id || req.query.user_id; // user_id kept as a compatibility alias
   if (q) {
     where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?
-      OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.user_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
+      OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
     const like = `%${q}%`; params.push(like, like, like, like, like, like, like);
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
@@ -395,10 +380,10 @@ app.get('/api/assets', auth, (req, res) => {
   else if (status === 'active') { where.push(`a.status NOT IN ('retired','lost','disposed')`); }
   else if (status) { where.push('a.status = ?'); params.push(status); }
   if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
-  if (user_id) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.user_id = ? AND s.returned_at IS NULL)'); params.push(Number(user_id)); }
+  if (employeeFilter) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)'); params.push(Number(employeeFilter)); }
   if (req.user.role !== 'admin') {
     // Users see what they hold and what's available to borrow
-    where.push(`(a.status = 'available' OR EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.user_id = ? AND s.returned_at IS NULL))`);
+    where.push(`(a.status = 'available' OR EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL))`);
     params.push(req.user.employee_id);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
@@ -420,7 +405,7 @@ app.get('/api/assets/:id', auth, (req, res) => {
   const a = getAsset(Number(req.params.id));
   if (!a) throw httpError(404, 'Asset not found');
   const holders = openAssignments(a.id);
-  const isMine = holders.some((h) => h.user_id === req.user.employee_id);
+  const isMine = holders.some((h) => h.employee_id === req.user.employee_id);
   const isAdmin = req.user.role === 'admin';
   const photos = db.prepare('SELECT * FROM photos WHERE asset_id = ? ORDER BY id').all(a.id);
   const requests = db.prepare(`
@@ -432,7 +417,7 @@ app.get('/api/assets/:id', auth, (req, res) => {
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
   res.json({
     asset: sanitizeAsset(a, req.user),
-    holders: isAdmin ? holders : holders.filter((h) => h.user_id === req.user.employee_id),
+    holders: isAdmin ? holders : holders.filter((h) => h.employee_id === req.user.employee_id),
     held_by_other: !isAdmin && !isMine && holders.length >= capacity(a),
     seats_used: holders.length,
     capacity: capacity(a),
@@ -525,14 +510,17 @@ app.post('/api/assets/:id/checkout', auth, (req, res) => {
   if (!asset) throw httpError(404, 'Asset not found');
   let target;
   if (req.user.role === 'admin') {
-    target = getPerson(Number(req.body.user_id));
+    target = getPerson(Number(req.body.employee_id || req.body.user_id)); // user_id kept as a compatibility alias
     if (!target || target.status !== 'active') throw httpError(400, 'Choose who this is going to');
   } else {
     if (!getSettings().self_checkout) throw httpError(403, 'Self check-out is turned off. Send IT a request instead.');
     target = req.user.employee_id && getPerson(req.user.employee_id);
     if (!target) throw httpError(403, "Your login isn't linked to an employee record. Ask IT.");
   }
-  const assignment = doCheckout({ asset, user: target, actor: req.user, due_date: req.body.due_date, notes: req.body.notes, condition: req.body.condition });
+  // Permanent assignments are admin-only (also enforced in createAssignment). A non-admin self check-out is always a
+  // temporary checkout; explicitly asking for permanent is refused rather than silently changed.
+  const assignment_type = req.user.role === 'admin' ? req.body.assignment_type : (req.body.assignment_type || 'checkout');
+  const assignment = doCheckout({ asset, user: target, actor: req.user, assignment_type, due_date: req.body.due_date, due_time: req.body.due_time, notes: req.body.notes, condition: req.body.condition });
   // Close any open equipment request from this user that named this asset
   db.prepare("UPDATE requests SET status='completed', resolved_by=?, resolved_at=datetime('now') WHERE type='equipment' AND status IN ('open','approved') AND user_id=? AND asset_id=?")
     .run(req.user.account_id, target.id, asset.id);
@@ -555,8 +543,8 @@ app.post('/api/assets/:id/checkin', admin, (req, res) => {
   refreshStatus(asset.id);
   if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
   db.prepare("UPDATE requests SET status = 'completed', resolved_by = ?, resolved_at = datetime('now') WHERE type = 'return' AND asset_id = ? AND user_id = ? AND status IN ('open','dropped_off')")
-    .run(req.user.account_id, asset.id, target.user_id);
-  log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.user_id);
+    .run(req.user.account_id, asset.id, target.employee_id);
+  log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name} · ${assignments.TYPE_LABEL[target.assignment_type]}${target.due_date ? ` · return was due ${assignments.returnBy(target.due_date, target.due_time)}` : ''}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.employee_id);
   notify.checkedIn({ name: target.user_name, email: target.user_email }, asset);
   res.json({ ok: true });
 });
@@ -565,15 +553,16 @@ app.post('/api/assets/:id/request-return', admin, (req, res) => {
   const asset = getAsset(Number(req.params.id));
   if (!asset) throw httpError(404, 'Asset not found');
   const open = openAssignments(asset.id);
-  const targets = req.body.user_id ? open.filter((o) => o.user_id === Number(req.body.user_id)) : open;
+  const wanted = req.body.employee_id || req.body.user_id; // user_id kept as a compatibility alias
+  const targets = wanted ? open.filter((o) => o.employee_id === Number(wanted)) : open;
   if (!targets.length) throw httpError(400, 'Nobody currently has this asset');
   const created = [];
   for (const t of targets) {
-    if (db.prepare("SELECT 1 FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, t.user_id)) continue;
+    if (db.prepare("SELECT 1 FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, t.employee_id)) continue;
     const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, message, needed_by, created_by) VALUES ('return', ?, ?, ?, ?, ?)")
-      .run(t.user_id, asset.id, clean(req.body.message), clean(req.body.needed_by), req.user.account_id);
+      .run(t.employee_id, asset.id, clean(req.body.message), clean(req.body.needed_by), req.user.account_id);
     const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-    log(asset.id, req.user.account_id, 'return_requested', `From ${t.user_name}${r.needed_by ? ` · by ${r.needed_by}` : ''}`, t.user_id);
+    log(asset.id, req.user.account_id, 'return_requested', `From ${t.user_name}${r.needed_by ? ` · by ${r.needed_by}` : ''}`, t.employee_id);
     notify.returnRequested({ name: t.user_name, email: t.user_email }, asset, r);
     created.push(r);
   }
@@ -591,7 +580,7 @@ app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async 
   const asset = getAsset(Number(req.params.id));
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
   if (!asset) { cleanup(); throw httpError(404, 'Asset not found'); }
-  const holder = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, req.user.employee_id);
+  const holder = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }
   if (!req.files?.length) throw httpError(400, 'No image received');
   const saved = [];
@@ -660,14 +649,18 @@ app.post('/api/requests', auth, (req, res) => {
   const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.employee_id;
   if (forUser === null) throw httpError(400, "Your login isn't linked to an employee record. Choose who the request is for.");
   const assetId = num(req.body.asset_id);
+  const wantedType = clean(req.body.requested_assignment_type);
+  if (wantedType && !assignments.ASSIGNMENT_TYPES.includes(wantedType)) throw httpError(400, 'Requested assignment type must be permanent or checkout');
+  if (wantedType === 'permanent' && assetId === null) throw httpError(400, 'Choose the equipment you want assigned permanently');
   if (!Number.isInteger(forUser) || forUser < 1) throw httpError(400, 'Choose a valid person for this request');
   if (assetId !== null && (!Number.isInteger(assetId) || assetId < 1)) throw httpError(400, 'Choose a valid asset');
   if (!db.prepare('SELECT 1 FROM employees WHERE id = ?').get(forUser)) throw httpError(404, 'User not found');
   if (assetId !== null && !getAsset(assetId)) throw httpError(404, 'Asset not found');
-  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by) VALUES ('equipment', ?, ?, ?, ?, ?, ?)")
-    .run(forUser, assetId, category, message, clean(req.body.needed_by), req.user.account_id);
+  // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
+  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?)")
+    .run(forUser, assetId, category || (wantedType === 'permanent' ? getAsset(assetId).category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType);
   const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-  if (assetId) log(assetId, req.user.account_id, 'requested', message || category, forUser);
+  if (assetId) log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
   notify.equipmentRequested(getPerson(forUser), r);
   res.json(r);
 });
@@ -687,7 +680,7 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
   if (assetId) {
     asset = getAsset(assetId);
     if (!asset) throw httpError(404, 'Asset not found');
-    doCheckout({ asset, user, actor: req.user, due_date: req.body.due_date, notes: `Request #${r.id}` });
+    doCheckout({ asset, user, actor: req.user, assignment_type: req.body.assignment_type || r.requested_assignment_type || undefined, due_date: req.body.due_date, due_time: req.body.due_time, notes: `Request #${r.id}` });
   }
   const status = asset ? 'completed' : 'approved';
   db.prepare("UPDATE requests SET status = ?, asset_id = COALESCE(?, asset_id), resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?")
@@ -727,7 +720,7 @@ app.post('/api/assets/:id/return-notice', auth, (req, res) => {
   const asset = getAsset(Number(req.params.id));
   if (!asset) throw httpError(404, 'Asset not found');
   const me = req.user.employee_id;
-  const mine = me && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND user_id = ? AND returned_at IS NULL').get(asset.id, me);
+  const mine = me && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, me);
   if (!mine) throw httpError(400, "This isn't checked out to you");
   const existing = db.prepare("SELECT * FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, me);
   if (existing) db.prepare("UPDATE requests SET status='dropped_off' WHERE id = ?").run(existing.id);
@@ -743,12 +736,12 @@ app.get('/api/dashboard', auth, (req, res) => {
   const mine = db.prepare(`
     SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial, a.id AS asset_id,
       (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb,
-      (SELECT r.id FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_request_id,
-      (SELECT r.status FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_status,
-      (SELECT r.needed_by FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_by,
-      (SELECT r.message FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.user_id AND r.status IN ('open','dropped_off')) AS return_message
+      (SELECT r.id FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_request_id,
+      (SELECT r.status FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_status,
+      (SELECT r.needed_by FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_by,
+      (SELECT r.message FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_message
     FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.user_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at DESC`).all(req.user.employee_id);
+    WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(req.user.employee_id);
   const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.employee_id);
   const out = { mine, myRequests };
   if (req.user.role === 'admin') {
@@ -768,7 +761,7 @@ app.get('/api/dashboard', auth, (req, res) => {
     out.byCategory = db.prepare("SELECT category, COUNT(*) n FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL GROUP BY category ORDER BY n DESC").all();
     out.overdue = db.prepare(`
       SELECT s.*, a.name AS asset_name, a.tag, u.name AS user_name FROM assignments s
-      JOIN assets a ON a.id = s.asset_id JOIN employees u ON u.id = s.user_id
+      JOIN assets a ON a.id = s.asset_id JOIN employees u ON u.id = s.employee_id
       WHERE s.returned_at IS NULL AND s.due_date < date('now') ORDER BY s.due_date LIMIT 20`).all();
     out.openRequests = db.prepare(`
       SELECT r.*, u.name AS user_name, a.name AS asset_name, a.tag AS asset_tag FROM requests r
@@ -875,7 +868,7 @@ app.post('/api/import/assets', admin, (req, res) => {
       const em = clean(o.assigned_email)?.toLowerCase();
       if (em && users.has(em) && !openAssignments(id).length) {
         const u = users.get(em);
-        db.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by, notes) VALUES (?, ?, ?, ?)').run(id, u.id, req.user.account_id, 'Imported');
+        db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type, checked_out_by, notes) VALUES (?, ?, 'permanent', ?, ?)").run(id, u.id, req.user.account_id, 'Imported');
         refreshStatus(id);
         log(id, req.user.account_id, 'checked_out', `To ${u.name} (import)`, u.id);
       } else if (em && !users.has(em)) errors.push(`Row ${idx + 2}: no user with email ${em} — imported unassigned`);
@@ -890,7 +883,7 @@ function overdueSweep() {
   if (!getSettings().overdue_reminders) return;
   const rows = db.prepare(`
     SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email FROM assignments s
-    JOIN employees u ON u.id = s.user_id LEFT JOIN accounts ac ON ac.employee_id = u.id
+    JOIN employees u ON u.id = s.employee_id LEFT JOIN accounts ac ON ac.employee_id = u.id
     WHERE s.returned_at IS NULL AND s.due_date IS NOT NULL AND s.due_date < date('now')
       AND (s.last_overdue_notice IS NULL OR s.last_overdue_notice <= date('now','-3 day')) AND u.status = 'active'`).all();
   for (const s of rows) {

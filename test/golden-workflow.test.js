@@ -53,12 +53,12 @@ test('golden path: lookup -> assign -> re-lookup -> check in -> re-lookup, with 
   const checkout = await admin.post(`/api/assets/${assetId}/checkout`, { user_id: employee.id });
   assert.equal(checkout.status, 200, JSON.stringify(checkout.body));
   const assignmentId = checkout.body.assignment.id;
-  assert.equal(checkout.body.assignment.user_id, employee.id);
+  assert.equal(checkout.body.assignment.employee_id, employee.id);
 
   const afterAssign = await admin.get(`/api/assets/${assetId}`);
   assert.equal(afterAssign.body.asset.status, 'checked_out');
   assert.equal(afterAssign.body.holders.length, 1);
-  assert.equal(afterAssign.body.holders[0].user_id, employee.id);
+  assert.equal(afterAssign.body.holders[0].employee_id, employee.id);
   const checkedOutEntry = afterAssign.body.activity.find((a) => a.action === 'checked_out');
   assert.ok(checkedOutEntry, 'expected a checked_out activity entry');
   assert.equal(checkedOutEntry.subject_user_id, employee.id);
@@ -92,7 +92,7 @@ test('golden path: lookup -> assign -> re-lookup -> check in -> re-lookup, with 
   // Historical integrity: the completed assignment row must still exist, untouched by delete.
   const historyRow = db.prepare('SELECT * FROM assignments WHERE id = ?').get(assignmentId);
   assert.ok(historyRow, 'the completed assignment must not be deleted on check-in');
-  assert.equal(historyRow.user_id, employee.id);
+  assert.equal(historyRow.employee_id, employee.id);
   assert.ok(historyRow.checked_out_at, 'checkout timestamp must be preserved');
   assert.ok(historyRow.returned_at, 'assignment must be closed (returned_at set), not removed');
   assert.equal(historyRow.condition_in, 'Good');

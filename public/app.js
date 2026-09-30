@@ -40,7 +40,7 @@ async function api(method, url, body, { raw } = {}) {
     S.me = null; S.shell = false;
     if (!/^#\/(login|forgot|reset|setup)/.test(location.hash)) location.hash = '#/login';
   }
-  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (!res.ok) throw new Error((data && data.error) || (res.status === 403 ? "That isn't available from your account. Ask IT if you need it." : 'Something went wrong. Please try again.'));
   return data;
 }
 
@@ -108,7 +108,11 @@ const icon = (n, cls = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="curr
 const CAT_ICON = { Laptop: 'laptop', Desktop: 'desktop', Monitor: 'monitor', 'Keyboard & Mouse': 'keyboard', Headset: 'headphones', 'Dock / Adapter': 'dock', Phone: 'phone', Tablet: 'tablet', 'Printer / Scanner': 'printer', Networking: 'wifi', Appliance: 'plug', 'Software License': 'key' };
 const catIcon = (c) => CAT_ICON[c] || (/laptop|notebook/i.test(c) ? 'laptop' : /monitor|display/i.test(c) ? 'monitor' : /license|software/i.test(c) ? 'key' : 'box');
 const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', disposed: 'Disposed', lost: 'Lost', overdue: 'Overdue' };
+const isPermReq = (r) => r.requested_assignment_type === 'permanent';
 const REQ_LABEL = { open: 'Open', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
+const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
+const fmtClock = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const h = Number(m[1]); return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`; };
+const typeText = (m) => `${esc(TYPE_LABEL[m.assignment_type] || TYPE_LABEL.permanent)}${m.assignment_type === 'checkout' && m.due_date ? ` · return by ${fmtDate(m.due_date)}${m.due_time ? ' ' + fmtClock(m.due_time) : ''}` : ''}`;
 const pill = (status, label) => `<span class="pill ${esc(status)}">${esc(label || STATUS_LABEL[status] || status)}</span>`;
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
 const thumbHtml = (thumb, cat) => `<div class="thumb">${thumb ? `<img src="/uploads/${esc(thumb)}" alt="" loading="lazy">` : icon(catIcon(cat))}</div>`;
@@ -375,8 +379,8 @@ async function viewSetup() {
 function myEquipmentList(mine) {
   if (!mine.length) return `<div class="empty">${icon('laptop')}<p>No equipment is checked out to you.</p></div>`;
   return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
-    <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)}</div></div>
-    ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : m.due_date ? `<span class="small muted">Due ${fmtDate(m.due_date)}</span>` : ''}
+    <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)} · ${typeText(m)}</div></div>
+    ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
 }
 function returnBanners(mine) {
@@ -401,7 +405,7 @@ async function viewHome() {
       <div class="stack">${returnBanners(d.mine)}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'}</span></div>${myEquipmentList(d.mine)}</div>
-      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
     wireDropoffs(main());
@@ -424,7 +428,7 @@ async function viewHome() {
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
           ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div>
-            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
+            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
             <div class="sub truncate">${r.type === 'return' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</a></li>`).join('')}
           ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
@@ -470,7 +474,7 @@ async function viewAssets() {
     if (state.q) u.set('q', state.q);
     if (state.status && !(state.status === 'checked_out' && !isAdmin())) u.set('status', state.status);
     if (state.category) u.set('category', state.category);
-    if (!isAdmin() && state.status === 'checked_out') u.set('user_id', S.me.id);
+    if (!isAdmin() && state.status === 'checked_out') u.set('employee_id', S.me.id);
     history.replaceState(null, '', '#/assets' + (u.toString() && isAdmin() ? '?' + u.toString() : ''));
     try {
       const rows = await api('GET', '/api/assets?' + u.toString());
@@ -551,11 +555,11 @@ async function viewAsset(id) {
       ${actions}
       ${d.holders.length ? `<div class="card"><div class="card-head"><h2>${multi ? 'Assigned to' : admin ? 'Checked out to' : 'Checked out to you'}</h2></div><ul class="list">${d.holders.map((h) => `<li><div class="item">
           <div class="avatar">${esc(initials(h.user_name))}</div>
-          <div class="grow">${admin ? `<a href="#/person/${h.user_id}" class="title">${esc(h.user_name)}</a>` : `<div class="title">${esc(h.user_name)}</div>`}
-          <div class="sub">Since ${fmtDate(h.checked_out_at)}${h.due_date ? ` · due ${fmtDate(h.due_date)}` : ''}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
+          <div class="grow">${admin ? `<a href="#/person/${h.employee_id}" class="title">${esc(h.user_name)}</a>` : `<div class="title">${esc(h.user_name)}</div>`}
+          <div class="sub">${typeText(h)} · since ${fmtDate(h.checked_out_at)}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
           ${isOverdue(h.due_date) ? pill('overdue', 'Overdue') : ''}
           ${admin && multi ? `<button class="btn sm" data-in="${h.id}">Check in</button>` : ''}</div></li>`).join('')}</ul></div>` : ''}
-      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       ${a.license_key || a.license_expires || multi || a.category === 'Software License' ? `<div class="card"><div class="card-head"><h2>License</h2></div><div class="kv">
           ${a.license_key ? `<div class="k">Key</div><div class="v"><span class="license-key">${esc(a.license_key)}</span> <button class="iconbtn" style="width:32px;height:32px;display:inline-grid;vertical-align:middle" id="copykey" title="Copy">${icon('copy')}</button></div>` : ''}
           <div class="k">Seats</div><div class="v">${d.seats_used} used of ${d.capacity}</div>
@@ -582,10 +586,30 @@ async function viewAsset(id) {
   on('#act-in', () => checkinSheet(a, d.holders, reload));
   on('#act-ret', () => requestReturnSheet(a, d.holders, reload));
   $$('[data-in]').forEach((b) => b.onclick = () => checkinSheet(a, d.holders.filter((h) => h.id === Number(b.dataset.in)), reload));
-  on('#act-self', async () => {
-    const ok = await confirmSheet('Check this out to you?', `${a.name} (${a.tag}) will be assigned to you and IT will be notified.`, 'Check out to me');
-    if (!ok) return;
-    try { await api('POST', `/api/assets/${a.id}/checkout`, {}); toast("It's yours! Check your email for details."); reload(); } catch (e) { fail(e); }
+  on('#act-self', () => {
+    const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
+      <form class="form-grid" id="f">
+      <div class="field"><span>How long do you need it?</span><div class="chips" data-self-type><button type="button" class="chip on" data-t="checkout">Temporary checkout</button><button type="button" class="chip" data-t="permanent">Permanent</button></div>
+        <div class="small muted" data-self-hint style="margin-top:6px">Borrow it and bring it back by the return date.</div></div>
+      <div data-self-due class="form-grid">${returnFields()}</div>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out to me</button></div></form>`);
+    wireReturnFields(el);
+    let mode = 'checkout';
+    const dueWrap = $('[data-self-due]', el);
+    $('[data-self-type]', el).onclick = (e) => {
+      const b = e.target.closest('.chip'); if (!b) return;
+      mode = b.dataset.t;
+      $$('[data-self-type] .chip', el).forEach((c) => c.classList.toggle('on', c === b));
+      dueWrap.style.display = mode === 'checkout' ? '' : 'none';
+      $$('input', dueWrap).forEach((i) => { i.disabled = mode !== 'checkout'; });
+      $('[data-self-hint]', el).textContent = mode === 'checkout' ? 'Borrow it and bring it back by the return date.' : 'Permanent assignments must be approved by IT. You can send a request.';
+      $('#go', el).textContent = mode === 'checkout' ? 'Check out to me' : 'Request permanent assignment';
+    };
+    $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
+      busy($('#go', el), async () => {
+        if (mode === 'permanent') { if (await requestPermanentAssignment(a)) { close(); reload(); } return; }
+        await api('POST', `/api/assets/${a.id}/checkout`, { due_date: fd.due_date, due_time: fd.due_time }); close(); toast("It's yours! Check your email for details."); reload();
+      }); };
   });
   on('#act-request', () => requestEquipmentSheet({ asset: a }));
   on('#act-similar', (e) => { e.preventDefault(); requestEquipmentSheet({ category: a.category }); });
@@ -642,11 +666,47 @@ function personPicker(container, users, onPick, selectedId) {
   $('#pp-q', container).oninput = (e) => render(e.target.value);
   $('#pp-list', container).onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; selectedId = Number(b.dataset.id); onPick(users.find((u) => u.id === selectedId)); render($('#pp-q', container).value); };
 }
-function dueChips(name = 'due_date') {
+// Employees never create a permanent assignment directly: they ask IT. Shows the approval notice, and only on
+// "Send request" records a request (no assignment, no check-out). Resolves true when the request was sent.
+async function requestPermanentAssignment(asset, message) {
+  const ok = await confirmSheet('Permanent assignment requires approval', 'Permanent equipment assignments must be approved by IT.', 'Send request');
+  if (!ok) return false;
+  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, message: message || undefined, requested_assignment_type: 'permanent' });
+  toast('Request sent to IT. Nothing is assigned until IT approves it.');
+  refreshBadge();
+  return true;
+}
+// Return date (required) + time (optional) for a temporary checkout. "Today" just fills in today's date.
+function returnFields() {
   const def = S.settings.default_loan_days;
-  const opts = [['', 'No due date'], [addDays(7), '1 week'], [addDays(30), '1 month'], [addDays(90), '3 months']];
-  return `<label class="field"><span>Due back</span><div class="chips" data-due>${opts.map(([v, l]) => `<button type="button" class="chip ${(!def && !v) ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
-    <input type="date" name="${name}" min="${localToday()}" style="margin-top:8px" value="${def ? addDays(def) : ''}"></label>`;
+  return `<div class="field"><span>Return date *</span><div class="row" style="gap:8px"><input type="date" name="due_date" min="${localToday()}" value="${def ? addDays(def) : ''}" required style="flex:1"><button type="button" class="btn sm" data-today>Today</button></div></div>
+    <label class="field"><span>Return time <span class="muted">(optional)</span></span><input type="time" name="due_time"></label>`;
+}
+function wireReturnFields(el) {
+  const btn = $('[data-today]', el); const date = $('input[name=due_date]', el);
+  if (btn) btn.onclick = () => { date.value = localToday(); };
+}
+// Assignment type: Permanent (admin only, no return date/time) or Temporary checkout (return date required).
+function assignTypeFields() {
+  return `<div class="field"><span>Assignment type</span><div class="chips" data-type><button type="button" class="chip on" data-t="permanent">Permanent</button><button type="button" class="chip" data-t="checkout">Temporary checkout</button></div>
+    <input type="hidden" name="assignment_type" value="permanent"><div class="small muted" data-type-hint style="margin-top:6px">Ongoing equipment for this person.</div></div>
+    <div data-due-wrap class="form-grid" style="display:none">${returnFields()}</div>`;
+}
+function wireAssignType(el) {
+  const box = $('[data-type]', el); const wrap = $('[data-due-wrap]', el);
+  const hidden = $('input[name=assignment_type]', el); const hint = $('[data-type-hint]', el);
+  const inputs = $$('input', wrap);
+  const setType = (t) => {
+    hidden.value = t;
+    $$('.chip', box).forEach((c) => c.classList.toggle('on', c.dataset.t === t));
+    wrap.style.display = t === 'checkout' ? '' : 'none';
+    inputs.forEach((i) => { i.disabled = t !== 'checkout'; if (t !== 'checkout') i.value = ''; });
+    if (t === 'checkout' && S.settings.default_loan_days) $('input[name=due_date]', wrap).value = addDays(S.settings.default_loan_days);
+    hint.textContent = t === 'checkout' ? 'Temporary custody. A return date is required.' : 'Ongoing equipment for this person.';
+  };
+  box.onclick = (e) => { const b = e.target.closest('.chip'); if (b) setType(b.dataset.t); };
+  wireReturnFields(wrap);
+  setType('permanent');
 }
 function wireDueChips(el) {
   const box = $('[data-due]', el); if (!box) return;
@@ -661,19 +721,19 @@ async function checkoutSheet(asset, done, presetUser) {
   const { el, close } = sheet(`<h2>Check out</h2><p class="muted small" style="margin-top:0">${esc(asset.name)} · <span class="mono">${esc(asset.tag)}</span></p>
     <form class="form-grid" id="f">
       <div><div class="small muted" style="font-weight:650;margin-bottom:6px">Who is it going to?</div><div id="pp"></div></div>
-      ${dueChips()}
+      ${assignTypeFields()}
       <label class="field"><span>Condition</span><select name="condition">${CONDITIONS.map((c) => `<option ${c === (asset.condition || 'Good') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="field"><span>Note (optional)</span><input name="notes" placeholder="e.g. includes charger and bag"></label>
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go" ${picked ? '' : 'disabled'}>Check out</button></div>
     </form>`);
   const updateBtn = () => { const b = $('#go', el); b.disabled = !picked; b.textContent = picked ? `Check out to ${picked.name.split(' ')[0]}` : 'Choose a person'; };
   personPicker($('#pp', el), users, (u) => { picked = u; updateBtn(); }, picked?.id);
-  updateBtn(); wireDueChips(el);
+  updateBtn(); wireAssignType(el);
   $('#f', el).onsubmit = (e) => {
     e.preventDefault(); if (!picked) return;
     const fd = Object.fromEntries(new FormData(e.target));
     busy($('#go', el), async () => {
-      await api('POST', `/api/assets/${asset.id}/checkout`, { ...fd, user_id: picked.id });
+      await api('POST', `/api/assets/${asset.id}/checkout`, { ...fd, employee_id: picked.id });
       close(); toast(`Checked out to ${picked.name}`); done && done();
     });
   };
@@ -681,8 +741,8 @@ async function checkoutSheet(asset, done, presetUser) {
 function checkinSheet(asset, holders, done) {
   const { el, close } = sheet(`<h2>Check in</h2><p class="muted small" style="margin-top:0">${esc(asset.name)} · <span class="mono">${esc(asset.tag)}</span></p>
     <form class="form-grid" id="f">
-      ${holders.length > 1 ? `<label class="field"><span>Returned by</span><select name="assignment_id">${holders.map((h) => `<option value="${h.id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
-        : `<input type="hidden" name="assignment_id" value="${holders[0].id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">Had it since ${fmtDate(holders[0].checked_out_at)}</div></div></div>`}
+      ${holders.length > 1 ? `<label class="field"><span>Returned by</span><select name="assignment_id">${holders.map((h) => `<option value="${h.id}">${esc(h.user_name)} (${esc(TYPE_LABEL[h.assignment_type])})</option>`).join('')}</select></label>`
+        : `<input type="hidden" name="assignment_id" value="${holders[0].id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${typeText(holders[0])} · since ${fmtDate(holders[0].checked_out_at)}</div></div></div>`}
       <label class="field"><span>Condition now</span><select name="condition">${CONDITIONS.map((c) => `<option ${c === (asset.condition || 'Good') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="field"><span>Put it back at</span><input name="location" list="locs" value="${esc(asset.location || '')}"><datalist id="locs">${S.settings.locations.map((l) => `<option value="${esc(l)}">`).join('')}</datalist></label>
       <label class="check"><input type="checkbox" name="to_maintenance"><span>Needs repair — mark it <strong>In repair</strong></span></label>
@@ -699,8 +759,8 @@ function checkinSheet(asset, holders, done) {
 function requestReturnSheet(asset, holders, done) {
   const { el, close } = sheet(`<h2>Request return</h2><p class="muted small" style="margin-top:0">We'll email them and show a reminder in the app.</p>
     <form class="form-grid" id="f">
-      ${holders.length > 1 ? `<label class="field"><span>From</span><select name="user_id"><option value="">Everyone who has it (${holders.length})</option>${holders.map((h) => `<option value="${h.user_id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
-        : `<input type="hidden" name="user_id" value="${holders[0].user_id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${esc(asset.name)} · ${esc(asset.tag)}</div></div></div>`}
+      ${holders.length > 1 ? `<label class="field"><span>From</span><select name="employee_id"><option value="">Everyone who has it (${holders.length})</option>${holders.map((h) => `<option value="${h.employee_id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
+        : `<input type="hidden" name="employee_id" value="${holders[0].employee_id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${esc(asset.name)} · ${esc(asset.tag)}</div></div></div>`}
       <label class="field"><span>Return by</span><div class="chips" data-due>${[[addDays(1), 'Tomorrow'], [addDays(3), '3 days'], [addDays(7), '1 week'], ['', 'No date']].map(([v, l], i) => `<button type="button" class="chip ${i === 2 ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
         <input type="date" name="needed_by" value="${addDays(7)}" min="${localToday()}" style="margin-top:8px"></label>
       <label class="field"><span>Message (optional)</span><textarea name="message" placeholder="e.g. Upgrading your laptop — please bring it to the IT room."></textarea></label>
@@ -719,12 +779,15 @@ function requestEquipmentSheet({ asset, category, forUser } = {}) {
         : `<label class="field"><span>What do you need?</span><select name="category" required><option value="">Choose…</option>${S.settings.categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`}
       <label class="field"><span>Details</span><textarea name="message" placeholder="${asset ? 'Anything IT should know?' : 'e.g. Second monitor for my desk, USB-C if possible'}"></textarea></label>
       <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
+      ${asset && !forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
     </form>`);
   $('#f', el).onsubmit = (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     if (forUser) fd.user_id = forUser.id;
+    const permanent = !!fd.permanent; delete fd.permanent;
+    if (permanent) { busy($('#go', el), async () => { if (await requestPermanentAssignment(asset, fd.message)) { close(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); } }); return; }
     busy($('#go', el), async () => { await api('POST', '/api/requests', fd); close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); });
   };
 }
@@ -840,10 +903,12 @@ async function viewRequests() {
     if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
     list.innerHTML = `<div class="stack">${rows.map((r) => {
       const isRet = r.type === 'return';
-      const title = isRet ? `Return ${esc(r.asset_name || 'item')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`;
+      const perm = isPermReq(r);
+      const title = isRet ? `Return ${esc(r.asset_name || 'item')}` : perm ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`;
       let btns = '';
       if (['open', 'approved', 'dropped_off'].includes(r.status)) {
-        if (isAdmin() && !isRet) btns = `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
+        if (isAdmin() && perm && r.asset_id) btns = `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
+        else if (isAdmin() && !isRet) btns = `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
         else if (isAdmin() && isRet) btns = `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
         else if (!isRet) btns = `<button class="btn sm" data-cancel="${r.id}">Cancel</button>`;
         else if (r.status === 'open') btns = `<button class="btn sm dark" data-dropoff="${r.id}">${icon('check')} I've dropped it off</button>`;
@@ -863,13 +928,16 @@ async function viewRequests() {
       const r = find(b.dataset.fulfill);
       assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, onPick: (assetId) => {
         const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
-          <form class="form-grid" id="f">${dueChips()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
+          <form class="form-grid" id="f">${assignTypeFields()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
           <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
-        wireDueChips(el);
+        wireAssignType(el);
         $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
-          busy($('#go', el), async () => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: assetId, due_date: fd.due_date, note: fd.note }); close(); toast('Assigned and checked out'); refreshBadge(); render(); }); };
+          busy($('#go', el), async () => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: assetId, assignment_type: fd.assignment_type, due_date: fd.due_date, due_time: fd.due_time, note: fd.note }); close(); toast('Assigned and checked out'); refreshBadge(); render(); }); };
       } });
     });
+    $$('[data-approve-perm]', list).forEach((b) => b.onclick = () => { const r = find(b.dataset.approvePerm);
+      noteSheet('Approve permanent assignment', `${r.asset_name || 'This item'} will be permanently assigned to ${r.user_name}. Add a note for them (optional).`, 'Approve & assign', 'e.g. Pick it up at the IT room',
+        async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: r.asset_id, assignment_type: 'permanent', note }); toast('Permanently assigned'); refreshBadge(); render(); }); });
     $$('[data-approve]', list).forEach((b) => b.onclick = () => noteSheet('Approve request', 'Let them know what happens next (optional).', 'Approve', 'e.g. Ordered — should arrive next week', async (note) => { await api('POST', `/api/requests/${b.dataset.approve}/approve`, { note }); toast('Approved — they’ve been emailed'); refreshBadge(); render(); }));
     $$('[data-deny]', list).forEach((b) => b.onclick = () => noteSheet('Decline request', 'Add a short reason (optional). They’ll get an email.', 'Decline', 'e.g. Please talk to your manager first', async (note) => { await api('POST', `/api/requests/${b.dataset.deny}/deny`, { note }); toast('Declined'); refreshBadge(); render(); }, true));
     $$('[data-cancel]', list).forEach((b) => b.onclick = () => busy(b, async () => { await api('POST', `/api/requests/${b.dataset.cancel}/cancel`, {}); toast('Cancelled'); refreshBadge(); render(); }));
@@ -944,9 +1012,9 @@ async function viewPerson(id) {
         ${u.has_account ? `<button class="btn sm" id="invite">${icon('mail')} ${u.has_password ? 'Send password reset' : 'Resend invite'}</button>` : `<button class="btn sm" id="give-login">${icon('user')} Give login access</button>`}
         ${u.id !== S.me.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" id="toggle">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</div></div>
     <div class="section-title">Has now (${d.current.length})</div>
-    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)}${m.due_date ? ` · due ${fmtDate(m.due_date)}` : ''}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
+    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtDate(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
       ${u.active ? `<div class="card-body" style="border-top:1px solid var(--line)"><button class="btn block" id="give">${icon('out')} Check out something to ${esc(u.name.split(' ')[0])}</button></div>` : ''}</div>
-    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
+    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
   $('#edit').onclick = () => personSheet(u, () => route(true));
   const gl = $('#give-login');
   if (gl) gl.onclick = () => {

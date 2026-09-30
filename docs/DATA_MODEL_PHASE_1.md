@@ -94,7 +94,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
   - **`retired`, `disposed`, and archive require all active assignments to be resolved first** (the existing retire guard extends to the new terminal states and to archive).
 - *Current behavior that already matches:* retire is refused with an open assignment; `lost` with an open assignment is already allowed (F6 is therefore **not a defect** — it is now the approved rule).
 
-### 3.4 Assignment history and capacity (Phase 1E)
+### 3.4 Assignment history and capacity (Phase 1E — implemented; as-built notes in PROJECT_STATUS.md. Deviations from the plan below: capacity reuses `license_seats` instead of a new `seat_capacity` column; the due field stays `due_date`)
 
 - **Invariants (Approved / Planned):**
   1. Assignments are never deleted; they survive asset lifecycle changes (RESTRICT, not CASCADE) and account changes.
@@ -103,7 +103,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
   4. A given employee cannot hold two simultaneous **active** assignments of the same asset: DB partial unique index on `(asset_id, employee_id) WHERE returned_at IS NULL`.
   5. **Capacity is not expressible as one unique index.** Physical assets have `seat_capacity = 1`; multi-seat software licenses may have `seat_capacity > 1`. Capacity is enforced **inside the assignment (check-out) transaction**: the transaction locks/serializes the asset row (`SELECT … FOR UPDATE` on PostgreSQL; a write-locking transaction on SQLite), counts active assignments, and only then inserts. **A global `UNIQUE(asset_id)` on active assignments is explicitly rejected** because it would break multi-seat licenses.
 - `assets.seat_capacity INTEGER NOT NULL DEFAULT 1` is introduced in 1E; today's `license_seats` maps into it. No software-license redesign.
-- **Assignment mode (Approved 2026-09-30 — Planned for Phase 1E; NOT implemented, no schema change in 1D):** every current equipment relationship is one of two kinds, and the kind belongs to the **assignment**, not to the asset or its category:
+- **Assignment mode (Approved 2026-09-30 — IMPLEMENTED in Phase 1E as `assignments.assignment_type`; permanent is admin-only and has no due date/time; a checkout REQUIRES `due_date` (optional `due_time`); legacy rows with a due date → `checkout`, without → `permanent`; self check-out is always `checkout`). An employee can only REQUEST a permanent assignment — implemented minimally via nullable `requests.requested_assignment_type`; admin approval creates it (full request lifecycle remains 1G). Future, not implemented: per-asset maximum checkout duration:** every current equipment relationship is one of two kinds, and the kind belongs to the **assignment**, not to the asset or its category:
   - **Permanent / ongoing assignment** — equipment primarily assigned to an employee for ongoing use (desktop, monitor, keyboard, mouse, dock, other normal daily-use gear).
   - **Temporary checkout** — temporary custody for a day, shoot, project or short period (cameras, lenses, lighting, photo/video gear, TVs, other borrowed equipment).
   - Rules: the mode is **never inferred from category** (the same kind of asset may be permanently assigned in one case and checked out temporarily in another); **history preserves the mode that was used** (closed assignments keep it; it is not rewritten later); it is an assignment-level field. Likely shape: `assignments.assignment_type` with values conceptually `permanent` / `checkout` — **exact name, values, default for legacy rows, and whether a checkout requires a due date are decided during Phase 1E.** Interaction with the existing self-checkout and `due_date` behavior is also a 1E design point. The 1D migration and code do not touch this: today every assignment is undifferentiated.
@@ -224,7 +224,7 @@ Ordered to minimize schema churn: cheap fixes and the migration runner first, th
 - **Tests:** migration preserves every assignment/request/activity link; no-login employee assignable; one account ↔ at most one employee and vice versa; role mapping `user→employee`; admin authz independent of employee link/hostname; golden-workflow test still green.
 - **Risk:** highest (large surface, no external auth). Depends on 1C (and 1B runner).
 
-### Phase 1E — Assignment + Historical Integrity
+### Phase 1E — Assignment + Historical Integrity — **IMPLEMENTED** (migration 6; see PROJECT_STATUS.md. Not done: `seat_capacity` column, §3.10 audit improvements, cover-photo FK)
 - **Goal:** history-safe FKs (assignments/activity/requests → assets RESTRICT; cover-photo FK path); assignments reference employees, actors reference accounts; active `(asset_id, employee_id)` unique index; `seat_capacity` with transactional capacity enforcement; durable activity/audit improvements (3.10); **assignment mode** — an assignment-level permanent-vs-checkout distinction that history preserves (3.4; approved 2026-09-30, exact field name TBD in 1E, not inferred from category).
 - **Affects:** `assignments`, `activity`, `requests`, `assets` (SQLite table rebuilds), `log()` and `doCheckout`.
 - **User-visible:** none directly; richer activity entries. (Whether check-out/assign flows expose the mode is decided in 1E.)

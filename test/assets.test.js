@@ -66,7 +66,7 @@ test('checkout, capacity, and check-in lifecycle', async () => {
   const asset = (await admin.post('/api/assets', { name: 'ThinkPad X1', tag: 'NC-LIFE1' })).body;
 
   // Admin checks it out to Val
-  const co = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: emp.id, due_date: '2099-01-01' });
+  const co = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: emp.id, assignment_type: 'checkout', due_date: '2099-01-01' });
   assert.equal(co.status, 200);
 
   // Single-seat asset: checking it out to a second person fails
@@ -103,7 +103,7 @@ test('self check-out works when enabled and is blocked when disabled', async () 
   const asset = (await admin.post('/api/assets', { name: 'Spare Headset', tag: 'NC-SELF1' })).body;
 
   await admin.put('/api/settings', { self_checkout: true });
-  const ok = await emp.client.post(`/api/assets/${asset.id}/checkout`, {});
+  const ok = await emp.client.post(`/api/assets/${asset.id}/checkout`, { due_date: '2099-01-01' });
   assert.equal(ok.status, 200);
   await admin.post(`/api/assets/${asset.id}/checkin`, { condition: 'Good' });
 

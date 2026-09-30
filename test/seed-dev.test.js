@@ -54,6 +54,8 @@ test('seeding produces the expected deterministic dataset, twice in a row, witho
     assert.equal(first.nextTag, `NC-${String(EXPECTED_ASSET_COUNT + 1).padStart(5, '0')}`);
     assert.ok(first.currentAssignments > 0);
     assert.ok(first.historicalAssignments > 0);
+    assert.ok(first.permanentAssignments >= 3, 'expected permanent everyday equipment');
+    assert.ok(first.temporaryCheckouts >= 1, 'expected at least one temporary checkout');
     assert.ok(first.requests > 0);
     assert.equal(first.devPassword, DEV_PASSWORD);
 

@@ -84,7 +84,7 @@ const notify = {
   checkedOut(user, asset, assignment) {
     fire(send(user.email, `Checked out to you: ${asset.name} (${asset.tag})`,
       layout('Equipment checked out to you', `<p>Hi ${esc(user.name)}, the following item is now assigned to you:</p>${assetLine(asset)}
-        ${assignment.due_date ? `<p><strong>Due back:</strong> ${fmtDate(assignment.due_date)}</p>` : ''}
+        ${assignment.due_date ? `<p><strong>Due back:</strong> ${fmtDate(assignment.due_date)}${assignment.due_time ? ` at ${esc(assignment.due_time)}` : ''}</p>` : ''}
         <p>Please take good care of it and let IT know right away if anything happens to it.</p>`,
         { url: `${APP_URL}/#/asset/${asset.id}`, label: 'View in IT Assets' })));
   },
@@ -110,8 +110,9 @@ const notify = {
         { url: `${APP_URL}/#/asset/${asset.id}`, label: 'Check it in' })));
   },
   equipmentRequested(user, req) {
-    fire(send(adminEmails(), `Equipment request from ${user.name}: ${req.category || 'Equipment'}`,
-      layout('New equipment request', `<p><strong>${esc(user.name)}</strong>${user.department ? ` (${esc(user.department)})` : ''} is requesting: <strong>${esc(req.category || 'Equipment')}</strong></p>
+    const perm = req.requested_assignment_type === 'permanent';
+    fire(send(adminEmails(), `${perm ? 'Permanent assignment request' : 'Equipment request'} from ${user.name}: ${req.category || 'Equipment'}`,
+      layout(perm ? 'New permanent assignment request' : 'New equipment request', `<p><strong>${esc(user.name)}</strong>${user.department ? ` (${esc(user.department)})` : ''} is requesting${perm ? ' a <strong>permanent assignment</strong> of' : ''}: <strong>${esc(req.category || 'Equipment')}</strong></p>
         ${req.message ? `<p style="background:#f3f4f6;border-radius:8px;padding:10px 12px">${esc(req.message)}</p>` : ''}
         ${req.needed_by ? `<p><strong>Needed by:</strong> ${fmtDate(req.needed_by)}</p>` : ''}`,
         { url: `${APP_URL}/#/requests`, label: 'Review request' })));
