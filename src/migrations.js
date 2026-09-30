@@ -351,5 +351,116 @@ module.exports = [
       }
     },
   },
+  {
+    // Phase 1E: assignment integrity + historical safety. Rebuilds three tables (keeping every id and AUTOINCREMENT mark):
+    //   assignments: user_id -> employee_id (it has pointed at employees since 1D); new assignment_type
+    //     ('permanent' | 'checkout', NOT NULL); history FKs become RESTRICT; a partial UNIQUE index forbids the SAME
+    //     employee holding the SAME asset twice at once. Capacity (seats) is NOT a constraint here — it is enforced
+    //     transactionally in src/assignments.js, so multi-seat assets keep working.
+    //   requests.asset_id: SET NULL -> RESTRICT (a raw asset delete can no longer detach request history); new nullable
+    //     requested_assignment_type marks an equipment request as a request for a PERMANENT assignment (NULL = unspecified).
+    //   activity.asset_id: CASCADE -> RESTRICT (a raw asset delete can no longer erase the audit trail).
+    // LEGACY RULE: a legacy assignment WITH a due_date becomes 'checkout' (it was evidently a loan); one WITHOUT
+    // becomes 'permanent'. Category is never consulted. due_date is preserved as-is; legacy rows have no due_time.
+    // A table CHECK keeps the invariant: permanent => no due date/time, checkout => a due date (time optional).
+    id: 6,
+    name: 'assignments: type, employee_id, active uniqueness; RESTRICT history FKs',
+    disableForeignKeys: true,
+    up: (db) => {
+      const dups = db.prepare(`SELECT asset_id, user_id, COUNT(*) n FROM assignments WHERE returned_at IS NULL
+        GROUP BY asset_id, user_id HAVING n > 1`).all();
+      if (dups.length) {
+        throw new Error(`Cannot enforce one active assignment per employee and asset: duplicates exist (asset id / employee id): ${dups.map((d) => `${d.asset_id}/${d.user_id}`).join(', ')}. Check the extras in manually; nothing was changed.`);
+      }
+      const seqOf = (t) => (db.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(t) || {}).seq || 0;
+      const seqs = Object.fromEntries(['assignments', 'requests', 'activity'].map((t) => [t, seqOf(t)]));
+
+      db.exec(`
+        CREATE TABLE assignments_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+          assignment_type TEXT NOT NULL DEFAULT 'permanent' CHECK (assignment_type IN ('permanent','checkout')),
+          checked_out_at TEXT NOT NULL DEFAULT (datetime('now')),
+          checked_out_by INTEGER REFERENCES accounts(id),
+          due_date TEXT,
+          due_time TEXT,
+          condition_out TEXT,
+          notes TEXT,
+          returned_at TEXT,
+          returned_to INTEGER REFERENCES accounts(id),
+          condition_in TEXT,
+          return_notes TEXT,
+          last_overdue_notice TEXT,
+          CHECK ((assignment_type = 'permanent' AND due_date IS NULL AND due_time IS NULL)
+              OR (assignment_type = 'checkout' AND due_date IS NOT NULL))
+        );
+        INSERT INTO assignments_new (id, asset_id, employee_id, assignment_type, checked_out_at, checked_out_by, due_date, condition_out, notes, returned_at, returned_to, condition_in, return_notes, last_overdue_notice)
+          SELECT id, asset_id, user_id, CASE WHEN due_date IS NOT NULL THEN 'checkout' ELSE 'permanent' END, checked_out_at, checked_out_by, due_date, condition_out, notes, returned_at, returned_to, condition_in, return_notes, last_overdue_notice FROM assignments;
+        DROP TABLE assignments;
+        ALTER TABLE assignments_new RENAME TO assignments;
+        CREATE INDEX idx_assign_open ON assignments(asset_id, returned_at);
+        CREATE INDEX idx_assign_employee ON assignments(employee_id, returned_at);
+        CREATE UNIQUE INDEX idx_assign_active_unique ON assignments(asset_id, employee_id) WHERE returned_at IS NULL;
+
+        CREATE TABLE requests_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL CHECK (type IN ('equipment','return')),
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK (status IN ('open','approved','denied','dropped_off','completed','cancelled')),
+          user_id INTEGER NOT NULL REFERENCES employees(id),
+          asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+          category TEXT,
+          message TEXT,
+          needed_by TEXT,
+          created_by INTEGER REFERENCES accounts(id),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by INTEGER REFERENCES accounts(id),
+          resolved_at TEXT,
+          resolution_note TEXT,
+          requested_assignment_type TEXT CHECK (requested_assignment_type IN ('permanent','checkout'))
+        );
+        INSERT INTO requests_new (id, type, status, user_id, asset_id, category, message, needed_by, created_by, created_at, resolved_by, resolved_at, resolution_note)
+          SELECT id, type, status, user_id, asset_id, category, message, needed_by, created_by, created_at, resolved_by, resolved_at, resolution_note FROM requests;
+        DROP TABLE requests;
+        ALTER TABLE requests_new RENAME TO requests;
+
+        CREATE TABLE activity_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+          actor_id INTEGER REFERENCES accounts(id),
+          subject_user_id INTEGER REFERENCES employees(id),
+          action TEXT NOT NULL,
+          details TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+        INSERT INTO activity_new SELECT id, asset_id, actor_id, subject_user_id, action, details, created_at FROM activity;
+        DROP TABLE activity;
+        ALTER TABLE activity_new RENAME TO activity;
+        CREATE INDEX idx_activity_asset ON activity(asset_id, created_at);`);
+
+      const setSeq = db.prepare('UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = ?');
+      const addSeq = db.prepare('INSERT INTO sqlite_sequence (name, seq) VALUES (?, ?)');
+      for (const [t, seq] of Object.entries(seqs)) {
+        if (seq && !setSeq.run(seq, t).changes) addSeq.run(t, seq);
+      }
+    },
+  },
+  {
+    // Employee columns added after Phase 1E QA (plain ADD COLUMNs, no rebuild):
+    //   can_self_checkout — self-checkout permission is per EMPLOYEE, default enabled for new employees and new databases.
+    //   building          — optional free-text location note; no list, table or settings behind it.
+    // The old global `self_checkout` setting (settings row, '1' = on; anything else = off, as the old code read it) is
+    // consumed ONCE, here, to preserve its intent: if it was OFF every existing employee starts disabled, if it was ON or
+    // absent they start enabled. After this migration nothing ever reads it again (it stays as unused, deprecated data).
+    id: 7,
+    name: 'employees: can_self_checkout and building',
+    up: (db) => {
+      const legacy = db.prepare("SELECT value FROM settings WHERE key = 'self_checkout'").get();
+      db.exec(`ALTER TABLE employees ADD COLUMN can_self_checkout INTEGER NOT NULL DEFAULT 1 CHECK (can_self_checkout IN (0,1))`);
+      db.exec('ALTER TABLE employees ADD COLUMN building TEXT');
+      if (legacy && legacy.value !== '1') db.exec('UPDATE employees SET can_self_checkout = 0');
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

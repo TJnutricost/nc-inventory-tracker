@@ -58,15 +58,17 @@ function loadDbModule(dir) {
 }
 const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'nc-mig-'));
 
-test('fresh database: all migrations recorded, schema present, self-checkout defaults OFF', () => {
+test('fresh database: all migrations recorded, schema present, no global self-checkout setting', () => {
   const { db, getSettings } = loadDbModule(tmpDir());
   assert.deepEqual(applied(db), migrations.map((m) => m.id));
   assert.ok(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'assets'").get());
-  assert.equal(getSettings().self_checkout, false);
+  assert.equal(getSettings().self_checkout, undefined, 'the global self-checkout setting is deprecated and no longer exposed');
+  assert.equal(db.prepare("SELECT COUNT(*) c FROM settings WHERE key = 'self_checkout'").get().c, 0, 'and is not seeded');
+  assert.ok(db.pragma('table_info(employees)').some((c) => c.name === 'can_self_checkout'));
   db.close();
 });
 
-test('pre-migration database upgrades in place: data kept, ON setting kept, bad cover cleared, not re-applied on restart', () => {
+test('pre-migration database upgrades in place: data kept, deprecated setting row left alone, bad cover cleared, not re-applied on restart', () => {
   const dir = tmpDir();
   fs.mkdirSync(path.join(dir, 'uploads'), { recursive: true });
   // Build a database exactly as the pre-runner app left it (baseline schema, no schema_migrations table).
@@ -85,7 +87,7 @@ test('pre-migration database upgrades in place: data kept, ON setting kept, bad 
   assert.deepEqual(applied(mod.db), migrations.map((m) => m.id));
   assert.equal(mod.db.prepare('SELECT name FROM assets WHERE id = 1').get().name, 'Keep me');
   assert.equal(mod.db.prepare('SELECT cover_photo_id FROM assets WHERE id = 1').get().cover_photo_id, null);
-  assert.equal(mod.getSettings().self_checkout, true, 'existing ON setting must not be overwritten');
+  assert.equal(mod.db.prepare("SELECT value FROM settings WHERE key = 'self_checkout'").get().value, '1', 'the deprecated row is left untouched, just unused');
   const stamp = mod.db.prepare('SELECT applied_at FROM schema_migrations WHERE id = 2').get().applied_at;
   mod.db.prepare('UPDATE assets SET cover_photo_id = 1 WHERE id = 2').run(); // valid cover, must survive a restart
   mod.db.close();
@@ -94,17 +96,6 @@ test('pre-migration database upgrades in place: data kept, ON setting kept, bad 
   assert.deepEqual(applied(mod.db), migrations.map((m) => m.id));
   assert.equal(mod.db.prepare('SELECT applied_at FROM schema_migrations WHERE id = 2').get().applied_at, stamp);
   assert.equal(mod.db.prepare('SELECT cover_photo_id FROM assets WHERE id = 2').get().cover_photo_id, 1);
-  assert.equal(mod.getSettings().self_checkout, true);
-  mod.db.close();
-});
-
-test('an existing database with self-checkout explicitly OFF stays OFF', () => {
-  const dir = tmpDir();
-  let mod = loadDbModule(dir);
-  mod.setSetting('self_checkout', '0');
-  mod.db.close();
-  mod = loadDbModule(dir);
-  assert.equal(mod.getSettings().self_checkout, false);
   mod.db.close();
 });
 

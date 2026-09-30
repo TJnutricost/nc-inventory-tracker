@@ -11,6 +11,7 @@ const localToday = () => { const d = new Date(); return new Date(d - d.getTimezo
 const addDays = (n) => { const d = new Date(Date.now() + n * 864e5); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
 const parseDT = (s) => (!s ? null : s.length === 10 ? new Date(s + 'T12:00:00') : new Date(s.replace(' ', 'T') + 'Z'));
 const fmtDate = (s) => { const d = parseDT(s); return d ? d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''; };
+const fmtStamp = (s) => { const d = parseDT(s); return d ? d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''; };
 const fmtWhen = (s) => {
   const d = parseDT(s); if (!d) return '';
   const diff = (Date.now() - d) / 1000;
@@ -40,7 +41,8 @@ async function api(method, url, body, { raw } = {}) {
     S.me = null; S.shell = false;
     if (!/^#\/(login|forgot|reset|setup)/.test(location.hash)) location.hash = '#/login';
   }
-  if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
+  if (res.status === 404 && data && data.error === 'Not found') throw new Error("That action isn't available right now. Reload the page and try again."); // e.g. the page is newer than the server
+  if (!res.ok) throw new Error((data && data.error) || (res.status === 403 ? "That isn't available from your account. Ask IT if you need it." : 'Something went wrong. Please try again.'));
   return data;
 }
 
@@ -108,10 +110,23 @@ const icon = (n, cls = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="curr
 const CAT_ICON = { Laptop: 'laptop', Desktop: 'desktop', Monitor: 'monitor', 'Keyboard & Mouse': 'keyboard', Headset: 'headphones', 'Dock / Adapter': 'dock', Phone: 'phone', Tablet: 'tablet', 'Printer / Scanner': 'printer', Networking: 'wifi', Appliance: 'plug', 'Software License': 'key' };
 const catIcon = (c) => CAT_ICON[c] || (/laptop|notebook/i.test(c) ? 'laptop' : /monitor|display/i.test(c) ? 'monitor' : /license|software/i.test(c) ? 'key' : 'box');
 const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', disposed: 'Disposed', lost: 'Lost', overdue: 'Overdue' };
-const REQ_LABEL = { open: 'Open', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
+const isPermReq = (r) => r.requested_assignment_type === 'permanent';
+const REQ_LABEL = { open: 'Pending', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
+const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
+const fmtClock = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const h = Number(m[1]); return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`; };
+const typeText = (m) => `${esc(TYPE_LABEL[m.assignment_type] || TYPE_LABEL.permanent)}${m.assignment_type === 'checkout' && m.due_date ? ` · return by ${fmtDate(m.due_date)}${m.due_time ? ' ' + fmtClock(m.due_time) : ''}` : ''}`;
 const pill = (status, label) => `<span class="pill ${esc(status)}">${esc(label || STATUS_LABEL[status] || status)}</span>`;
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
 const thumbHtml = (thumb, cat) => `<div class="thumb">${thumb ? `<img src="/uploads/${esc(thumb)}" alt="" loading="lazy">` : icon(catIcon(cat))}</div>`;
+// Active assignments read by kind: permanent -> "Assigned", temporary checkout -> "Temporary checkout" (overdue still wins).
+function statusPill(a) {
+  const st = assetStatus(a);
+  if (st !== 'checked_out') return pill(st);
+  const out = [];
+  if (a.permanent_holders) out.push(pill('checked_out', 'Assigned'));
+  if (a.checkout_holders) out.push(pill('checked_out', 'Temporary checkout'));
+  return out.length ? out.join(' ') : pill(st);
+}
 const assetStatus = (a) => (!['retired', 'lost', 'disposed'].includes(a.status) && isOverdue(a.due_date) ? 'overdue' : a.status);
 
 // ============================================================ sheets (bottom modal)
@@ -242,13 +257,29 @@ function mountShell() {
       <a href="#/home" class="row" style="gap:10px"><img src="/logo-white.svg" alt="Nutricost" class="logo"><span class="app-name">IT Assets</span></a>
       <span class="spacer"></span>
       <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
-      <a href="#/profile" class="avatar sm" title="${esc(S.me.name)}" style="background:var(--brand-accent)">${esc(initials(S.me.name))}</a>
+      <div class="menu-wrap"><button type="button" class="avatar sm" id="avatar-btn" aria-haspopup="menu" aria-expanded="false" title="${esc(S.me.name)}" style="background:var(--brand-accent);border:0;cursor:pointer">${esc(initials(S.me.name))}</button>
+        <div class="menu" id="avatar-menu" role="menu" hidden><div class="menu-who"><strong>${esc(S.me.name)}</strong><div class="small muted">${esc(S.me.email || '')}</div></div>
+          <a href="#/profile" role="menuitem">${icon('user')} My profile</a><button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
       <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}">${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
       <main id="main"></main>
     </div>
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
+  const setTopbarH = () => document.documentElement.style.setProperty('--topbar-h', $('.topbar').offsetHeight + 'px');
+  setTopbarH(); window.addEventListener('resize', setTopbarH);
+  const menu = $('#avatar-menu'); const btn = $('#avatar-btn');
+  const setMenu = (open) => { menu.hidden = !open; btn.setAttribute('aria-expanded', String(open)); };
+  btn.onclick = (e) => { e.stopPropagation(); setMenu(menu.hidden); };
+  menu.onclick = (e) => { if (e.target.closest('a')) setMenu(false); };
+  if (!S.menuWired) { // document-level listeners are registered once, however many times the shell is rebuilt
+    S.menuWired = true;
+    const live = () => ({ m: $('#avatar-menu'), b: $('#avatar-btn') });
+    const closeLive = () => { const { m, b } = live(); if (m && !m.hidden) { m.hidden = true; b.setAttribute('aria-expanded', 'false'); } };
+    document.addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) closeLive(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLive(); });
+  }
+  $('#signout').onclick = () => { setMenu(false); logout(); };
   S.shell = true;
 }
 function setActive(key) {
@@ -375,8 +406,8 @@ async function viewSetup() {
 function myEquipmentList(mine) {
   if (!mine.length) return `<div class="empty">${icon('laptop')}<p>No equipment is checked out to you.</p></div>`;
   return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
-    <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)}</div></div>
-    ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : m.due_date ? `<span class="small muted">Due ${fmtDate(m.due_date)}</span>` : ''}
+    <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtStamp(m.checked_out_at)} · ${typeText(m)}</div></div>
+    ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
 }
 function returnBanners(mine) {
@@ -401,7 +432,7 @@ async function viewHome() {
       <div class="stack">${returnBanners(d.mine)}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'}</span></div>${myEquipmentList(d.mine)}</div>
-      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
     wireDropoffs(main());
@@ -424,7 +455,7 @@ async function viewHome() {
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
           ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div>
-            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
+            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
             <div class="sub truncate">${r.type === 'return' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</a></li>`).join('')}
           ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
@@ -470,7 +501,7 @@ async function viewAssets() {
     if (state.q) u.set('q', state.q);
     if (state.status && !(state.status === 'checked_out' && !isAdmin())) u.set('status', state.status);
     if (state.category) u.set('category', state.category);
-    if (!isAdmin() && state.status === 'checked_out') u.set('user_id', S.me.id);
+    if (!isAdmin() && state.status === 'checked_out') u.set('employee_id', S.me.id);
     history.replaceState(null, '', '#/assets' + (u.toString() && isAdmin() ? '?' + u.toString() : ''));
     try {
       const rows = await api('GET', '/api/assets?' + u.toString());
@@ -481,7 +512,7 @@ async function viewAssets() {
         return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}
           <div class="grow"><div class="title truncate">${esc(a.name)}</div>
           <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${a.holder_names && isAdmin() ? ' · ' + esc(a.holder_names) : ''}${seats}${!a.holder_names && a.location ? ' · ' + esc(a.location) : ''}</div></div>
-          ${pill(st)}${icon('chev', 'chev')}</a></li>`;
+          ${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
       }).join('')}</ul>` : `<div class="empty">${icon('box')}<p>${state.q || state.status || state.category ? 'Nothing matches those filters.' : isAdmin() ? 'No assets yet. Tap <strong>Add</strong> or scan a barcode to get started.' : 'Nothing is available right now.'}</p></div>`;
     } catch (e) { fail(e); }
   };
@@ -528,7 +559,7 @@ async function viewAsset(id) {
           ? `<div class="banner info">${icon('check')}<div>You've told IT you dropped this off. It'll come off your list once IT checks it in.</div></div>`
           : `<button class="btn lg block" id="act-return">${icon('in')} I'm returning this</button>`;
     } else if (a.status === 'available' && seatsFree > 0) {
-      actions = S.settings.self_checkout
+      actions = S.me.can_self_checkout
         ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out to me</button>`
         : `<button class="btn primary lg block" id="act-request">${icon('inbox')} Request this</button>`;
     } else if (d.held_by_other || a.status !== 'available') {
@@ -542,20 +573,20 @@ async function viewAsset(id) {
     ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
-  main().innerHTML = `${backLink('#/assets', 'Assets')}
-    <div class="page-head"><div class="grow"><h1>${esc(a.name)}</h1><div class="row" style="margin-top:6px;gap:8px"><span class="mono muted">${esc(a.tag)}</span>${pill(st)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div></div>
+  main().innerHTML = `<div class="asset-bar">${backLink('#/assets', 'Assets')}
+      <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${st === 'overdue' ? pill('overdue') : statusPill(a)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
         ${canPhoto ? `<label class="add-ph">${icon('camera')}<span>Add photo</span><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}</div>`
         : canPhoto ? `<label class="no-photo"><div>${icon('camera')}<strong>Add a photo</strong><div class="small">Snap the device, its label, or any damage</div></div><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}
       ${actions}
-      ${d.holders.length ? `<div class="card"><div class="card-head"><h2>${multi ? 'Assigned to' : admin ? 'Checked out to' : 'Checked out to you'}</h2></div><ul class="list">${d.holders.map((h) => `<li><div class="item">
+      ${d.holders.length ? `<div class="card"><div class="card-head"><h2>${multi ? 'Assigned to' : d.holders.every((h) => h.assignment_type === 'checkout') ? (admin ? 'Temporarily checked out to' : 'Temporarily checked out to you') : (admin ? 'Assigned to' : 'Assigned to you')}</h2></div><ul class="list">${d.holders.map((h) => `<li><div class="item">
           <div class="avatar">${esc(initials(h.user_name))}</div>
-          <div class="grow">${admin ? `<a href="#/person/${h.user_id}" class="title">${esc(h.user_name)}</a>` : `<div class="title">${esc(h.user_name)}</div>`}
-          <div class="sub">Since ${fmtDate(h.checked_out_at)}${h.due_date ? ` · due ${fmtDate(h.due_date)}` : ''}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
+          <div class="grow">${admin ? `<a href="#/person/${h.employee_id}" class="title">${esc(h.user_name)}</a>` : `<div class="title">${esc(h.user_name)}</div>`}
+          <div class="sub">${typeText(h)} · since ${fmtStamp(h.checked_out_at)}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
           ${isOverdue(h.due_date) ? pill('overdue', 'Overdue') : ''}
           ${admin && multi ? `<button class="btn sm" data-in="${h.id}">Check in</button>` : ''}</div></li>`).join('')}</ul></div>` : ''}
-      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       ${a.license_key || a.license_expires || multi || a.category === 'Software License' ? `<div class="card"><div class="card-head"><h2>License</h2></div><div class="kv">
           ${a.license_key ? `<div class="k">Key</div><div class="v"><span class="license-key">${esc(a.license_key)}</span> <button class="iconbtn" style="width:32px;height:32px;display:inline-grid;vertical-align:middle" id="copykey" title="Copy">${icon('copy')}</button></div>` : ''}
           <div class="k">Seats</div><div class="v">${d.seats_used} used of ${d.capacity}</div>
@@ -582,11 +613,7 @@ async function viewAsset(id) {
   on('#act-in', () => checkinSheet(a, d.holders, reload));
   on('#act-ret', () => requestReturnSheet(a, d.holders, reload));
   $$('[data-in]').forEach((b) => b.onclick = () => checkinSheet(a, d.holders.filter((h) => h.id === Number(b.dataset.in)), reload));
-  on('#act-self', async () => {
-    const ok = await confirmSheet('Check this out to you?', `${a.name} (${a.tag}) will be assigned to you and IT will be notified.`, 'Check out to me');
-    if (!ok) return;
-    try { await api('POST', `/api/assets/${a.id}/checkout`, {}); toast("It's yours! Check your email for details."); reload(); } catch (e) { fail(e); }
-  });
+  on('#act-self', () => selfCheckoutSheet(a));
   on('#act-request', () => requestEquipmentSheet({ asset: a }));
   on('#act-similar', (e) => { e.preventDefault(); requestEquipmentSheet({ category: a.category }); });
   on('#act-return', async () => {
@@ -642,11 +669,47 @@ function personPicker(container, users, onPick, selectedId) {
   $('#pp-q', container).oninput = (e) => render(e.target.value);
   $('#pp-list', container).onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; selectedId = Number(b.dataset.id); onPick(users.find((u) => u.id === selectedId)); render($('#pp-q', container).value); };
 }
-function dueChips(name = 'due_date') {
+// Employees never create a permanent assignment directly: they ask IT. Shows the approval notice, and only on
+// "Send request" records a request (no assignment, no check-out). Resolves true when the request was sent.
+async function requestPermanentAssignment(asset, message) {
+  const ok = await confirmSheet('Permanent assignment requires approval', 'Permanent equipment assignments must be approved by IT.', 'Send request');
+  if (!ok) return false;
+  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, message: message || undefined, requested_assignment_type: 'permanent' });
+  toast('Request sent to IT. Nothing is assigned until IT approves it.');
+  refreshBadge();
+  return true;
+}
+// Return date (required) + time (optional) for a temporary checkout. "Today" just fills in today's date.
+function returnFields() {
   const def = S.settings.default_loan_days;
-  const opts = [['', 'No due date'], [addDays(7), '1 week'], [addDays(30), '1 month'], [addDays(90), '3 months']];
-  return `<label class="field"><span>Due back</span><div class="chips" data-due>${opts.map(([v, l]) => `<button type="button" class="chip ${(!def && !v) ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
-    <input type="date" name="${name}" min="${localToday()}" style="margin-top:8px" value="${def ? addDays(def) : ''}"></label>`;
+  return `<div class="field"><span>Return date *</span><div class="row" style="gap:8px"><input type="date" name="due_date" min="${localToday()}" value="${def ? addDays(def) : ''}" required style="flex:1"><button type="button" class="btn sm" data-today>Today</button></div></div>
+    <label class="field"><span>Return time <span class="muted">(optional)</span></span><input type="time" name="due_time"></label>`;
+}
+function wireReturnFields(el) {
+  const btn = $('[data-today]', el); const date = $('input[name=due_date]', el);
+  if (btn) btn.onclick = () => { date.value = localToday(); };
+}
+// Assignment type: Permanent (admin only, no return date/time) or Temporary checkout (return date required).
+function assignTypeFields() {
+  return `<div class="field"><span>Assignment type</span><div class="chips" data-type><button type="button" class="chip" data-t="permanent">Permanent</button><button type="button" class="chip on" data-t="checkout">Temporary checkout</button></div>
+    <input type="hidden" name="assignment_type" value="checkout"><div class="small muted" data-type-hint style="margin-top:6px">Temporary custody. A return date is required.</div></div>
+    <div data-due-wrap class="form-grid">${returnFields()}</div>`;
+}
+function wireAssignType(el) {
+  const box = $('[data-type]', el); const wrap = $('[data-due-wrap]', el);
+  const hidden = $('input[name=assignment_type]', el); const hint = $('[data-type-hint]', el);
+  const inputs = $$('input', wrap);
+  const setType = (t) => {
+    hidden.value = t;
+    $$('.chip', box).forEach((c) => c.classList.toggle('on', c.dataset.t === t));
+    wrap.style.display = t === 'checkout' ? '' : 'none';
+    inputs.forEach((i) => { i.disabled = t !== 'checkout'; if (t !== 'checkout') i.value = ''; });
+    if (t === 'checkout' && S.settings.default_loan_days) $('input[name=due_date]', wrap).value = addDays(S.settings.default_loan_days);
+    hint.textContent = t === 'checkout' ? 'Temporary custody. A return date is required.' : 'Ongoing equipment for this person.';
+  };
+  box.onclick = (e) => { const b = e.target.closest('.chip'); if (b) setType(b.dataset.t); };
+  wireReturnFields(wrap);
+  setType('checkout');
 }
 function wireDueChips(el) {
   const box = $('[data-due]', el); if (!box) return;
@@ -661,28 +724,79 @@ async function checkoutSheet(asset, done, presetUser) {
   const { el, close } = sheet(`<h2>Check out</h2><p class="muted small" style="margin-top:0">${esc(asset.name)} · <span class="mono">${esc(asset.tag)}</span></p>
     <form class="form-grid" id="f">
       <div><div class="small muted" style="font-weight:650;margin-bottom:6px">Who is it going to?</div><div id="pp"></div></div>
-      ${dueChips()}
+      ${assignTypeFields()}
       <label class="field"><span>Condition</span><select name="condition">${CONDITIONS.map((c) => `<option ${c === (asset.condition || 'Good') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="field"><span>Note (optional)</span><input name="notes" placeholder="e.g. includes charger and bag"></label>
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go" ${picked ? '' : 'disabled'}>Check out</button></div>
     </form>`);
   const updateBtn = () => { const b = $('#go', el); b.disabled = !picked; b.textContent = picked ? `Check out to ${picked.name.split(' ')[0]}` : 'Choose a person'; };
   personPicker($('#pp', el), users, (u) => { picked = u; updateBtn(); }, picked?.id);
-  updateBtn(); wireDueChips(el);
+  updateBtn(); wireAssignType(el);
   $('#f', el).onsubmit = (e) => {
     e.preventDefault(); if (!picked) return;
     const fd = Object.fromEntries(new FormData(e.target));
     busy($('#go', el), async () => {
-      await api('POST', `/api/assets/${asset.id}/checkout`, { ...fd, user_id: picked.id });
-      close(); toast(`Checked out to ${picked.name}`); done && done();
+      await api('POST', `/api/assets/${asset.id}/checkout`, { ...fd, employee_id: picked.id });
+      close(); if (done) await done(); // the refresh (route) clears open sheets, so show the modal after it
+      assignedSheet(asset, picked, fd);
     });
   };
+}
+// Employee self-checkout details for `a` (always a temporary checkout; permanent turns into a request to IT).
+// "Scan barcode" reuses the app's one scanner (openScanner) and the same tag/serial lookup as everywhere else; a scan
+// swaps the sheet to the scanned asset, so the return-date rules and the server's permission check stay the same.
+function selfCheckoutSheet(a) {
+  const back = () => (location.hash === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id));
+  const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
+    <button type="button" class="btn sm" id="self-scan" style="margin-bottom:12px">${icon('scan')} Scan barcode</button>
+    <form class="form-grid" id="f">
+    <div class="field"><span>How long do you need it?</span><div class="chips" data-self-type><button type="button" class="chip on" data-t="checkout">Temporary checkout</button><button type="button" class="chip" data-t="permanent">Permanent</button></div>
+      <div class="small muted" data-self-hint style="margin-top:6px">Borrow it and bring it back by the return date.</div></div>
+    <div data-self-due class="form-grid">${returnFields()}</div>
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out to me</button></div></form>`);
+  wireReturnFields(el);
+  $('#self-scan', el).onclick = () => openScanner({ title: 'Scan the item to check out', onResult: async (code) => {
+    try {
+      const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
+      if (!r.found) return toast(`No asset found for ${code}`, true);
+      const d = await api('GET', '/api/assets/' + r.id);
+      const n = d.asset;
+      if (d.is_mine) return toast(`${n.name} is already checked out to you.`, true);
+      if (n.archived_at || n.status !== 'available' || d.capacity - d.seats_used < 1) return toast(`${n.name} isn't available to check out right now. You can request it from IT.`, true);
+      close(); selfCheckoutSheet(n);
+    } catch (e) { fail(e); }
+  } });
+  let mode = 'checkout';
+  const dueWrap = $('[data-self-due]', el);
+  $('[data-self-type]', el).onclick = (e) => {
+    const b = e.target.closest('.chip'); if (!b) return;
+    mode = b.dataset.t;
+    $$('[data-self-type] .chip', el).forEach((c) => c.classList.toggle('on', c === b));
+    dueWrap.style.display = mode === 'checkout' ? '' : 'none';
+    $$('input', dueWrap).forEach((i) => { i.disabled = mode !== 'checkout'; });
+    $('[data-self-hint]', el).textContent = mode === 'checkout' ? 'Borrow it and bring it back by the return date.' : 'Permanent assignments must be approved by IT. You can send a request.';
+    $('#go', el).textContent = mode === 'checkout' ? 'Check out to me' : 'Request permanent assignment';
+  };
+  $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
+    busy($('#go', el), async () => {
+      if (mode === 'permanent') { if (await requestPermanentAssignment(a)) { close(); back(); } return; }
+      await api('POST', `/api/assets/${a.id}/checkout`, { due_date: fd.due_date, due_time: fd.due_time }); close(); toast("It's yours! Check your email for details."); back();
+    }); };
+}
+// Shown after an admin assigns equipment; the admin chooses where to go next (nothing redirects on its own).
+function assignedSheet(asset, person, fd) {
+  const kind = fd.assignment_type === 'permanent' ? 'Permanent' : `Temporary checkout · return by ${fmtDate(fd.due_date)}${fd.due_time ? ' ' + fmtClock(fd.due_time) : ''}`;
+  const { el, close } = sheet(`<h2>Equipment assigned</h2>
+    <div class="holder" style="margin:12px 0"><div class="thumb">${icon('check')}</div><div><strong>${esc(asset.name)}</strong> <span class="mono small muted">${esc(asset.tag)}</span><div class="small muted">Assigned to <strong>${esc(person.name)}</strong> · ${esc(kind)}</div></div></div>
+    <div class="sheet-actions"><button type="button" class="btn" id="to-assets">Back to assets</button><button type="button" class="btn primary" id="to-person">View employee</button></div>`);
+  $('#to-person', el).onclick = () => { close(); go('#/person/' + person.id); };
+  $('#to-assets', el).onclick = () => { close(); go('#/assets'); };
 }
 function checkinSheet(asset, holders, done) {
   const { el, close } = sheet(`<h2>Check in</h2><p class="muted small" style="margin-top:0">${esc(asset.name)} · <span class="mono">${esc(asset.tag)}</span></p>
     <form class="form-grid" id="f">
-      ${holders.length > 1 ? `<label class="field"><span>Returned by</span><select name="assignment_id">${holders.map((h) => `<option value="${h.id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
-        : `<input type="hidden" name="assignment_id" value="${holders[0].id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">Had it since ${fmtDate(holders[0].checked_out_at)}</div></div></div>`}
+      ${holders.length > 1 ? `<label class="field"><span>Returned by</span><select name="assignment_id">${holders.map((h) => `<option value="${h.id}">${esc(h.user_name)} (${esc(TYPE_LABEL[h.assignment_type])})</option>`).join('')}</select></label>`
+        : `<input type="hidden" name="assignment_id" value="${holders[0].id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${typeText(holders[0])} · since ${fmtStamp(holders[0].checked_out_at)}</div></div></div>`}
       <label class="field"><span>Condition now</span><select name="condition">${CONDITIONS.map((c) => `<option ${c === (asset.condition || 'Good') ? 'selected' : ''}>${c}</option>`).join('')}</select></label>
       <label class="field"><span>Put it back at</span><input name="location" list="locs" value="${esc(asset.location || '')}"><datalist id="locs">${S.settings.locations.map((l) => `<option value="${esc(l)}">`).join('')}</datalist></label>
       <label class="check"><input type="checkbox" name="to_maintenance"><span>Needs repair — mark it <strong>In repair</strong></span></label>
@@ -699,8 +813,8 @@ function checkinSheet(asset, holders, done) {
 function requestReturnSheet(asset, holders, done) {
   const { el, close } = sheet(`<h2>Request return</h2><p class="muted small" style="margin-top:0">We'll email them and show a reminder in the app.</p>
     <form class="form-grid" id="f">
-      ${holders.length > 1 ? `<label class="field"><span>From</span><select name="user_id"><option value="">Everyone who has it (${holders.length})</option>${holders.map((h) => `<option value="${h.user_id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
-        : `<input type="hidden" name="user_id" value="${holders[0].user_id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${esc(asset.name)} · ${esc(asset.tag)}</div></div></div>`}
+      ${holders.length > 1 ? `<label class="field"><span>From</span><select name="employee_id"><option value="">Everyone who has it (${holders.length})</option>${holders.map((h) => `<option value="${h.employee_id}">${esc(h.user_name)}</option>`).join('')}</select></label>`
+        : `<input type="hidden" name="employee_id" value="${holders[0].employee_id}"><div class="holder"><div class="avatar">${esc(initials(holders[0].user_name))}</div><div><strong>${esc(holders[0].user_name)}</strong><div class="small muted">${esc(asset.name)} · ${esc(asset.tag)}</div></div></div>`}
       <label class="field"><span>Return by</span><div class="chips" data-due>${[[addDays(1), 'Tomorrow'], [addDays(3), '3 days'], [addDays(7), '1 week'], ['', 'No date']].map(([v, l], i) => `<button type="button" class="chip ${i === 2 ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div>
         <input type="date" name="needed_by" value="${addDays(7)}" min="${localToday()}" style="margin-top:8px"></label>
       <label class="field"><span>Message (optional)</span><textarea name="message" placeholder="e.g. Upgrading your laptop — please bring it to the IT room."></textarea></label>
@@ -719,12 +833,15 @@ function requestEquipmentSheet({ asset, category, forUser } = {}) {
         : `<label class="field"><span>What do you need?</span><select name="category" required><option value="">Choose…</option>${S.settings.categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`}
       <label class="field"><span>Details</span><textarea name="message" placeholder="${asset ? 'Anything IT should know?' : 'e.g. Second monitor for my desk, USB-C if possible'}"></textarea></label>
       <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
+      ${asset && !forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
     </form>`);
   $('#f', el).onsubmit = (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
     if (forUser) fd.user_id = forUser.id;
+    const permanent = !!fd.permanent; delete fd.permanent;
+    if (permanent) { busy($('#go', el), async () => { if (await requestPermanentAssignment(asset, fd.message)) { close(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); } }); return; }
     busy($('#go', el), async () => { await api('POST', '/api/requests', fd); close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); });
   };
 }
@@ -838,42 +955,77 @@ async function viewRequests() {
     const rows = await api('GET', '/api/requests?status=' + state.tab);
     const list = $('#list'); if (!list) return;
     if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
+    const find = (id) => rows.find((r) => r.id === Number(id));
+    const kindOf = (r) => (r.type === 'return' ? 'Return request' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
+    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`);
+    // The action buttons a request offers; used by both the list card and the detail sheet (wired by wireActions).
+    const actionsFor = (r) => {
+      const isRet = r.type === 'return'; const perm = isPermReq(r);
+      if (!['open', 'approved', 'dropped_off'].includes(r.status)) return '';
+      if (isAdmin() && perm && r.asset_id) return `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
+      if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
+      if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
+      if (!isRet) return `<button class="btn sm" data-cancel="${r.id}">Cancel</button>`;
+      if (r.status === 'open') return `<button class="btn sm dark" data-dropoff="${r.id}">${icon('check')} I've dropped it off</button>`;
+      return '';
+    };
+    // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
+    const wireActions = (root, before) => {
+      const on = (sel, attr, fn) => $$(sel, root).forEach((b) => b.onclick = (e) => { before && before(); fn(find(b.dataset[attr]), e.currentTarget); });
+      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, onPick: (assetId) => {
+        const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
+          <form class="form-grid" id="f">${assignTypeFields()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
+          <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
+        wireAssignType(el);
+        $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
+          busy($('#go', el), async () => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: assetId, assignment_type: fd.assignment_type, due_date: fd.due_date, due_time: fd.due_time, note: fd.note }); close(); toast('Assigned and checked out'); refreshBadge(); render(); }); };
+      } }));
+      on('[data-approve-perm]', 'approvePerm', (r) => noteSheet('Approve permanent assignment', `${r.asset_name || 'This item'} will be permanently assigned to ${r.user_name}. Add a note for them (optional).`, 'Approve & assign', 'e.g. Pick it up at the IT room',
+        async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: r.asset_id, assignment_type: 'permanent', note }); toast('Permanently assigned'); refreshBadge(); render(); }));
+      on('[data-approve]', 'approve', (r) => noteSheet('Approve request', 'Let them know what happens next (optional).', 'Approve', 'e.g. Ordered — should arrive next week', async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { note }); toast('Approved — they’ve been emailed'); refreshBadge(); render(); }));
+      on('[data-deny]', 'deny', (r) => noteSheet('Decline request', 'Add a short reason (optional). They’ll get an email.', 'Decline', 'e.g. Please talk to your manager first', async (note) => { await api('POST', `/api/requests/${r.id}/deny`, { note }); toast('Declined'); refreshBadge(); render(); }, true));
+      on('[data-cancel]', 'cancel', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/cancel`, {}); toast('Cancelled'); refreshBadge(); render(); }));
+      on('[data-dropoff]', 'dropoff', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/dropped-off`, {}); toast('Thanks! IT has been notified.'); refreshBadge(); render(); }));
+    };
+    // Full read-only view of a request (notes included) with the same actions, so IT can read before approving or declining.
+    const openDetail = (r) => {
+      const row = (k, v) => (v ? `<div class="k">${k}</div><div class="v">${v}</div>` : '');
+      const { el, close } = sheet(`<h2>${esc(kindOf(r))}</h2>
+        <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, REQ_LABEL[r.status])}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
+        <div class="kv">
+          ${row('Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
+          ${row('Asset', r.asset_id ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a> <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
+          ${row('Category', esc(r.category || ''))}
+          ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
+          ${row('Submitted', esc(fmtStamp(r.created_at)))}
+          ${row('Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
+          ${row('IT note', r.resolution_note ? `<div style="white-space:pre-wrap">${esc(r.resolution_note)}</div>` : '')}
+          ${row('Resolved', r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `${esc(REQ_LABEL[r.status])} by ${esc(r.resolved_by_name)} · ${esc(fmtStamp(r.resolved_at))}` : '')}
+        </div>
+        <div class="row wrap" id="d-actions" style="margin-top:14px;gap:8px">${actionsFor(r)}</div>
+        <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+      $$('[data-x]', el).forEach((a) => a.addEventListener('click', () => close()));
+      wireActions($('#d-actions', el), close);
+    };
     list.innerHTML = `<div class="stack">${rows.map((r) => {
       const isRet = r.type === 'return';
-      const title = isRet ? `Return ${esc(r.asset_name || 'item')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`;
-      let btns = '';
-      if (['open', 'approved', 'dropped_off'].includes(r.status)) {
-        if (isAdmin() && !isRet) btns = `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
-        else if (isAdmin() && isRet) btns = `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
-        else if (!isRet) btns = `<button class="btn sm" data-cancel="${r.id}">Cancel</button>`;
-        else if (r.status === 'open') btns = `<button class="btn sm dark" data-dropoff="${r.id}">${icon('check')} I've dropped it off</button>`;
-      }
-      return `<div class="card"><div class="item" style="align-items:flex-start">
+      const btns = actionsFor(r);
+      return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
         <div class="thumb">${icon(isRet ? 'in' : 'inbox')}</div>
-        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${title}</div>${pill(r.status, REQ_LABEL[r.status])}</div>
+        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, REQ_LABEL[r.status])}</div>
           <div class="sub">${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
-          ${r.message ? `<div style="margin-top:6px;white-space:pre-wrap">${esc(r.message)}</div>` : ''}
+          ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
-          ${r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `<div class="small muted" style="margin-top:4px">${esc(REQ_LABEL[r.status])} by ${esc(r.resolved_by_name)} · ${fmtWhen(r.resolved_at)}</div>` : ''}
-          ${btns ? `<div class="row wrap" style="margin-top:10px;gap:8px">${btns}</div>` : ''}
+          <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
         </div></div></div>`;
     }).join('')}</div>`;
-    const find = (id) => rows.find((r) => r.id === Number(id));
-    $$('[data-fulfill]', list).forEach((b) => b.onclick = () => {
-      const r = find(b.dataset.fulfill);
-      assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, onPick: (assetId) => {
-        const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
-          <form class="form-grid" id="f">${dueChips()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
-          <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
-        wireDueChips(el);
-        $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
-          busy($('#go', el), async () => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: assetId, due_date: fd.due_date, note: fd.note }); close(); toast('Assigned and checked out'); refreshBadge(); render(); }); };
-      } });
+    $$('[data-detail]', list).forEach((it) => {
+      const open = () => openDetail(find(it.dataset.detail));
+      it.onclick = (e) => { if (e.target.closest('a,button')) return; open(); };
+      it.onkeydown = (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === it) { e.preventDefault(); open(); } };
     });
-    $$('[data-approve]', list).forEach((b) => b.onclick = () => noteSheet('Approve request', 'Let them know what happens next (optional).', 'Approve', 'e.g. Ordered — should arrive next week', async (note) => { await api('POST', `/api/requests/${b.dataset.approve}/approve`, { note }); toast('Approved — they’ve been emailed'); refreshBadge(); render(); }));
-    $$('[data-deny]', list).forEach((b) => b.onclick = () => noteSheet('Decline request', 'Add a short reason (optional). They’ll get an email.', 'Decline', 'e.g. Please talk to your manager first', async (note) => { await api('POST', `/api/requests/${b.dataset.deny}/deny`, { note }); toast('Declined'); refreshBadge(); render(); }, true));
-    $$('[data-cancel]', list).forEach((b) => b.onclick = () => busy(b, async () => { await api('POST', `/api/requests/${b.dataset.cancel}/cancel`, {}); toast('Cancelled'); refreshBadge(); render(); }));
-    $$('[data-dropoff]', list).forEach((b) => b.onclick = () => busy(b, async () => { await api('POST', `/api/requests/${b.dataset.dropoff}/dropped-off`, {}); toast('Thanks! IT has been notified.'); refreshBadge(); render(); }));
+    $$('[data-open]', list).forEach((b) => b.onclick = () => openDetail(find(b.dataset.open)));
+    wireActions(list);
   };
   $('#seg').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.v; history.replaceState(null, '', '#/requests?tab=' + state.tab); render().catch(fail); };
   render();
@@ -895,7 +1047,7 @@ async function viewPeople() {
     const ql = q.toLowerCase();
     const rows = users.filter((u) => !ql || [u.name, u.email, u.department, u.title].some((x) => (x || '').toLowerCase().includes(ql)));
     $('#list').innerHTML = rows.length ? `<ul class="list">${rows.map((u) => `<li><a class="item" href="#/person/${u.id}" style="${u.active ? '' : 'opacity:.55'}">
-      <div class="avatar">${esc(initials(u.name))}</div><div class="grow"><div class="title truncate">${esc(u.name)} ${u.role === 'admin' ? '<span class="pill checked_out plain" style="margin-left:4px">Admin</span>' : ''}${!u.has_account ? '<span class="pill plain" style="margin-left:4px">No login</span>' : ''}${!u.active ? '<span class="pill plain" style="margin-left:4px">Inactive</span>' : ''}</div>
+      <div class="avatar">${esc(initials(u.name))}</div><div class="grow"><div class="title truncate">${esc(u.name)} ${u.role === 'admin' ? '<span class="pill checked_out plain" style="margin-left:4px">Admin</span>' : ''}${!u.has_account ? '<span class="pill plain" style="margin-left:4px">No login</span>' : u.can_self_checkout ? '<span class="pill available plain" style="margin-left:4px">Self-checkout</span>' : '<span class="pill lost plain" style="margin-left:4px">No self-checkout</span>'}${!u.active ? '<span class="pill plain" style="margin-left:4px">Inactive</span>' : ''}</div>
       <div class="sub truncate">${esc(u.department ? u.department + ' · ' : '')}${esc(u.email || 'No email')}</div></div>
       ${u.asset_count ? `<span class="pill plain">${u.asset_count} item${u.asset_count > 1 ? 's' : ''}</span>` : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty">${icon('users')}<p>No people found.</p></div>`;
   };
@@ -912,7 +1064,8 @@ function personSheet(u, done) {
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}" list="depts"></label>
       <label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
-      <label class="field"><span>Access</span><select name="role"><option value="employee" ${u.role !== 'admin' ? 'selected' : ''}>Employee — sees their own equipment, can request &amp; self check-out</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin — full access to manage assets &amp; people</option></select></label>
+      <label class="field"><span>Building <span class="muted">(optional)</span></span><input name="building" value="${esc(u.building || '')}" autocomplete="off"></label>
+      <label class="field"><span>Access</span><select name="role"><option value="employee" ${u.role !== 'admin' ? 'selected' : ''}>Employee — sees their own equipment and can request equipment</option><option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin — full access to manage assets &amp; people</option></select></label>
       ${!editing ? `<label class="check"><input type="checkbox" name="login" id="login" checked><span>Create login and send invite</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${editing ? 'Save' : 'Add person'}</button></div>
     </form><datalist id="depts">${['IT', 'Marketing', 'Operations', 'Sales', 'Finance', 'Customer Service', 'Warehouse', 'Product', 'HR'].map((d) => `<option value="${d}">`).join('')}</datalist>`);
@@ -937,16 +1090,18 @@ async function viewPerson(id) {
   const u = d.user;
   main().innerHTML = `${backLink('#/people', 'People')}
     <div class="card pad"><div class="row" style="align-items:flex-start"><div class="avatar" style="width:56px;height:56px;font-size:18px">${esc(initials(u.name))}</div>
-      <div class="grow"><h1>${esc(u.name)}</h1><div class="muted">${esc([u.title, u.department].filter(Boolean).join(' · '))}</div>
+      <div class="grow"><h1>${esc(u.name)}</h1><div class="muted">${esc([u.title, u.department].filter(Boolean).join(' · '))}</div>${u.building ? `<div class="small muted">Building: ${esc(u.building)}</div>` : ''}
       <div class="small" style="margin-top:4px">${u.email ? `<a href="mailto:${esc(u.email)}">${esc(u.email)}</a>` : '<span class="muted">No email</span>'}${u.phone ? ` · <a href="tel:${esc(u.phone)}">${esc(u.phone)}</a>` : ''}</div>
-      <div class="row wrap" style="margin-top:8px;gap:6px">${u.role === 'admin' ? pill('checked_out', 'Admin') : u.has_account ? pill('retired', 'Employee') : pill('retired', 'No login')}${!u.active ? pill('lost', 'Inactive') : ''}${u.has_account && !u.has_password ? pill('open', 'Invite pending') : ''}</div></div></div>
+      <div class="row wrap" style="margin-top:8px;gap:6px">${u.role === 'admin' ? pill('checked_out', 'Admin') : ''}${u.has_account ? pill('available', 'Login access') : pill('retired', 'No login')}${!u.active ? pill('lost', 'Inactive') : ''}${u.has_account && !u.has_password ? pill('open', 'Invite pending') : ''}</div></div></div>
+      ${u.has_account ? '' : '<div class="small muted" style="margin-top:10px">Self-checkout has no effect until they have a login.</div>'}
       <div class="row wrap" style="margin-top:14px;gap:8px"><button class="btn sm" id="edit">${icon('edit')} Edit</button>
         ${u.has_account ? `<button class="btn sm" id="invite">${icon('mail')} ${u.has_password ? 'Send password reset' : 'Resend invite'}</button>` : `<button class="btn sm" id="give-login">${icon('user')} Give login access</button>`}
+        <button type="button" class="btn sm toggle ${u.can_self_checkout ? 'on' : ''}" id="selfco" aria-pressed="${u.can_self_checkout ? 'true' : 'false'}" title="Click to ${u.can_self_checkout ? 'turn off' : 'turn on'}">${icon(u.can_self_checkout ? 'check' : 'x')} Self-checkout ${u.can_self_checkout ? 'enabled' : 'disabled'}</button>
         ${u.id !== S.me.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" id="toggle">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</div></div>
     <div class="section-title">Has now (${d.current.length})</div>
-    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtDate(m.checked_out_at)}${m.due_date ? ` · due ${fmtDate(m.due_date)}` : ''}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
+    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtStamp(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
       ${u.active ? `<div class="card-body" style="border-top:1px solid var(--line)"><button class="btn block" id="give">${icon('out')} Check out something to ${esc(u.name.split(' ')[0])}</button></div>` : ''}</div>
-    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
+    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
   $('#edit').onclick = () => personSheet(u, () => route(true));
   const gl = $('#give-login');
   if (gl) gl.onclick = () => {
@@ -958,6 +1113,10 @@ async function viewPerson(id) {
     $('#gl', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target)); fd.invite = !!fd.invite;
       busy($('#glgo', el), async () => { await api('POST', `/api/users/${u.id}/account`, fd); usersCache = null; close(); toast('Login created'); route(true); }); };
   };
+  $('#selfco').onclick = (e) => busy(e.currentTarget, async () => {
+    await api('PUT', `/api/users/${u.id}/self-checkout`, { enabled: !u.can_self_checkout });
+    toast(u.can_self_checkout ? 'Self-checkout disabled' : 'Self-checkout enabled'); route(true);
+  });
   const inv = $('#invite');
   if (inv) inv.onclick = (e) => busy(e.currentTarget, async () => {
     const r = await api('POST', `/api/users/${u.id}/invite`, {});
@@ -1051,7 +1210,6 @@ async function viewSettings() {
   main().innerHTML = `<div class="page-head"><h1>Settings</h1></div>
     <form id="f" class="stack">
       <div class="card pad"><h2 style="margin-bottom:12px">Check-out rules</h2><div class="form-grid">
-        <label class="check"><input type="checkbox" name="self_checkout" ${s.self_checkout ? 'checked' : ''}><span><strong>Let users check out available items themselves</strong><br><span class="small muted">They scan the tag and tap “Check out to me”. Admins get an email. Turn off to require a request instead.</span></span></label>
         <label class="check"><input type="checkbox" name="overdue_reminders" ${s.overdue_reminders ? 'checked' : ''}><span><strong>Email overdue reminders</strong><br><span class="small muted">Sent when an item passes its due date, then every 3 days.</span></span></label>
         <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label>
         <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
@@ -1073,7 +1231,7 @@ async function viewSettings() {
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const body = { self_checkout: fd.has('self_checkout'), overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
+    const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
       categories: fd.get('categories').split('\n'), locations: fd.get('locations').split('\n') };
     busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); });
   };

@@ -22,13 +22,13 @@ const DEV_APP_URL = 'http://localhost:3179';
 const ADMIN = { name: 'Dana Ito', email: 'dana.ito@example.com', department: 'IT', title: 'IT Manager' };
 
 const USERS = [
-  { name: 'Bailey Brooks', email: 'bailey.brooks@example.com', department: 'Marketing', title: 'Content Manager' },
+  { name: 'Bailey Brooks', email: 'bailey.brooks@example.com', department: 'Marketing', title: 'Content Manager', building: 'Building 4' },
   { name: 'Casey Chen', email: 'casey.chen@example.com', department: 'Sales', title: 'Account Executive' },
   { name: 'Dakota Diaz', email: 'dakota.diaz@example.com', department: 'Engineering', title: 'Software Engineer' },
   { name: 'Emerson Ellis', email: 'emerson.ellis@example.com', department: 'Finance', title: 'Staff Accountant' },
   { name: 'Finley Flores', email: 'finley.flores@example.com', department: 'Customer Support', title: 'Support Specialist' },
   { name: 'Gray Garcia', email: 'gray.garcia@example.com', department: 'Engineering', title: 'QA Engineer' },
-  { name: 'Harper Hughes', email: 'harper.hughes@example.com', department: 'Operations', title: 'Warehouse Lead' },
+  { name: 'Harper Hughes', email: 'harper.hughes@example.com', department: 'Operations', title: 'Warehouse Lead', building: 'Warehouse 2' },
   { name: 'Indigo Ibarra', email: 'indigo.ibarra@example.com', department: 'Marketing', title: 'Designer' },
 ];
 // An employee who exists only as an equipment assignee: no login account is ever created for them.
@@ -211,11 +211,13 @@ function applySpecialCases(defs) {
     assignedHeadset: nth('Jabra Evolve2 65', 0),
     msLicense: nth('Microsoft 365 Business Standard', 0),
     availableOptiplex: nth('Dell OptiPlex 7010', 0),
+    everydayMonitor: nth('Dell P2422H', 0),
+    productionCamera: nth('Sony a6400 Camera Body', 0), // category 'Other': type is per-assignment, never per-category
   };
 }
 
 async function checkout(admin, asset, user, opts = {}) {
-  return admin.post(`/api/assets/${asset.id}/checkout`, { user_id: user.id, ...opts });
+  return admin.post(`/api/assets/${asset.id}/checkout`, { employee_id: user.id, assignment_type: 'permanent', ...opts });
 }
 async function checkoutThenCheckin(admin, asset, user, checkinOpts = {}) {
   await checkout(admin, asset, user);
@@ -264,9 +266,15 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     const [bailey, casey, dakota, emerson, finley, , harper, indigo] = createdUsers;
     const gray = createdUsers[5];
 
-    await checkout(admin, assetFor(special.assignedMacBookAir), bailey, { due_date: '2026-12-01' });
+    // Self-checkout is per employee and defaults ON; Harper's is revoked so both behaviors are testable without touching Settings.
+    await admin.put(`/api/users/${harper.id}/self-checkout`, { enabled: false });
+
+    // Permanent everyday equipment (bailey: laptop + monitor + a software seat below) and temporary checkouts
+    // (dakota's overdue laptop loan, indigo's laptop loan, emerson's production camera).
+    await checkout(admin, assetFor(special.assignedMacBookAir), bailey);
+    await checkout(admin, assetFor(special.everydayMonitor), bailey);
     await checkout(admin, assetFor(special.assignedIphone), casey);
-    await checkout(admin, assetFor(special.overdueLaptop), dakota, { due_date: '2026-01-15' });
+    await checkout(admin, assetFor(special.overdueLaptop), dakota, { assignment_type: 'checkout', due_date: '2026-01-15' });
     await checkout(admin, assetFor(special.assignedIpad), gray);
     await checkout(admin, assetFor(special.assignedHeadset), harper);
 
@@ -278,7 +286,8 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     const wellUsed = assetFor(special.wellUsedLaptop);
     await checkoutThenCheckin(admin, wellUsed, emerson, { condition: 'Good' });
     await checkoutThenCheckin(admin, wellUsed, finley, { condition: 'Fair' });
-    await checkout(admin, wellUsed, indigo, { due_date: '2027-01-01' });
+    await checkout(admin, wellUsed, indigo, { assignment_type: 'checkout', due_date: '2027-01-01' });
+    await checkout(admin, assetFor(special.productionCamera), emerson, { assignment_type: 'checkout', due_date: '2026-12-15', notes: 'Product shoot' });
 
     await checkout(admin, assetFor(defs.find((d) => d.category === 'Keyboard & Mouse')), jules);
 
@@ -313,6 +322,10 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
       assets: db.prepare('SELECT COUNT(*) c FROM assets').get().c,
       currentAssignments: db.prepare('SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL').get().c,
       historicalAssignments: db.prepare('SELECT COUNT(*) c FROM assignments WHERE returned_at IS NOT NULL').get().c,
+      selfCheckoutEnabled: db.prepare('SELECT COUNT(*) c FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE e.can_self_checkout = 1').get().c,
+      selfCheckoutDisabled: db.prepare('SELECT COUNT(*) c FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE e.can_self_checkout = 0').get().c,
+      permanentAssignments: db.prepare("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'permanent'").get().c,
+      temporaryCheckouts: db.prepare("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'checkout'").get().c,
       requests: db.prepare('SELECT COUNT(*) c FROM requests').get().c,
       firstAssetTag: firstAsset && firstAsset.tag,
       nextTag: nextTag.tag,
@@ -336,6 +349,8 @@ if (require.main === module) {
       console.log(`  Assets:                 ${s.assets} (tags ${s.firstAssetTag} .. next unused ${s.nextTag})`);
       console.log(`  Current assignments:    ${s.currentAssignments}`);
       console.log(`  Historical assignments: ${s.historicalAssignments}`);
+      console.log(`  Permanent / temporary:  ${s.permanentAssignments} / ${s.temporaryCheckouts}`);
+      console.log(`  Self-checkout on/off:   ${s.selfCheckoutEnabled} / ${s.selfCheckoutDisabled} (logins; Harper Hughes is off)`);
       console.log(`  Requests:               ${s.requests}`);
       console.log('');
       console.log(`  Admin login:  ${s.adminEmail} / ${s.devPassword}`);

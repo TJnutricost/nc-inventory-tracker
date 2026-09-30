@@ -28,13 +28,16 @@ test('settings round-trip: categories, locations, tag prefix, loan days', async 
   assert.match(nextTag.body.tag, /^ZZ-\d{5}$/);
 });
 
-test('a checkout with no explicit due date picks one up from the default-loan-days setting', async () => {
+test('default-loan-days is only a UI pre-fill: the server still requires a return date for a checkout and never adds one to a permanent assignment', async () => {
   await admin.put('/api/settings', { default_loan_days: 7 });
   const created = await admin.post('/api/users', { name: 'Default Due', email: 'defaultdue@nutricost.com' });
   const asset = (await admin.post('/api/assets', { name: 'Loaner', tag: 'ZZ-DUE1' })).body;
-  const co = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: created.body.id });
-  assert.equal(co.status, 200);
-  assert.ok(co.body.assignment.due_date, 'expected a due date to be set automatically');
+  assert.equal((await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: created.body.id, assignment_type: 'checkout' })).status, 400);
+  const perm = (await admin.post('/api/assets', { name: 'Desk Monitor', tag: 'ZZ-DUE2' })).body;
+  const pa = await admin.post(`/api/assets/${perm.id}/checkout`, { user_id: created.body.id });
+  assert.equal(pa.body.assignment.assignment_type, 'permanent');
+  assert.equal(pa.body.assignment.due_date, null);
+  await admin.put('/api/settings', { default_loan_days: 0 });
 });
 
 test('a non-admin cannot read or change settings', async () => {
@@ -49,7 +52,7 @@ test('a non-admin cannot read or change settings', async () => {
 test('overdue assignments show up in the dashboard stats and asset filter', async () => {
   const created = await admin.post('/api/users', { name: 'Overdue Owner', email: 'overdue@nutricost.com' });
   const asset = (await admin.post('/api/assets', { name: 'Overdue Thing', tag: 'ZZ-OVERDUE1' })).body;
-  await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: created.body.id, due_date: '2000-01-01' });
+  await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: created.body.id, assignment_type: 'checkout', due_date: '2000-01-01' });
 
   const dash = await admin.get('/api/dashboard');
   assert.ok(dash.body.stats.overdue >= 1);

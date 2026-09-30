@@ -14,7 +14,6 @@ db.pragma('foreign_keys = ON');
 runMigrations(db, migrations);
 
 const DEFAULT_SETTINGS = {
-  self_checkout: '0',          // users may check out available assets to themselves by scanning (OFF for new databases; INSERT OR IGNORE never overwrites an existing value)
   default_loan_days: '0',      // 0 = no due date by default
   tag_prefix: 'NC-',
   overdue_reminders: '1',
@@ -31,7 +30,6 @@ function getSettings() {
   const out = {};
   for (const r of db.prepare('SELECT key, value FROM settings').all()) out[r.key] = r.value;
   return {
-    self_checkout: out.self_checkout === '1',
     default_loan_days: Number(out.default_loan_days || 0),
     tag_prefix: out.tag_prefix || 'NC-',
     overdue_reminders: out.overdue_reminders === '1',

@@ -167,7 +167,7 @@ test('deactivating disables the login and keeps the person and their assignments
   assert.equal((await c.get('/api/me')).status, 401, 'existing session is signed out');
   assert.equal((await loginAs('dexter@nutricost.com', 'employee-password-1')).status, 401);
   assert.equal(count('SELECT COUNT(*) c FROM employees WHERE id = ?', person.id), 1);
-  assert.equal(count('SELECT COUNT(*) c FROM assignments WHERE user_id = ? AND returned_at IS NULL', person.id), 1);
+  assert.equal(count('SELECT COUNT(*) c FROM assignments WHERE employee_id = ? AND returned_at IS NULL', person.id), 1);
   const back = await admin.put(`/api/users/${person.id}`, { name: 'Dexter Deactivate', email: 'dexter@nutricost.com', role: 'employee', active: true });
   assert.equal(back.body.active, true);
   assert.equal((await loginAs('dexter@nutricost.com', 'employee-password-1')).status, 200);
@@ -232,7 +232,7 @@ test('pre-1D database: every user becomes one employee + one linked account with
   assert.deepEqual([e1.name, e1.work_email, e1.department, e1.title, e1.phone, e1.status, e1.created_at], ['Old Admin', 'old.admin@nutricost.com', 'IT', 'Manager', '555-0001', 'active', '2025-01-01 10:00:00']);
   assert.equal(d.prepare('SELECT status FROM employees WHERE id = 5').get().status, 'inactive');
 
-  assert.equal(d.prepare('SELECT COUNT(*) c FROM assignments WHERE user_id = 2').get().c, 2);
+  assert.equal(d.prepare('SELECT COUNT(*) c FROM assignments WHERE employee_id = 2').get().c, 2);
   assert.deepEqual({ ...d.prepare('SELECT checked_out_by, returned_to FROM assignments WHERE id = 1').get() }, { checked_out_by: 1, returned_to: 1 });
   assert.equal(d.prepare('SELECT uploaded_by FROM photos').get().uploaded_by, 2);
   assert.deepEqual({ ...d.prepare('SELECT user_id, created_by, resolved_by FROM requests').get() }, { user_id: 2, created_by: 2, resolved_by: 1 });
@@ -243,7 +243,7 @@ test('pre-1D database: every user becomes one employee + one linked account with
   assert.equal(d.pragma('foreign_keys', { simple: true }), 1);
   for (const t of ['employees', 'accounts']) assert.equal(d.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(t).seq, usersSeq, `${t} keeps the legacy id high-water mark`);
   const fks = (t) => d.pragma(`foreign_key_list(${t})`).map((f) => `${f.from}->${f.table}`).sort();
-  assert.deepEqual(fks('assignments'), ['asset_id->assets', 'checked_out_by->accounts', 'returned_to->accounts', 'user_id->employees']);
+  assert.deepEqual(fks('assignments'), ['asset_id->assets', 'checked_out_by->accounts', 'employee_id->employees', 'returned_to->accounts']);
   assert.deepEqual(fks('requests'), ['asset_id->assets', 'created_by->accounts', 'resolved_by->accounts', 'user_id->employees']);
   assert.deepEqual(fks('activity'), ['actor_id->accounts', 'asset_id->assets', 'subject_user_id->employees']);
   assert.deepEqual(fks('tokens'), ['user_id->accounts']);
