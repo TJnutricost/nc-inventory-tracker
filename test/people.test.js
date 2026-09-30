@@ -64,11 +64,16 @@ test('legacy role value "user" is accepted and means employee', async () => {
 // ---------------------------------------------------------------- employee without login
 test('IT can create an employee with no login: no account row, assignable, cannot sign in', async () => {
   const accountsBefore = count('SELECT COUNT(*) c FROM accounts');
-  const p = await admin.post('/api/users', { name: 'Nolan NoLogin', email: 'nolan@nutricost.com', department: 'Warehouse', login: false });
+  const tokensBefore = count('SELECT COUNT(*) c FROM tokens');
+  const outboxBefore = count('SELECT COUNT(*) c FROM outbox');
+  // the Add-person sheet's unchecked "Create login and send invite" sends login:false, invite:false (and no role)
+  const p = await admin.post('/api/users', { name: 'Nolan NoLogin', email: 'nolan@nutricost.com', department: 'Warehouse', login: false, invite: false });
   assert.equal(p.status, 200);
   assert.equal(p.body.has_account, false);
   assert.equal(p.body.role, null);
   assert.equal(count('SELECT COUNT(*) c FROM accounts'), accountsBefore);
+  assert.equal(count('SELECT COUNT(*) c FROM tokens'), tokensBefore, 'no invite token');
+  assert.equal(count('SELECT COUNT(*) c FROM outbox'), outboxBefore, 'no invite email');
   assert.equal(count('SELECT COUNT(*) c FROM employees WHERE id = ?', p.body.id), 1);
 
   const asset = (await admin.post('/api/assets', { name: 'Handheld Scanner' })).body;
@@ -82,6 +87,17 @@ test('IT can create an employee with no login: no account row, assignable, canno
   assert.equal((await admin.post(`/api/users/${p.body.id}/invite`, {})).status, 400, 'no login, so nothing to invite');
   const list = (await admin.get('/api/users')).body;
   assert.ok(list.some((u) => u.id === p.body.id && u.has_account === false));
+});
+
+test('checked "Create login and send invite": employee + linked account with the chosen role, and one invite', async () => {
+  const outboxBefore = count('SELECT COUNT(*) c FROM outbox');
+  const r = await admin.post('/api/users', { name: 'Ivy Invited', email: 'ivy@nutricost.com', role: 'admin', login: true, invite: true });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.has_account, true);
+  assert.equal(r.body.role, 'admin');
+  assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', r.body.id), 1);
+  assert.equal(count("SELECT COUNT(*) c FROM tokens WHERE user_id = ? AND purpose = 'reset'", r.body.account_id), 1, 'invite token issued');
+  assert.equal(count('SELECT COUNT(*) c FROM outbox'), outboxBefore + 1, 'one invite email');
 });
 
 test('an employee with no login and no email is allowed; a bad email is not', async () => {
