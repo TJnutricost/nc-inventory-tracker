@@ -124,7 +124,7 @@ test('the History screen is wired for employees: route, nav entry, own-record AP
   const view = src.slice(src.indexOf('async function viewHistory()'), src.indexOf('function viewProfile()'));
   assert.match(view, /'\/api\/users\/' \+ S\.me\.employee_id/, 'reads only the signed-in employee\'s own record');
   for (const field of ['asset_name', 'tag', 'checked_out_at', 'returned_at', 'typeText']) assert.ok(view.includes(field), field);
-  assert.match(src, /if \(!isAdmin\(\)\) side\.push\(\{ sep: true \}, \{ key: 'history'/, 'desktop nav entry for employees only');
+  assert.match(src, /\.\.\.\(isAdmin\(\) \? \[\] : \[\{ key: 'history', href: '#\/history'/, 'desktop nav entry for employees only');
   assert.match(src, /\['#\/history', 'history', 'History'/, 'mobile Account page entry');
 });
 
@@ -218,25 +218,86 @@ test('a returned asset stops being visible to its former holder unless it is ava
   assert.equal((await me.client.get(`/api/assets/${a.id}`)).status, 404, 'now someone else\'s');
 });
 
-test('asset list: employees get available and their own equipment, with no other holder\'s name', async () => {
+test('Browse (the asset list) is "equipment I can get" for employees: available only, never their own or anyone else\'s', async () => {
   const me = await makeLogin('List Viewer');
   const other = await makeLogin('List Co-holder');
   const seats = await newAsset('Shared license', { category: 'Software License', license_seats: 3 });
+  const myseat = await newAsset('My seat license', { category: 'Software License', license_seats: 3 });
   const free = await newAsset('List free');
   const theirs = await newAsset('List theirs');
   const mineAsset = await newAsset('List mine');
+  const repair = await newAsset('List repair');
+  const gone = await newAsset('List archived');
   await give(seats, other);
+  await give(myseat, me);
   await give(theirs, other);
   await give(mineAsset, me);
+  await admin.put(`/api/assets/${repair.id}`, { status: 'maintenance' });
+  await admin.post(`/api/assets/${gone.id}/archive`, {});
   const rows = (await me.client.get('/api/assets')).body;
   const names = rows.map((r) => r.name);
-  assert.ok(names.includes('List free') && names.includes('List mine') && names.includes('Shared license'));
-  assert.equal(names.includes('List theirs'), false);
+  assert.ok(names.includes('List free') && names.includes('Shared license'), 'available equipment, including a multi-seat license with a free seat');
+  for (const hidden of ['List theirs', 'List mine', 'My seat license', 'List repair', 'List archived']) assert.equal(names.includes(hidden), false, `${hidden} is not in Browse`);
+  assert.ok(rows.every((r) => r.status === 'available'));
   assert.doesNotMatch(JSON.stringify(rows), /List Co-holder/, 'no other employee\'s name anywhere in the list');
   assert.ok(rows.every((r) => !('holder_names' in r) && !('purchase_cost' in r) && !('vendor' in r) && !('notes' in r)));
   assert.equal(rows.find((r) => r.name === 'Shared license').due_date, null);
-  assert.equal((await me.client.get('/api/assets?include_archived=1&status=checked_out')).body.some((r) => r.name === 'List theirs'), false);
-  assert.ok((await admin.get('/api/assets')).body.find((r) => r.name === 'List theirs').holder_names.includes('List Co-holder'), 'admin list unchanged');
+  // the status / holder filters are admin tools: for an employee they change nothing and can't surface anything extra
+  const same = JSON.stringify(ids(rows));
+  for (const qs of ['?status=checked_out', '?status=overdue', '?status=maintenance', '?status=lost', '?include_archived=1', `?employee_id=${other.id}`, `?user_id=${other.id}`, `?employee_id=${me.id}`]) {
+    assert.equal(JSON.stringify(ids((await me.client.get(`/api/assets${qs}`)).body)), same, `${qs} is ignored for employees`);
+  }
+  // searching by a holder's name must not reveal that they hold something
+  assert.equal((await me.client.get('/api/assets?q=List%20Co-holder')).body.length, 0, 'no probing holders by name');
+  assert.ok((await me.client.get('/api/assets?q=Shared')).body.some((r) => r.name === 'Shared license'), 'ordinary search still works');
+  assert.ok((await me.client.get('/api/assets?category=Software%20License')).body.every((r) => r.category === 'Software License'), 'category filter still works');
+  // admin list is unchanged
+  const adminRows = (await admin.get('/api/assets')).body;
+  assert.ok(adminRows.find((r) => r.name === 'List theirs').holder_names.includes('List Co-holder'));
+  assert.ok((await admin.get(`/api/assets?q=List%20Co-holder`)).body.some((r) => r.name === 'List theirs'), 'admins can still search by holder');
+  assert.ok((await admin.get('/api/assets?status=maintenance')).body.some((r) => r.name === 'List repair'));
+});
+
+test('My equipment data: an employee\'s dashboard lists only their own active assignments, permanent and temporary, with details', async () => {
+  const me = await makeLogin('Equip Owner');
+  const other = await makeLogin('Equip Other');
+  const perm = await newAsset('Eq permanent', { brand: 'Dell', model: 'U2723', location: 'Desk 12', category: 'Monitor' });
+  const loan = await newAsset('Eq loan', { location: 'IT Room' });
+  const returned = await newAsset('Eq returned');
+  const theirs = await newAsset('Eq theirs');
+  await give(perm, me);
+  await give(loan, me, { assignment_type: 'checkout', due_date: isoPlus(4), due_time: '16:00' });
+  await give(returned, me);
+  await admin.post(`/api/assets/${returned.id}/checkin`, {});
+  await give(theirs, other);
+  const mine = (await me.client.get('/api/dashboard')).body.mine;
+  assert.deepEqual(mine.map((m) => m.asset_name).sort(), ['Eq loan', 'Eq permanent'], 'only own, only active (not returned, not others\')');
+  assert.ok(mine.every((m) => m.employee_id === me.id));
+  const p = mine.find((m) => m.asset_name === 'Eq permanent');
+  assert.deepEqual([p.assignment_type, p.tag, p.location, p.brand, p.model, p.due_date], ['permanent', perm.tag, 'Desk 12', 'Dell', 'U2723', null]);
+  assert.ok(p.checked_out_at);
+  const l = mine.find((m) => m.asset_name === 'Eq loan');
+  assert.deepEqual([l.assignment_type, l.due_date, l.due_time], ['checkout', isoPlus(4), '16:00']);
+  assert.doesNotMatch(JSON.stringify(mine), /Eq theirs|Equip Other/);
+  assert.equal((await me.client.get(`/api/assets/${perm.id}`)).status, 200, 'each row opens through the normal detail flow');
+  assert.equal((await me.client.get(`/api/assets/${theirs.id}`)).status, 404);
+  assert.deepEqual((await other.client.get('/api/dashboard')).body.mine.map((m) => m.asset_name), ['Eq theirs']);
+});
+
+test('front end: employee navigation has My equipment (desktop + mobile Account), Browse has no "Mine" filter, admin nav is unchanged', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const nav = src.slice(src.indexOf('function navItems()'), src.indexOf('function mountShell()'));
+  const side = nav.slice(nav.indexOf('const side = ['));
+  const order = ['home', 'equipment', 'assets', 'scan', 'requests', 'history'].map((k) => side.indexOf(`key: '${k}'`));
+  assert.ok(order.every((i) => i > 0) && [...order].sort((a, b) => a - b).join() === order.join(), 'employee sidebar order: Home, My equipment, Browse equipment, Scan, Requests, History');
+  assert.match(nav, /\.\.\.\(isAdmin\(\) \? \[\] : \[\{ key: 'equipment', href: '#\/equipment', label: 'My equipment'/, 'employees only');
+  assert.match(nav, /key: 'people'[\s\S]*key: 'settings'/, 'admin sidebar items still there');
+  assert.match(src, /\[\/\^#\\\/equipment\$\/, viewEquipment, \{ key: 'equipment', employee: true \}\]/);
+  assert.match(src, /\['#\/equipment', 'laptop', 'My equipment'/, 'mobile Account page entry');
+  assert.doesNotMatch(src, /'Mine'/, 'the Mine filter is gone');
+  assert.doesNotMatch(src, /employee_id', S\.me\.id/, 'Browse no longer queries by holder');
+  const view = src.slice(src.indexOf('async function viewEquipment()'), src.indexOf('// Employee History:'));
+  for (const bit of ['/api/dashboard', 'Permanent assignments', 'Temporary checkouts', 'No equipment is permanently assigned to you.', 'You have nothing checked out temporarily.', "href=\"#/asset/${m.asset_id}\"", 'isOverdue(m.due_date)', 'fmtClock(m.due_time)']) assert.ok(view.includes(bit), bit);
 });
 
 test('scanner lookup: an employee gets an id only for assets they may open; others just report "unavailable"', async () => {

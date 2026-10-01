@@ -238,9 +238,11 @@ function navItems() {
   ];
   const side = [
     { key: 'home', href: '#/home', label: 'Home', icon: 'home' },
+    ...(isAdmin() ? [] : [{ key: 'equipment', href: '#/equipment', label: 'My equipment', icon: 'laptop' }]),
     { key: 'assets', href: '#/assets', label: isAdmin() ? 'All assets' : 'Browse equipment', icon: 'box' },
     { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan' },
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
+    ...(isAdmin() ? [] : [{ key: 'history', href: '#/history', label: 'History', icon: 'history' }]),
   ];
   if (isAdmin()) side.push({ sep: true },
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
@@ -248,7 +250,6 @@ function navItems() {
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
     { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' });
-  if (!isAdmin()) side.push({ sep: true }, { key: 'history', href: '#/history', label: 'History', icon: 'history' });
   side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' });
   return { tabs: common, side };
 }
@@ -285,7 +286,7 @@ function mountShell() {
   S.shell = true;
 }
 function setActive(key) {
-  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile', 'history'].includes(key) && a.closest('.tabbar'))));
+  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
 }
 async function refreshBadge() {
   try {
@@ -321,6 +322,7 @@ const ROUTES = [
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
   [/^#\/activity$/, viewActivity, { key: 'activity', admin: true }],
   [/^#\/settings$/, viewSettings, { key: 'settings', admin: true }],
+  [/^#\/equipment$/, viewEquipment, { key: 'equipment', employee: true }],
   [/^#\/history$/, viewHistory, { key: 'history' }],
   [/^#\/profile$/, viewProfile, { key: 'profile' }],
   [/^#\/more$/, viewMore, { key: 'more' }],
@@ -336,6 +338,7 @@ async function route(silent) {
       try { await loadMe(); } catch { return go('#/login'); }
     }
     if (opt.admin && !isAdmin()) return go('#/home');
+    if (opt.employee && isAdmin()) return go('#/home'); // the admin's own equipment stays on their Home
     if (!S.shell) { mountShell(); refreshBadge(); }
     setActive(opt.key);
     if (!silent) { window.scrollTo(0, 0); loading(); }
@@ -434,7 +437,7 @@ async function viewHome() {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
       <div class="stack">${returnBanners(d.mine)}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
-      <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/history">History</a></span></div>${myEquipmentList(d.mine)}</div>
+      <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
       ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
@@ -488,12 +491,12 @@ async function viewAssets() {
   const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
   const statuses = isAdmin()
     ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
-    : [['', 'All'], ['available', 'Available'], ['checked_out', 'Mine']];
+    : null; // employees have no status filters: Browse is simply the equipment they can get (their own is under My equipment)
   main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>` : ''}</div>
     <div class="stack">
-      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial, person…" value="${esc(state.q)}" enterkeyhint="search"></div>
+      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
-      <div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>
+      ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
       <select id="cat"><option value="">All categories</option>${S.settings.categories.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <div class="card" id="results"><div class="spinner"></div></div>
     </div>
@@ -502,9 +505,8 @@ async function viewAssets() {
   const load = async () => {
     const u = new URLSearchParams();
     if (state.q) u.set('q', state.q);
-    if (state.status && !(state.status === 'checked_out' && !isAdmin())) u.set('status', state.status);
+    if (state.status && isAdmin()) u.set('status', state.status);
     if (state.category) u.set('category', state.category);
-    if (!isAdmin() && state.status === 'checked_out') u.set('employee_id', S.me.id);
     history.replaceState(null, '', '#/assets' + (u.toString() && isAdmin() ? '?' + u.toString() : ''));
     try {
       const rows = await api('GET', '/api/assets?' + u.toString());
@@ -521,7 +523,7 @@ async function viewAssets() {
   };
   $('#q').oninput = debounce((e) => { state.q = e.target.value.trim(); load(); });
   $('#cat').onchange = (e) => { state.category = e.target.value; load(); };
-  $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; state.status = b.dataset.v; $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c === b)); load(); };
+  if ($('#chips')) $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; state.status = b.dataset.v; $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c === b)); load(); };
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   const rl = $('#reqlink'); if (rl) rl.onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
   load();
@@ -1257,6 +1259,7 @@ function viewMore() {
     ['#/settings', 'settings', 'Settings', 'Check-out rules, categories, email'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ] : [
+    ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],
     ['#/history', 'history', 'History', 'Equipment you have had before'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ];
@@ -1267,6 +1270,27 @@ function viewMore() {
   $('#out').onclick = logout;
 }
 async function logout() { await api('POST', '/api/logout', {}).catch(() => {}); S.me = null; S.shell = false; usersCache = null; go('#/login'); }
+// My equipment: the signed-in employee's CURRENT assignments, split by kind. Same data as Home's "My equipment" card
+// (GET /api/dashboard -> mine: only this employee's open assignments); no separate model or logic. Each row opens the
+// asset through the normal employee-authorized detail flow (they hold it, so it is always allowed).
+async function viewEquipment() {
+  const d = await api('GET', '/api/dashboard');
+  const perm = d.mine.filter((m) => m.assignment_type !== 'checkout');
+  const temp = d.mine.filter((m) => m.assignment_type === 'checkout');
+  const flag = (m) => (m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : '');
+  const detail = (m) => [m.category, [m.brand, m.model].filter(Boolean).join(' '), m.location].filter((v) => v && v !== m.asset_name).map(esc).join(' · ');
+  const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
+    <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub truncate"><span class="mono">${esc(m.tag)}</span>${detail(m) ? ' · ' + detail(m) : ''}</div>
+      <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a></li>`;
+  const group = (title, rows, empty, iconName) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${rows.length} item${rows.length === 1 ? '' : 's'}</span></div>
+    ${rows.length ? `<ul class="list">${rows.join('')}</ul>` : `<div class="empty">${icon(iconName)}<p>${empty}</p></div>`}</div>`;
+  main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine)}
+    ${group('Permanent assignments', perm.map((m) => row(m, `Assigned since ${esc(fmtStamp(m.checked_out_at))}`, flag(m) || pill('checked_out', 'Assigned'))), 'No equipment is permanently assigned to you.', 'laptop')}
+    ${group('Temporary checkouts', temp.map((m) => row(m, `Checked out ${esc(fmtStamp(m.checked_out_at))} · return by ${esc(fmtDate(m.due_date))}${m.due_time ? ' ' + esc(fmtClock(m.due_time)) : ''}`, flag(m))), 'You have nothing checked out temporarily.', 'out')}
+    <p class="small muted" style="text-align:center">Looking for something else? <a href="#/assets">Browse equipment</a> · <a href="#/history">History</a></p></div>`;
+  wireDropoffs(main());
+}
+
 // Employee History: the signed-in employee's own assignments, newest first, from the same record the admin person page
 // uses (GET /api/users/:id answers only for yourself when you aren't an admin). Read-only; past rows aren't links
 // because an employee may only open equipment they hold or that is available.

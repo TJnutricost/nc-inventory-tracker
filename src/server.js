@@ -412,12 +412,17 @@ const ASSET_LIST_SQL = `
 
 app.get('/api/assets', auth, (req, res) => {
   const where = []; const params = [];
-  const { q, category, status } = req.query;
-  const employeeFilter = req.query.employee_id || req.query.user_id; // user_id kept as a compatibility alias
+  const isAdmin = req.user.role === 'admin';
+  // Employees get ONE meaning for this list — "equipment I can get": available, not archived, and not something I already
+  // hold (that is My Equipment). So the status / holder filters below are admin tools and are ignored for employees; they
+  // would otherwise be a way to probe other people's assignments (e.g. searching a multi-seat license by holder name).
+  const { q, category } = req.query;
+  const status = isAdmin ? req.query.status : undefined;
+  const employeeFilter = isAdmin ? (req.query.employee_id || req.query.user_id) : undefined; // user_id kept as a compatibility alias
   if (q) {
-    where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?
-      OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
-    const like = `%${q}%`; params.push(like, like, like, like, like, like, like);
+    where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?${isAdmin
+      ? ' OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?)' : ''})`);
+    const like = `%${q}%`; params.push(like, like, like, like, like, like); if (isAdmin) params.push(like);
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
   if (status === 'overdue') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < date('now'))`); }
@@ -425,9 +430,8 @@ app.get('/api/assets', auth, (req, res) => {
   else if (status) { where.push('a.status = ?'); params.push(status); }
   if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
   if (employeeFilter) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)'); params.push(Number(employeeFilter)); }
-  if (req.user.role !== 'admin') {
-    // Users see what they hold and what's available to borrow
-    where.push(`(a.status = 'available' OR EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL))`);
+  if (!isAdmin) {
+    where.push(`a.status = 'available' AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)`);
     params.push(req.user.employee_id);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
@@ -825,7 +829,7 @@ app.post('/api/assets/:id/return-notice', auth, (req, res) => {
 // ---------- dashboard ----------
 app.get('/api/dashboard', auth, (req, res) => {
   const mine = db.prepare(`
-    SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial, a.id AS asset_id,
+    SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial, a.location, a.brand, a.model, a.id AS asset_id,
       (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb,
       (SELECT r.id FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_request_id,
       (SELECT r.status FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_status,
