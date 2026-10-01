@@ -511,10 +511,9 @@ function activityList(rows, withAsset) {
 // ============================================================ assets list
 async function viewAssets() {
   const p = qs();
-  const roots = isAdmin() ? await rootNames() : [];
-  // Employees browse the catalog level by level (see browseNav below); admins keep the category + status filters.
-  const catRows = isAdmin() ? [] : await getCatalog().catch(() => []);
-  const state = { q: p.get('q') || '', status: p.get('status') || '', category: isAdmin() ? (p.get('category') || '') : '', path: [] };
+  if (!isAdmin()) return viewBrowse(); // employees get the catalog card-grid browser
+  const roots = await rootNames();
+  const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
   const statuses = isAdmin()
     ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
     : null; // employees have no status filters: Browse is simply the equipment they can get (their own is under My equipment)
@@ -523,7 +522,7 @@ async function viewAssets() {
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
       ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
-      ${isAdmin() ? `<select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>` : '<div class="bn" id="bn"></div>'}
+      <select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <div class="card" id="results"><div class="spinner"></div></div>
     </div>
     ${isAdmin() ? `<a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>` : ''}`;
@@ -533,7 +532,6 @@ async function viewAssets() {
     if (state.q) u.set('q', state.q);
     if (state.status && isAdmin()) u.set('status', state.status);
     if (state.category) u.set('category', state.category);
-    if (state.path.length) u.set('catalog_node', state.path[state.path.length - 1]);
     history.replaceState(null, '', '#/assets' + (u.toString() && isAdmin() ? '?' + u.toString() : ''));
     try {
       const rows = await api('GET', '/api/assets?' + u.toString());
@@ -545,42 +543,95 @@ async function viewAssets() {
           <div class="grow"><div class="title truncate">${esc(a.name)}</div>
           <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${a.holder_names && isAdmin() ? ' · ' + esc(a.holder_names) : ''}${seats}${!a.holder_names && a.location ? ' · ' + esc(a.location) : ''}</div></div>
           ${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
-      }).join('')}</ul>` : `<div class="empty">${icon('box')}<p>${state.q || state.status || state.category || state.path.length ? 'Nothing matches those filters.' : isAdmin() ? 'No assets yet. Tap <strong>Add</strong> or scan a barcode to get started.' : 'Nothing is available right now.'}</p></div>`;
+      }).join('')}</ul>` : `<div class="empty">${icon('box')}<p>${state.q || state.status || state.category ? 'Nothing matches those filters.' : isAdmin() ? 'No assets yet. Tap <strong>Add</strong> or scan a barcode to get started.' : 'Nothing is available right now.'}</p></div>`;
     } catch (e) { fail(e); }
   };
   $('#q').oninput = debounce((e) => { state.q = e.target.value.trim(); load(); });
-  if ($('#cat')) $('#cat').onchange = (e) => { state.category = e.target.value; load(); };
-  if ($('#bn')) browseNav($('#bn'), catRows, state, load);
+  $('#cat').onchange = (e) => { state.category = e.target.value; load(); };
   if ($('#chips')) $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; state.status = b.dataset.v; $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c === b)); load(); };
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   const rl = $('#reqlink'); if (rl) rl.onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
   load();
 }
 
-// Employee Browse navigator: one catalog level at a time. Wherever the level being viewed has child categories, the first
-// choice is a VIRTUAL "All <name>" — not a catalog entry, just "everything the employee may see anywhere inside this branch" —
-// and it is the active view on arrival, so the whole branch is one tap away without drilling through each child. Counts and
-// lists come from the same server rules (available, not archived, not held), so the number on a chip is the number listed.
-function browseNav(root, rows, state, reload) {
+// ============================================================ catalog card grid (shared by Browse and the admin catalog)
+// Category navigation is a responsive grid of cards that wraps onto as many rows as it needs — never a scrolling strip, never a
+// tree. Same drill-down model everywhere: pick a card to go one level deeper; breadcrumbs jump back up; Back on narrow screens.
+// A level with child categories starts with the VIRTUAL "All in <name>" card: not a catalog entry, just "the whole branch".
+const cgCard = ({ attrs, name, meta, kind = '', chev = true, extra = '' }) => `<button type="button" class="cg-card ${kind}" ${attrs}><span class="cg-name">${esc(name)}${extra}</span><span class="cg-meta">${meta}</span>${chev ? icon('chev', 'cg-chev') : kind.includes('on') ? icon('check', 'cg-chev') : ''}</button>`;
+const cgTop = (chain, { allLabel, curAll, trailing = '' }) => `<div class="cc-top cg-top"><button type="button" class="cc-back" data-back aria-label="Back">${icon('back')}<span>Back</span></button>
+  <nav class="cc-crumbs" aria-label="Where you are"><button type="button" data-crumb="-1" class="${chain.length ? '' : 'cur'}">${esc(allLabel)}</button>${chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 && !curAll ? 'cur' : ''}">${esc(c.name)}</button>`).join('')}${curAll ? `<span aria-hidden="true">›</span><button type="button" class="cur" aria-current="true">All in ${esc(chain[chain.length - 1].name)}</button>` : ''}</nav>${trailing}</div>`;
+
+// ============================================================ employee Browse equipment
+// Search stays on top (global, available equipment only). Below it: category cards -> drill down. What is listed is always
+// the server's employee view (available, not archived, not already yours) — a card's count and its list use the same rule.
+async function viewBrowse() {
+  let rows = [];
+  try { rows = await getCatalog(); } catch { /* an empty catalog just means search-only browsing */ }
   const byId = new Map(rows.map((r) => [r.id, r]));
   const kidsOf = (pid) => rows.filter((r) => (r.parent_id ?? null) === pid);
-  const render = () => {
-    const cur = byId.get(state.path[state.path.length - 1]);
-    const kids = cur ? kidsOf(cur.id) : kidsOf(null);
-    const isLeaf = cur && !kids.length;
-    const chips = isLeaf ? kidsOf(cur.parent_id ?? null) : kids; // a leaf shows its siblings so the person can move sideways
-    const chip = (r) => `<button type="button" class="chip${isLeaf && r.id === cur.id ? ' on' : ''}" data-id="${r.id}">${esc(r.name)}${r.available_count ? ` <span class="chip-n">${r.available_count}</span>` : ''}</button>`;
-    root.innerHTML = `${state.path.length ? `<nav class="bn-crumbs cc-crumbs" aria-label="Where you are"><button type="button" data-to="0">All equipment</button>${state.path.map((id, i) => `<span aria-hidden="true">›</span><button type="button" data-to="${i + 1}" class="${i === state.path.length - 1 ? 'cur' : ''}">${esc(byId.get(id).name)}</button>`).join('')}</nav>` : ''}
-      ${chips.length || !isLeaf ? `<div class="chips bn-chips" role="group" aria-label="Categories">${isLeaf ? '' : `<button type="button" class="chip all on" data-all aria-pressed="true">${cur ? `All ${esc(cur.name)}` : 'All equipment'}</button>`}${chips.map(chip).join('')}</div>` : ''}`;
+  const st = { q: qs().get('q') || '', path: [], everything: false, token: 0 };
+  main().innerHTML = `<div class="page-head"><h1>Browse equipment</h1></div>
+    <div class="stack">
+      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
+        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
+      <p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>
+      <div id="bn"></div>
+      <div class="card" id="results" hidden></div>
+    </div>
+    <p class="small muted" style="margin-top:12px">Don't see what you need? <a href="#" id="reqlink">Send IT a request</a>.</p>`;
+  const cur = () => byId.get(st.path[st.path.length - 1]);
+  const availMeta = (n) => (n ? `${n} available` : 'None available');
+  const renderNav = () => {
+    const bn = $('#bn');
+    if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
+    const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
+    const chain = st.path.map((id) => byId.get(id));
+    const cards = [];
+    if (!c) cards.push(cgCard({ attrs: 'data-everything', name: 'All equipment', meta: 'Everything available', kind: `all${st.everything ? ' on' : ''}`, chev: false }));
+    else if (!leaf) cards.push(cgCard({ attrs: 'data-all', name: `All in ${c.name}`, meta: availMeta(c.available_count), kind: 'all on', chev: false }));
+    for (const r of (leaf ? kidsOf(c.parent_id ?? null) : kids)) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count), kind: leaf && r.id === c.id ? 'on' : '', chev: !(leaf && r.id === c.id) }));
+    bn.innerHTML = `${chain.length ? cgTop(chain, { allLabel: 'All equipment' }) : ''}${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : ''}`;
   };
-  root.onclick = (e) => {
-    const c = e.target.closest('.chip[data-id]'); const to = e.target.closest('[data-to]');
-    if (c) { const id = Number(c.dataset.id); const cur = byId.get(state.path[state.path.length - 1]); state.path = cur && !kidsOf(cur.id).length ? [...state.path.slice(0, -1), id] : [...state.path, id]; }
-    else if (to) state.path = state.path.slice(0, Number(to.dataset.to));
+  const rowHtml = (a) => {
+    const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
+    return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}
+      <div class="grow"><div class="title truncate">${esc(a.name)}</div>
+      <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${a.location ? ' · ' + esc(a.location) : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+  };
+  const load = async () => {
+    const box = $('#results'); const mine = ++st.token;
+    const c = cur(); const kids = c ? kidsOf(c.id) : [];
+    // What is listed: a search (global), else the selected branch, else — at the top — everything, only if asked for.
+    const u = new URLSearchParams(); let label = '';
+    if (st.q) { u.set('q', st.q); label = 'Search results'; }
+    else if (c) { u.set('catalog_node', c.id); label = kids.length ? `All in ${c.name}` : crumbText(c.path); }
+    else if (st.everything) label = 'All equipment';
+    else { box.hidden = true; return; }
+    box.hidden = false; box.innerHTML = '<div class="spinner"></div>';
+    try {
+      const list = await api('GET', '/api/assets?' + u.toString());
+      if (mine !== st.token) return;
+      box.innerHTML = `<div class="card-head"><span class="muted small">${esc(label)} · ${list.length} asset${list.length === 1 ? '' : 's'}</span></div>${list.length
+        ? `<ul class="list">${list.map(rowHtml).join('')}</ul>`
+        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search.' : 'Nothing is available right now. You can still send IT a request.'}</p></div>`}`;
+    } catch (e) { if (mine === st.token) fail(e); }
+  };
+  const go2 = () => { renderNav(); load(); };
+  $('#bn').onclick = (e) => {
+    const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]'); const back = e.target.closest('[data-back]');
+    if (e.target.closest('[data-everything]')) st.everything = !st.everything;
+    else if (e.target.closest('[data-all]')) return; // already showing the whole branch
+    else if (card) { const c = cur(); const id = Number(card.dataset.id); st.path = c && !kidsOf(c.id).length ? [...st.path.slice(0, -1), id] : [...st.path, id]; }
+    else if (crumb) { const id = Number(crumb.dataset.crumb); st.path = id > 0 ? st.path.slice(0, st.path.indexOf(id) + 1) : []; }
+    else if (back) st.path = st.path.slice(0, -1);
     else return;
-    render(); reload();
+    go2(); if (back || crumb) window.scrollTo(0, 0);
   };
-  render();
+  $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
+  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
+  $('#reqlink').onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
+  go2();
 }
 
 // ============================================================ asset detail
@@ -1016,7 +1067,8 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
       ${r ? `<fieldset class="rq-scope"><legend>How specific?</legend>
         <label class="rq-opt"><input type="radio" name="scope" value="any" ${st.scope === 'any' ? 'checked' : ''}><span><strong>Any matching asset</strong><br><span class="small muted">${r.available_count ? `${r.available_count} available right now. ` : 'None are free right now. '}IT will choose a suitable one.</span></span></label>
         <label class="rq-opt" id="rq-spec-opt"><input type="radio" name="scope" value="specific" ${st.scope === 'specific' ? 'checked' : ''} disabled><span><strong>A specific item</strong><br><span class="small muted" id="rq-spec-hint">Checking what is available…</span></span></label>
-        <div class="picker-list rq-items" id="rq-items" hidden></div></fieldset>`
+        <div class="picker-list rq-items" id="rq-items" hidden></div>
+        <div class="rq-selected" id="rq-selected" hidden aria-live="polite"></div></fieldset>`
       : `<label class="field"><span>What do you need?</span><input name="category" required maxlength="120" placeholder="e.g. Second monitor, USB-C hub"></label>`}
       <label class="field"><span>Details</span><textarea name="message" placeholder="e.g. Second monitor for my desk, USB-C if possible">${esc(st.message)}</textarea></label>
       <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}" value="${esc(st.needed_by)}"></label>
@@ -1030,7 +1082,8 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
     if (st.items.length) {
       opt.disabled = false;
       hint.textContent = `Pick one of ${st.items.length === 60 ? '60+' : st.items.length} available`;
-      box.innerHTML = st.items.map((a) => `<button type="button" data-id="${a.id}" class="${st.assetId === a.id ? 'on' : ''}" aria-pressed="${st.assetId === a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span>${st.assetId === a.id ? icon('check') : ''}</button>`).join('');
+      // Whole row is the tap target; the right-hand "Select" / "Selected" pill says so out loud.
+      box.innerHTML = st.items.map((a) => { const on = st.assetId === a.id; return `<button type="button" data-id="${a.id}" class="${on ? 'on' : ''}" aria-pressed="${on}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span><span class="rq-pick${on ? ' on' : ''}">${on ? `${icon('check')} Selected` : 'Select'}</span></button>`; }).join('');
     } else { opt.disabled = true; hint.textContent = 'No individual items are available to pick right now.'; }
     syncScope();
   };
@@ -1038,8 +1091,15 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
     const f = T('#f'); if (!f || !f.scope) return;
     const specific = f.scope.value === 'specific' && !!st.items && st.items.length > 0;
     T('#rq-items').hidden = !specific;
+    if (!specific) f.scope.value = 'any'; // (a specific item with nothing to pick can't stay selected)
     const perm = T('#rq-perm'); if (perm) perm.hidden = !(specific && st.assetId && !forUser);
-    if (!specific) st.assetId = null;
+    if (!specific) st.assetId = null; // back to "Any matching" forgets the specific choice
+    // Summary of the choice, and no sending a "specific item" request until an item is really chosen.
+    const chosen = specific && st.items.find((a) => a.id === st.assetId);
+    const sum = T('#rq-selected'); sum.hidden = !specific;
+    sum.innerHTML = chosen ? `<span class="rq-sel-ok">${icon('check')}</span><span><span class="small muted">Selected item</span><br><strong>${esc(chosen.name)}</strong> <span class="mono small muted">${esc(chosen.tag)}</span></span>` : '<span class="small muted">Choose an item from the list above.</span>';
+    sum.classList.toggle('ok', !!chosen);
+    const go = T('#go'); if (go) go.disabled = specific && !chosen;
   };
   // Available items under the selected level, fetched once per level (a stale answer for a level the person has left is dropped).
   const loadItems = async (r) => {
@@ -1054,7 +1114,7 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
     const f = T('#f'); const r = st.row;
     f.addEventListener('input', (e) => { if (e.target.name === 'message') st.message = e.target.value; if (e.target.name === 'needed_by') st.needed_by = e.target.value; });
     if (r) {
-      f.addEventListener('change', (e) => { if (e.target.name === 'scope') { st.scope = e.target.value; syncScope(); } });
+      f.addEventListener('change', (e) => { if (e.target.name === 'scope') { st.scope = e.target.value; syncScope(); paintItems(); } }); // repaint: leaving "specific" must visibly forget the chosen row
       T('#rq-items').onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; st.assetId = Number(b.dataset.id); paintItems(); };
       loadItems(r);
     }
@@ -1553,91 +1613,65 @@ async function viewSettings() {
 }
 
 // ============================================================ admin: equipment catalog
-// An explorer, not a settings list. Clicking an entry INSPECTS it: its child entries and the physical assets filed under it
-// (the entry itself and everything below). Structural edits — add below, rename, move, archive/restore, delete when unused —
-// live behind the explicit "Manage" button. Wide screens show the tree and the selected entry's contents side by side;
-// on a phone, selecting an entry drills into its contents (with a Back button) instead of scrolling a long page.
+// The same card-grid drill-down as Browse. Browsing and managing are separate: cards (and the breadcrumb) only navigate;
+// "Manage" and "+ Add subcategory" act on the category you are inside. Inside a category the first card is the virtual
+// "All in <name>" (browse-only: every non-archived asset in the branch, no management). Without it the page lists what is
+// filed directly in the category.
 async function viewCatalog() {
-  S.catOpen = S.catOpen || new Set();
-  const st = { rows: [], archived: false, sel: S.catSel ?? null, view: 'node', assets: null, token: 0 }; // view: 'node' (the entry itself) | 'all' (the virtual "All <name>": the whole branch, browse-only)
+  const st = { rows: [], archived: false, sel: S.catSel ?? null, all: false, assets: null, token: 0 };
   main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><button class="btn primary" id="addroot">${icon('plus')} Add category</button></div>
-    <div class="ct-wrap" id="ctw">
-      <div class="ct-side stack">
-        <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Click a category to see what is inside it; use <strong>Manage</strong> to change the structure. Archive an entry to hide it from new requests without losing history.</p>
-        <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
-        <div class="card" id="tree"><div class="spinner"></div></div>
-      </div>
-      <section class="ct-detail card" id="detail" aria-live="polite"></section>
+    <div class="stack">
+      <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
+      <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
+      <div id="ct"><div class="spinner"></div></div>
     </div>`;
   const byId = (id) => st.rows.find((r) => r.id === id);
   const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
-  const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : '');
-  const rowHtml = (r, depth) => {
-    const ch = kids(r.id); const open = S.catOpen.has(r.id);
-    return `<li><div class="ct-row${r.live ? '' : ' off'}${st.sel === r.id ? ' sel' : ''}" style="--d:${Math.min(depth, 7)}">
-        <button type="button" class="ct-toggle${ch.length ? '' : ' none'}${open ? ' open' : ''}" data-toggle="${r.id}" aria-label="${open ? 'Collapse' : 'Expand'} ${esc(r.name)}" ${ch.length ? '' : 'tabindex="-1" aria-hidden="true"'}>${icon('chev')}</button>
-        <button type="button" class="ct-name" data-select="${r.id}" ${st.sel === r.id ? 'aria-current="true"' : ''}><span class="truncate">${esc(r.name)}</span>${r.archived_at ? ' <span class="pill plain">Archived</span>' : !r.live ? ' <span class="pill plain">Hidden</span>' : ''}</button>
-        <span class="ct-count small muted">${countText(r.asset_count)}</span>
-        <button type="button" class="btn sm" data-manage="${r.id}" aria-label="Manage ${esc(r.name)}">${icon('edit')}<span class="desk-only-inline">Manage</span></button></div>
-      ${ch.length && open ? `<ul class="ct-tree">${ch.map((c) => rowHtml(c, depth + 1)).join('')}</ul>` : ''}</li>`;
-  };
-  const renderTree = () => {
-    const roots = kids(null);
-    $('#tree').innerHTML = roots.length ? `<ul class="ct-tree ct-root">${roots.map((r) => rowHtml(r, 0)).join('')}</ul>` : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`;
-  };
+  const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : 'No assets');
   const assetRow = (a, node) => {
-    const below = a.catalog_node_id !== node.id && a.catalog_path;
-    const rel = below ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
+    const rel = a.catalog_node_id !== node.id && a.catalog_path ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
     const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
     return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
-  const renderDetail = () => {
-    const box = $('#detail'); const n = byId(st.sel);
-    $('#ctw').classList.toggle('has-sel', !!n);
-    if (!n) { box.innerHTML = `<div class="empty">${icon('tag')}<p>Select a category to see its entries and the assets filed under it.</p></div>`; return; }
+  const render = () => {
+    const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
+    const inAll = !!n && st.all && ch.length > 0; // a category with nothing below it has no wider branch to show
     const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
-    const ch = kids(n.id);
+    const cards = [];
+    if (n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
+    for (const c of ch) cards.push(cgCard({ attrs: `data-select="${c.id}"`, name: c.name, meta: `${countText(c.asset_count)}${c.child_count ? ` · ${c.child_count} ${c.child_count === 1 ? 'subcategory' : 'subcategories'}` : ''}`, kind: c.live ? '' : 'off', extra: c.archived_at ? ' <span class="pill plain">Archived</span>' : !c.live ? ' <span class="pill plain">Hidden</span>' : '' }));
     const list = st.assets;
-    const inAll = st.view === 'all' && ch.length > 0; // a leaf has no branch to widen to
-    const directList = list ? list.filter((a) => a.catalog_node_id === n.id) : [];
-    const crumbs = chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 && !inAll ? 'cur' : ''}">${esc(c.name)}</button>`).join('') + (inAll ? `<span aria-hidden="true">›</span><button type="button" class="cur" aria-current="true">All ${esc(n.name)}</button>` : '');
-    const head = `<div class="ct-dhead"><button type="button" class="btn sm ct-up" data-up aria-label="Back">${icon('back')}<span>Back</span></button>
-        <nav class="cc-crumbs" aria-label="Path"><button type="button" data-crumb="-1">All categories</button>${crumbs}</nav>
-        ${inAll ? '' : `<button type="button" class="btn sm" data-manage="${n.id}">${icon('edit')} Manage</button>`}</div>
-      ${n.live ? '' : '<div class="small muted" style="padding:0 16px 8px">Not visible to employees.</div>'}`;
-    if (inAll) { // browsing only: no Manage, no structure — just every non-archived asset anywhere in this branch
-      box.innerHTML = `${head}<h3 class="ct-h">All ${esc(n.name)} <span class="muted">${list ? list.length : ''}</span></h3>
-        ${list === null ? '<div class="spinner"></div>' : list.length ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed at ${esc(n.name)} or anywhere below it.${directList.length ? ` ${directList.length} filed directly at ${esc(n.name)}.` : ''}</p><ul class="list">${list.map((a) => assetRow(a, n)).join('')}</ul>` : '<p class="muted small ct-empty">No assets are filed in this branch yet.</p>'}`;
-      return;
+    const direct = list && n ? list.filter((a) => a.catalog_node_id === n.id) : [];
+    let below = '';
+    if (n) {
+      const shown = inAll ? list : direct;
+      const title = inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets';
+      below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
+        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
+        : `<p class="muted small ct-empty">${inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
     }
-    box.innerHTML = `${head}
-      <h3 class="ct-h">Child categories <span class="muted">${ch.length}</span></h3>
-      ${ch.length ? `<ul class="list"><li><button type="button" class="item ct-child ct-all" data-all><div class="grow"><div class="title truncate">All ${esc(n.name)}</div><div class="sub">Every asset in this branch · ${countText(n.asset_count) || 'No assets'}</div></div>${icon('chev', 'chev')}</button></li>${ch.map((c) => `<li><button type="button" class="item ct-child" data-select="${c.id}"><div class="grow"><div class="title truncate">${esc(c.name)}${c.archived_at ? ' <span class="pill plain">Archived</span>' : ''}</div><div class="sub">${c.child_count ? `${c.child_count} ${c.child_count === 1 ? 'entry' : 'entries'} below · ` : ''}${countText(c.asset_count) || 'No assets'}</div></div>${icon('chev', 'chev')}</button></li>`).join('')}</ul>` : '<p class="muted small ct-empty">No entries below this one.</p>'}
-      <h3 class="ct-h">${ch.length ? 'Filed directly here' : 'Assets'} <span class="muted">${list ? directList.length : ''}</span></h3>
-      ${list === null ? '<div class="spinner"></div>' : directList.length ? `<ul class="list">${directList.map((a) => assetRow(a, n)).join('')}</ul>` : ch.length ? `<p class="muted small ct-empty">Nothing is filed directly at ${esc(n.name)}.${list.length ? ` Open <strong>All ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}</p>` : '<p class="muted small ct-empty">No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.</p>'}`;
+    const controls = n && !inAll ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
+    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+      ${below}`;
   };
   const loadAssets = async () => {
     const mine = ++st.token; const id = st.sel;
-    st.assets = null; renderDetail();
+    st.assets = null; render();
     if (!id) return;
     try {
       const list = await api('GET', `/api/assets?catalog_node=${id}`);
       if (mine !== st.token) return;
       st.assets = list.sort((a, b) => String(a.catalog_path || '').localeCompare(String(b.catalog_path || '')) || a.name.localeCompare(b.name));
     } catch (e) { if (mine !== st.token) return; st.assets = []; fail(e); }
-    renderDetail();
+    render();
   };
-  const select = (id) => {
-    st.sel = id; S.catSel = id; st.view = 'node';
-    if (id) { for (let x = byId(id); x && x.parent_id !== null; x = byId(x.parent_id)) S.catOpen.add(x.parent_id); if (kids(id).length) S.catOpen.add(id); }
-    renderTree(); loadAssets();
-    if (id && window.matchMedia('(max-width: 899px)').matches) window.scrollTo(0, 0);
-  };
+  const select = (id) => { st.sel = id; S.catSel = id; st.all = false; loadAssets(); window.scrollTo(0, 0); };
   const reload = async () => {
     st.rows = await api('GET', '/api/catalog?include_archived=1');
-    if (st.sel && !byId(st.sel)) { st.sel = null; S.catSel = null; st.view = 'node'; }
-    renderTree(); await loadAssets();
+    if (st.sel && !byId(st.sel)) { st.sel = null; S.catSel = null; st.all = false; }
+    await loadAssets();
   };
   const nameSheet = ({ title, text, label, value = '', okLabel, onOk }) => {
     const { el, close } = sheet(`<h2>${esc(title)}</h2>${text ? `<p class="muted small" style="margin-top:0">${esc(text)}</p>` : ''}
@@ -1646,6 +1680,7 @@ async function viewCatalog() {
     setTimeout(() => $('input', el).select(), 60);
     $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await onOk(new FormData(e.target).get('name')); close(); }); };
   };
+  const addBelow = (r) => nameSheet({ title: `Add below ${r.name}`, text: crumbText(r.path), label: 'Name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name, parent_id: r.id }); await reload(); toast('Added'); } });
   const manage = (id) => {
     const r = byId(id); if (!r) return;
     const inUse = r.child_count > 0 || r.direct_asset_count > 0 || r.request_count > 0;
@@ -1661,7 +1696,7 @@ async function viewCatalog() {
       </div>
       <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
     const act = {
-      add: () => { close(); nameSheet({ title: `Add below ${r.name}`, text: r.path ? crumbText(r.path) : '', label: 'Name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name, parent_id: r.id }); S.catOpen.add(r.id); await reload(); toast('Added'); } }); },
+      add: () => { close(); addBelow(r); },
       rename: () => { close(); nameSheet({ title: 'Rename', text: 'Past requests keep the wording they were made with.', label: 'Name', value: r.name, okLabel: 'Save', onOk: async (name) => { await api('PUT', `/api/catalog/${r.id}`, { name }); await reload(); toast('Renamed'); } }); },
       move: () => {
         close();
@@ -1680,20 +1715,15 @@ async function viewCatalog() {
     el.onclick = (e) => { const b = e.target.closest('[data-act]'); if (b) Promise.resolve(act[b.dataset.act]()).catch(fail); };
   };
   $('#addroot').onclick = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
-  $('#showarch').onchange = (e) => { st.archived = e.target.checked; renderTree(); renderDetail(); };
-  // Row click inspects (select + expand); the chevron only expands/collapses; Manage is the only way into editing.
-  $('#tree').onclick = (e) => {
+  $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
+  // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
+  $('#ct').onclick = (e) => {
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
-    const t = e.target.closest('[data-toggle]');
-    if (t) { const id = Number(t.dataset.toggle); if (S.catOpen.has(id)) S.catOpen.delete(id); else S.catOpen.add(id); return renderTree(); }
-    const sel = e.target.closest('[data-select]'); if (sel) select(Number(sel.dataset.select));
-  };
-  $('#detail').onclick = (e) => {
-    const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
-    const all = e.target.closest('[data-all]'); if (all) { st.view = 'all'; renderDetail(); if (window.matchMedia('(max-width: 899px)').matches) window.scrollTo(0, 0); return; }
-    const up = e.target.closest('[data-up]'); if (up) { if (st.view === 'all') { st.view = 'node'; return renderDetail(); } return select((byId(st.sel) || {}).parent_id ?? null); }
-    const crumb = e.target.closest('[data-crumb]'); if (crumb) return select(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
-    const sel = e.target.closest('[data-select]'); if (sel) select(Number(sel.dataset.select));
+    const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
+    if (e.target.closest('[data-all]')) { st.all = !st.all; render(); return window.scrollTo(0, 0); }
+    const sel = e.target.closest('[data-select]'); if (sel) return select(Number(sel.dataset.select));
+    if (e.target.closest('[data-back]')) { if (st.all) { st.all = false; return render(); } return select((byId(st.sel) || {}).parent_id ?? null); }
+    const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return select(id > 0 ? id : null); }
   };
   await reload();
 }
