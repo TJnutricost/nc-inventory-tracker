@@ -215,6 +215,7 @@ async function handleScannedCode(code) {
   try {
     const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
     if (r.found) return go('#/asset/' + r.id);
+    if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
     if (isAdmin()) {
       const { el, close } = sheet(`<h2>New barcode</h2><p class="muted">No asset uses <strong class="mono">${esc(code)}</strong> yet. Want to tag a new asset with it?</p>
         <div class="stack" style="margin-top:16px"><button class="btn primary lg block" id="mk">${icon('plus')} Add a new asset with this tag</button>
@@ -247,6 +248,7 @@ function navItems() {
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
     { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' });
+  if (!isAdmin()) side.push({ sep: true }, { key: 'history', href: '#/history', label: 'History', icon: 'history' });
   side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' });
   return { tabs: common, side };
 }
@@ -283,7 +285,7 @@ function mountShell() {
   S.shell = true;
 }
 function setActive(key) {
-  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile'].includes(key) && a.closest('.tabbar'))));
+  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile', 'history'].includes(key) && a.closest('.tabbar'))));
 }
 async function refreshBadge() {
   try {
@@ -319,6 +321,7 @@ const ROUTES = [
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
   [/^#\/activity$/, viewActivity, { key: 'activity', admin: true }],
   [/^#\/settings$/, viewSettings, { key: 'settings', admin: true }],
+  [/^#\/history$/, viewHistory, { key: 'history' }],
   [/^#\/profile$/, viewProfile, { key: 'profile' }],
   [/^#\/more$/, viewMore, { key: 'more' }],
 ];
@@ -431,7 +434,7 @@ async function viewHome() {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
       <div class="stack">${returnBanners(d.mine)}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
-      <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'}</span></div>${myEquipmentList(d.mine)}</div>
+      <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/history">History</a></span></div>${myEquipmentList(d.mine)}</div>
       ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
@@ -758,6 +761,7 @@ function selfCheckoutSheet(a) {
   $('#self-scan', el).onclick = () => openScanner({ title: 'Scan the item to check out', onResult: async (code) => {
     try {
       const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
+      if (r.unavailable) return toast("That item isn't available to check out right now. You can request it from IT.", true);
       if (!r.found) return toast(`No asset found for ${code}`, true);
       const d = await api('GET', '/api/assets/' + r.id);
       const n = d.asset;
@@ -994,7 +998,7 @@ async function viewRequests() {
         <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, REQ_LABEL[r.status])}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
           ${row('Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
-          ${row('Asset', r.asset_id ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a> <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
+          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
           ${row('Category', esc(r.category || ''))}
           ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
           ${row('Submitted', esc(fmtStamp(r.created_at)))}
@@ -1252,7 +1256,10 @@ function viewMore() {
     ['#/activity', 'history', 'Activity log', 'Every check-out, check-in and change'],
     ['#/settings', 'settings', 'Settings', 'Check-out rules, categories, email'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
-  ] : [['#/profile', 'user', 'My profile', 'Your details and password']];
+  ] : [
+    ['#/history', 'history', 'History', 'Equipment you have had before'],
+    ['#/profile', 'user', 'My profile', 'Your details and password'],
+  ];
   main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'More' : 'Account'}</h1></div>
     <div class="card"><ul class="list">${items.map(([h, i, t, s]) => `<li><a class="item" href="${h}"><div class="thumb">${icon(i)}</div><div class="grow"><div class="title">${t}</div><div class="sub">${s}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>
     <button class="btn block lg" style="margin-top:16px" id="out">${icon('logout')} Sign out</button>
@@ -1260,20 +1267,51 @@ function viewMore() {
   $('#out').onclick = logout;
 }
 async function logout() { await api('POST', '/api/logout', {}).catch(() => {}); S.me = null; S.shell = false; usersCache = null; go('#/login'); }
+// Employee History: the signed-in employee's own assignments, newest first, from the same record the admin person page
+// uses (GET /api/users/:id answers only for yourself when you aren't an admin). Read-only; past rows aren't links
+// because an employee may only open equipment they hold or that is available.
+async function viewHistory() {
+  const head = `<div class="page-head"><h1>History</h1></div>`;
+  if (!S.me.employee_id) { main().innerHTML = `${head}<div class="card"><div class="empty">${icon('history')}<p>Your login isn't linked to an employee record, so there is no equipment history. Ask IT.</p></div></div>`; return; }
+  const d = await api('GET', '/api/users/' + S.me.employee_id);
+  const rows = [...d.current.map((m) => ({ ...m, now: true })), ...d.past]
+    .sort((a, b) => (b.checked_out_at || '').localeCompare(a.checked_out_at || '') || b.id - a.id);
+  const item = (m) => {
+    const body = `${m.now ? thumbHtml(m.thumb, m.category) : `<div class="thumb">${icon('box')}</div>`}
+      <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div>
+        <div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)}</div>
+        <div class="sub">Since ${esc(fmtStamp(m.checked_out_at))}${m.now ? '' : ` · Returned ${esc(fmtStamp(m.returned_at))}`}</div></div>
+      ${m.now ? (isOverdue(m.due_date) ? pill('overdue', 'Overdue') : pill('checked_out', 'Current')) : ''}${m.now ? icon('chev', 'chev') : ''}`;
+    return m.now ? `<li><a class="item" href="#/asset/${m.asset_id}">${body}</a></li>` : `<li><div class="item">${body}</div></li>`;
+  };
+  main().innerHTML = `${head}<div class="stack"><div class="card">${rows.length
+    ? `<ul class="list">${rows.map(item).join('')}</ul>`
+    : `<div class="empty">${icon('history')}<p>No equipment history yet.</p></div>`}</div>
+    ${d.past.length >= d.history_limit ? `<p class="small muted" style="text-align:center">Showing your ${d.history_limit} most recent returned items.</p>` : ''}</div>`;
+}
+
 function viewProfile() {
   const u = S.me;
-  main().innerHTML = `<div class="page-head"><h1>My profile</h1></div><div class="stack">
-    <form class="card pad form-grid" id="p"><div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px;background:var(--brand-accent)">${esc(initials(u.name))}</div><div><strong>${esc(u.email)}</strong><div class="small muted">${u.role === 'admin' ? 'Administrator' : 'User'}</div></div></div>
+  const editable = isAdmin(); // employee profile details are read-only (IT maintains them); admins can edit their own
+  const who = `<div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px;background:var(--brand-accent)">${esc(initials(u.name))}</div><div><strong>${esc(u.email)}</strong><div class="small muted">${u.role === 'admin' ? 'Administrator' : 'Employee'}</div></div></div>`;
+  const kv = (rows) => `<div class="kv">${rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v ? esc(v) : '<span class="muted">—</span>'}</div>`).join('')}</div>`;
+  const details = editable
+    ? `<form class="card pad form-grid" id="p">${who}
       <label class="field"><span>Name</span><input name="name" value="${esc(u.name)}" required></label>
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}"></label><label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
-      <button class="btn primary" id="ps">Save</button></form>
+      ${u.building ? `<div class="small muted">Building: ${esc(u.building)}</div>` : ''}
+      <button class="btn primary" id="ps">Save</button></form>`
+    : `<div class="card"><div class="card-body">${who}</div>${kv([['Name', u.name], ['Email', u.email], ['Department', u.department], ['Job title', u.title], ['Phone', u.phone], ['Building', u.building]])}
+      <div class="card-body small muted" style="border-top:1px solid var(--line)">These details are managed by IT. Ask IT if anything needs changing.</div></div>`;
+  main().innerHTML = `<div class="page-head"><h1>My profile</h1></div><div class="stack">
+    ${details}
     <form class="card pad form-grid" id="pw"><h2>Change password</h2>
       <label class="field"><span>Current password</span><input name="current" type="password" autocomplete="current-password" required></label>
       <label class="field"><span>New password (8+ characters)</span><input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
       <button class="btn" id="pws">Update password</button></form>
     <button class="btn block lg" id="out">${icon('logout')} Sign out</button></div>`;
-  $('#p').onsubmit = (e) => { e.preventDefault(); busy($('#ps'), async () => { await api('PUT', '/api/me', Object.fromEntries(new FormData(e.target))); await loadMe(); mountShell(); setActive('profile'); toast('Saved'); route(true); }); };
+  if (editable) $('#p').onsubmit = (e) => { e.preventDefault(); busy($('#ps'), async () => { await api('PUT', '/api/me', Object.fromEntries(new FormData(e.target))); await loadMe(); mountShell(); setActive('profile'); toast('Saved'); route(true); }); };
   $('#pw').onsubmit = (e) => { e.preventDefault(); busy($('#pws'), async () => { await api('POST', '/api/me/password', Object.fromEntries(new FormData(e.target))); e.target.reset(); toast('Password updated'); }); };
   $('#out').onclick = logout;
 }

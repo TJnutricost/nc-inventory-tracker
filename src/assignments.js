@@ -60,7 +60,8 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
       WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);
     if (open.some((o) => o.employee_id === employeeId)) throw httpError(400, `${employee.name} already has this asset.`);
     if (open.length >= capacity(asset)) {
-      throw httpError(400, capacity(asset) > 1 ? 'All license seats are in use.' : `Already checked out to ${open[0].name}. Check it in first.`);
+      // Only IT is told who holds it; anyone else just learns it isn't available.
+      throw httpError(400, capacity(asset) > 1 ? 'All license seats are in use.' : actorIsAdmin ? `Already checked out to ${open[0].name}. Check it in first.` : "This item isn't available right now.");
     }
 
     const info = db.prepare(`INSERT INTO assignments (asset_id, employee_id, assignment_type, checked_out_by, due_date, due_time, notes, condition_out)

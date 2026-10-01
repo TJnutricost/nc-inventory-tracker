@@ -1,8 +1,8 @@
 # NC IT Inventory Tracker — Project Status
 
-**Last Updated:** 2026-10-01<br>
+**Last Updated:** 2026-10-02<br>
 **Project Status:** Early MVP / Prototype  
-**Current Phase:** Phase 1 (Data Model Hardening) — **COMPLETE** (Foundation Closeout, 2026-10-01); next: Phase 2 (PostgreSQL) and the future-phase items listed in Section 11  
+**Current Phase:** Phase 2 — **Employee Portal V1**, building on the existing employee interface (Phase 1 Data Model Hardening is **COMPLETE**, 2026-10-01). Slice 1 (Employee Access Contract + Read Experience) implemented 2026-10-02 on `feature/employee-access-read-experience`; see Section 11a. PostgreSQL/Railway/auth remain later infrastructure work (Section 12 onward)  
 **Canonical Branch:** `stage` (shared integration / GitHub default branch); `main` is the stable/release branch — see Section 3a  
 **Production Status:** Not deployed
 
@@ -503,9 +503,7 @@ This should be treated as a separate feature milestone after the core asset-mana
 
 # 8a. Future Architecture: Employee Portal V1
 
-**Status:** Newly agreed direction, 2026-09-28. Not implemented. No employee UI, auth, schema, or directory changes have been made — this section is planning/documentation only.
-
-To be scheduled as planned future work **after** the shared database/auth/backend foundation (Phases 2–4) is established — not the next phase after Phase 0/1. (Note 2026-09-28: that foundation is now Railway-first and provider-neutral, not assumed to be Supabase — see Section 19 Decisions Log.)
+**Status (revised 2026-10-02):** Employee Portal V1 is now the **active Phase 2**, built incrementally on the employee interface that already exists inside the app (the employee and admin roles already see different navigation and screens; server-side authorization already exists for admin operations). It is **not** a separate app and the portal architecture is not being rebuilt. Progress and the slice sequence are in Section 11a. The original 2026-09-28 note below (planned *after* the PostgreSQL/auth foundation) is superseded; the shared infrastructure work (PostgreSQL, object storage, auth provider, Railway) is still planned, but later, and is no longer a prerequisite for Employee Portal V1.
 
 ## Domain / Application Split
 
@@ -631,7 +629,7 @@ Preferred future behavior:
 
 ## Roadmap Placement
 
-Employee Portal V1 is planned future work, sequenced **after** the shared database/auth/backend foundation is established (i.e., after Phase 2 — Managed PostgreSQL Migration, Phase 3 — Object Storage Migration, and Phase 4 — Authentication in Section 10's roadmap). It is not scheduled ahead of, or in place of, any current Phase 0 work.
+*Superseded 2026-10-02:* Employee Portal V1 is the active Phase 2 and proceeds on the existing SQLite-backed app (Section 11a). The managed-PostgreSQL, object-storage and authentication work (Sections 12–14) stays on the roadmap as later infrastructure phases.
 
 ---
 
@@ -884,11 +882,38 @@ Smaller known debt carried forward (not blockers): tag-correction workflow; cate
 
 ---
 
-# 12. Phase 2 — Managed PostgreSQL Migration
+# 11a. Phase 2 — Employee Portal V1 (active)
+
+**Direction (2026-10-02):** Phase 2 is **Employee Portal V1**, building on the existing employee interface — not the PostgreSQL migration. Sequence: **(1) Employee Access Contract + Read Experience → (2) Employee Actions → (3) Later workflow expansion.** The infrastructure items below are *future work, not part of this phase*: issue reporting, full request-lifecycle redesign, admin roster/CSV, reservations, max checkout duration, paired mobile scanner, production auth provider, Google/magic-link sign-in, Railway/PostgreSQL/object storage, production email, notifications/reminders.
+
+### Slice 1 — Employee Access Contract + Read Experience (implemented 2026-10-02, `feature/employee-access-read-experience`)
+
+Tests: baseline 211 → **227 passing / 0 failing**. No schema change, no new migration. What exists today (reconciled): employees already have their own navigation (Home with *My equipment* and *My requests*, Browse, Scan, Requests, Account/My profile), self-checkout (per-employee permission), permanent-assignment requests, return/drop-off, and password change; admins have the full tool set. This slice formalizes and tests what an employee may read, and adds History and Building.
+
+**Employee visibility policy (enforced on the server, not by hidden navigation):**
+- *May see:* their own profile (`GET /api/users/:id` for their own employee id), their own current assignments and assignment history, their own requests, and **assets that are theirs or available** — an employee can open an asset (`GET /api/assets/:id`), see it in lists, scan it, request it or self-check it out only if they currently hold it, **or** it is not archived and has status `available` (a multi-seat license with a free seat stays `available`). Asset details are sanitized for employees (no purchase cost, vendor, notes, audit trail; license key only for equipment they hold; never another holder's name).
+- *Must not see:* another employee's profile, assignments, history or requests (403); the admin tools/settings/import/export/outbox/activity (403, already true and now covered by tests); any other asset — archived, in repair, lost, retired, disposed, or held by someone else — which is indistinguishable from "not found" (404), including the photo files for such assets (`/uploads/*` now follows the asset's visibility) and including through actions (self-checkout, return notice, photo upload, creating a request for it). Scanner lookup returns an id only for assets they may open; for any other existing asset it returns `{found:false, unavailable:true}` (no id, no details) so the scanner can say "isn't available right now". The "already checked out to <name>" message is shown to IT only; employees just see "isn't available".
+- *Admin behavior is unchanged.*
+
+**Employee directory — restricted.** `GET /api/users` was returning every active employee's name to any signed-in user. The audit found **no employee workflow uses it**: self-checkout and requests always act as the signed-in employee, and the only callers (assign-to picker, "log a request for someone", People) are admin screens. It is now **admin-only** (employees get 403); employees read only their own record. No new directory feature was created.
+
+**History (new employee screen, `#/history`).** Read-only list of the employee's own assignments, newest first: equipment name, asset tag, type (*Permanent* / *Temporary checkout*, with "return by" date/time), since (check-out timestamp), returned timestamp, and a *Current* / *Overdue* marker for open ones. It uses the existing record (`GET /api/users/:id`, own id only) — no second history model, no duplicated assignment logic. Reachable from the desktop sidebar, the mobile Account page and a link on Home. Past rows aren't links (a returned asset may no longer be available to open); current rows link to the asset. The returned-history window is now the most recent **200** (was 50; also applies to the admin person page); the screen says so if it is reached.
+
+**Profile.** `/api/me` now includes `building`. The employee **My profile** shows name, email, department, job title, phone and **Building** read-only, with a note that IT manages them; password change, avatar menu and sign-out are unchanged. **Behavior change to note:** employees previously could edit their own name/department/title/phone through the profile form (`PUT /api/me`); per the "profile is read-only for this slice" requirement that is now **admin-only** (employees get 403; IT edits people on the People screen). Admins keep their editable profile form.
+
+**My Equipment.** Audited against Phase 1 semantics (permanent vs temporary terminology, return info, self-checkout permission, current request behavior) — consistent, **no change**. One small related fix: an employee's request detail no longer links to an asset page they may not be allowed to open; the scanner shows a friendly "isn't available right now" message for unavailable equipment.
+
+**Tests:** `test/employee-access.test.js` (own vs other profile/history/requests, directory, admin-only endpoints, available/own/unavailable/archived asset detail, list sanitization, lookup, photo files, action leakage, Building and read-only profile, front-end wiring); one assertion in `test/self-checkout.test.js` updated (the minimal employee directory it pinned is gone). Seed unchanged.
+
+**Technical debt / follow-ups (not blockers):** `held_by_other` and "not available" branches in the asset page are now rarely reachable for employees (kept, harmless); an employee's open request for equipment that later becomes unavailable shows the name but can't open the asset; asset photos are still served from local disk (object storage is later); History has no filters/pagination beyond the 200-row window; Employee Actions (slice 2) will decide what, if anything, employees may edit.
+
+---
+
+# 12. Future Infrastructure — Managed PostgreSQL Migration (formerly "Phase 2")
 
 *(Renamed 2026-09-28, was "Phase 2 — Supabase PostgreSQL" — see Section 19 Decisions Log. Railway PostgreSQL is the current preferred host; tasks below are written provider-neutrally so they hold regardless of final host.)*
 
-**Status:** Not Started
+**Status:** Not Started — **no longer the active Phase 2** (see Section 11a); remains planned as later infrastructure work.
 
 - [ ] Create a DEV PostgreSQL instance (Railway PostgreSQL preferred)
 - [ ] Establish migration workflow
@@ -1054,6 +1079,8 @@ Test using actual hardware.
 ---
 
 # 18. Current Priority
+
+**Update 2026-10-02:** the active priority is **Phase 2 — Employee Portal V1** (Section 11a), starting with slice 1 (Employee Access Contract + Read Experience, implemented), then slice 2 (Employee Actions). The Phase 0 detail below is historical.
 
 ## Next Development Slice
 
@@ -1331,6 +1358,12 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ---
 
+## 2026-10-02 — Phase 2 Is Employee Portal V1, Not the PostgreSQL Migration
+
+Decision: after Phase 1 closed, the next phase builds **Employee Portal V1 on the existing employee interface** (sequence: Employee Access Contract + Read Experience → Employee Actions → later workflow expansion). The managed-PostgreSQL, object-storage, auth-provider and Railway work is deferred to later infrastructure phases and is not a prerequisite. Employee access is enforced on the server (own data + available/own equipment only), the employee directory endpoint is admin-only, and employee profile details are read-only. See Section 11a.
+
+---
+
 # 20. Open Decisions
 
 - [x] Repository branching strategy — *resolved 2026-09-28: `stage` (integration/default) → `main` (release), see Section 3a.*
@@ -1357,6 +1390,7 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ### Completed
 
+- **Phase 2 slice 1 — Employee Access Contract + Read Experience (2026-10-02, Section 11a):** server-enforced employee visibility, admin-only directory, employee History screen, Building on `/api/me`, read-only employee profile
 - **Phase 1 — Data Model Hardening: COMPLETE (2026-10-01)** — 1A–1E plus the Foundation Closeout (serial normalization/uniqueness, request integrity, historical-safety verification); migrations 1–9, 211 automated tests; see Section 11
 - Existing source received
 - Initial architecture audit completed
