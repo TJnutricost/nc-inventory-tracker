@@ -206,7 +206,7 @@ test('pre-1D database: every user becomes one employee + one linked account with
   old.prepare("INSERT INTO assignments (asset_id, user_id, checked_out_by, returned_at, returned_to) VALUES (1, 2, 1, '2025-05-01 00:00:00', 1)").run();
   old.prepare('INSERT INTO assignments (asset_id, user_id, checked_out_by) VALUES (2, 2, 1)').run();
   old.prepare("INSERT INTO photos (asset_id, filename, thumb, uploaded_by) VALUES (1, 'a.jpg', 'a_t.jpg', 2)").run();
-  old.prepare("INSERT INTO requests (type, user_id, asset_id, created_by, resolved_by) VALUES ('equipment', 2, 1, 2, 1)").run();
+  old.prepare("INSERT INTO requests (type, status, user_id, asset_id, created_by, created_at, resolved_by, resolved_at) VALUES ('equipment', 'completed', 2, 1, 2, '2025-04-01 00:00:00', 1, '2025-05-01 00:00:00')").run();
   old.prepare("INSERT INTO activity (asset_id, actor_id, subject_user_id, action) VALUES (1, 1, 2, 'checked_out')").run();
   old.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('tok123', 2, 'reset', '2999-01-01T00:00:00.000Z')").run();
   old.prepare("INSERT INTO sessions (sid, sess, expires) VALUES ('s1', '{\"uid\":2}', 9999999999999)").run();

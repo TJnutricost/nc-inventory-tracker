@@ -1,6 +1,8 @@
 # Phase 1A — Data Model Audit & Target Design
 
 **Status:** Audit complete. Target decisions **APPROVED** (2026-09-28) as the Phase 1 design. **Nothing in this document is implemented** — every item marked *Planned* is future work in Phase 1B–1G.
+
+> **Update 2026-10-01 — Phase 1 is complete** (1B–1E plus the Foundation Closeout; see `PROJECT_STATUS.md` §11 for what was built). This file is the original 1A design record. Two decisions were **superseded by the closeout brief**: §3.2 *serials* — hard uniqueness on the normalized serial (trim + case-insensitive, archived included, blank = NULL, no placeholder list) replaced "warn + override"; §3.7 *request lifecycle* — only integrity hardening of the existing statuses was built, the new states / `opened_at` rescind cutoff remain future work. There is no Phase 1F/1G.
 **Branch:** `feature/phase-1a-data-model-design` (from `stage` @ `054ab25`)
 **Scope of this slice:** inspection + design + documentation only. No schema, behavior, migration, or test changes.
 

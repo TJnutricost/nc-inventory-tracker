@@ -10,6 +10,8 @@ const sharp = require('sharp');
 const { db, DATA_DIR, getSettings, setSetting } = require('./db');
 const { notify, APP_URL, mailConfigured } = require('./mailer');
 const assignments = require('./assignments');
+const requestRules = require('./requests');
+const { cleanSerial, serialKey } = require('./serial');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -133,6 +135,15 @@ function makeToken(userId, purpose, hours) {
   return token;
 }
 const getAsset = (id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
+
+// Serials are unique across the whole inventory (archived assets included) ignoring surrounding whitespace and letter
+// case; see src/serial.js. The UNIQUE index on assets.serial_normalized is the backstop; this gives a readable 400.
+function assertSerialFree(serial, exceptAssetId = null) {
+  const key = serialKey(serial);
+  if (key === null) return;
+  const other = db.prepare('SELECT id, tag, archived_at FROM assets WHERE serial_normalized = ?').all(key).find((o) => o.id !== exceptAssetId);
+  if (other) throw httpError(400, `Serial number ${cleanSerial(serial)} is already used by asset ${other.tag}${other.archived_at ? ' (archived)' : ''}. Serial numbers must be unique, ignoring letter case and surrounding spaces.`);
+}
 const { capacity } = assignments;
 const openAssignments = (assetId) => db.prepare(`
   SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email, u.department AS user_department
@@ -405,7 +416,7 @@ app.get('/api/assets/lookup/:code', auth, (req, res) => {
   const code = String(req.params.code).trim();
   // Archived assets are still found (their tags stay reserved); the flag lets clients say so.
   const a = db.prepare('SELECT id, archived_at FROM assets WHERE tag = ? COLLATE NOCASE').get(code)
-    || db.prepare('SELECT id, archived_at FROM assets WHERE serial = ? COLLATE NOCASE').get(code);
+    || (serialKey(code) && db.prepare('SELECT id, archived_at FROM assets WHERE serial_normalized = ?').get(serialKey(code)));
   res.json(a ? { found: true, id: a.id, archived: !!a.archived_at } : { found: false, code });
 });
 
@@ -446,7 +457,9 @@ function assetValues(body) {
   for (const f of ['category', 'location']) {
     if (body[f] !== undefined && body[f] !== null && typeof body[f] !== 'string') throw httpError(400, `${f === 'category' ? 'Category' : 'Location'} must be text`);
   }
+  if (body.serial !== undefined && body.serial !== null && !['string', 'number'].includes(typeof body.serial)) throw httpError(400, 'Serial number must be text');
   for (const f of ASSET_FIELDS) v[f] = ['purchase_cost', 'license_seats'].includes(f) ? num(body[f]) : clean(body[f]);
+  v.serial = cleanSerial(body.serial); // trimmed; blank => no serial
   return v;
 }
 
@@ -456,14 +469,15 @@ app.post('/api/assets', admin, (req, res) => {
   v.category = v.category || 'Other';
   v.condition = v.condition || 'Good';
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
-  const cols = ['tag', 'status', ...ASSET_FIELDS];
+  const cols = ['tag', 'status', 'serial_normalized', ...ASSET_FIELDS];
   // Number claim + insert are one transaction: a failed create rolls the counter back, and two creates can't share a tag.
   const create = db.transaction(() => {
     const tag = clean(req.body.tag) || allocateTag();
     const used = db.prepare('SELECT archived_at FROM assets WHERE tag = ?').get(tag);
     if (used) throw httpError(400, used.archived_at ? `Tag ${tag} belongs to an archived asset and can't be reused` : `Tag ${tag} is already used by another asset`);
+    assertSerialFree(v.serial);
     const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
-      .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]));
+      .run(tag, status, serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f]));
     log(info.lastInsertRowid, req.user.account_id, 'created', `${tag} · ${v.name}`);
     return info.lastInsertRowid;
   });
@@ -491,8 +505,11 @@ app.put('/api/assets/:id', admin, (req, res) => {
       status = req.body.status;
     } else if (['available', 'checked_out'].includes(req.body.status)) status = open >= capacity({ ...a, ...v }) ? 'checked_out' : 'available';
   }
-  db.prepare(`UPDATE assets SET tag = ?, status = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
-    .run(tag, status, ...ASSET_FIELDS.map((f) => v[f]), a.id);
+  db.transaction(() => {
+    assertSerialFree(v.serial, a.id);
+    db.prepare(`UPDATE assets SET tag = ?, status = ?, serial_normalized = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(tag, status, serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f]), a.id);
+  }).immediate();
   const changed = ['tag', 'status', ...ASSET_FIELDS].filter((f) => String((f === 'tag' ? tag : f === 'status' ? status : v[f]) ?? '') !== String(a[f] ?? ''));
   if (changed.length) log(a.id, req.user.account_id, 'edited', changed.filter((f) => f !== 'license_key').join(', ') || 'license key');
   refreshStatus(a.id);
@@ -533,9 +550,9 @@ app.post('/api/assets/:id/checkout', auth, (req, res) => {
   // temporary checkout; explicitly asking for permanent is refused rather than silently changed.
   const assignment_type = req.user.role === 'admin' ? req.body.assignment_type : (req.body.assignment_type || 'checkout');
   const assignment = doCheckout({ asset, user: target, actor: req.user, assignment_type, due_date: req.body.due_date, due_time: req.body.due_time, notes: req.body.notes, condition: req.body.condition });
-  // Close any open equipment request from this user that named this asset
-  db.prepare("UPDATE requests SET status='completed', resolved_by=?, resolved_at=datetime('now') WHERE type='equipment' AND status IN ('open','approved') AND user_id=? AND asset_id=?")
-    .run(req.user.account_id, target.id, asset.id);
+  // Close the employee's open equipment request for this asset — unless it asked for a permanent assignment and this
+  // was a temporary checkout (a loan must not silently complete a request for something else).
+  requestRules.completeEquipmentRequests(db, { employeeId: target.id, assetId: asset.id, assignmentType: assignment.assignment_type, actorAccountId: req.user.account_id });
   res.json({ ok: true, assignment });
 });
 
@@ -554,8 +571,7 @@ app.post('/api/assets/:id/checkin', admin, (req, res) => {
   else if (asset.status === 'lost') db.prepare("UPDATE assets SET status = 'available' WHERE id = ?").run(asset.id);
   refreshStatus(asset.id);
   if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
-  db.prepare("UPDATE requests SET status = 'completed', resolved_by = ?, resolved_at = datetime('now') WHERE type = 'return' AND asset_id = ? AND user_id = ? AND status IN ('open','dropped_off')")
-    .run(req.user.account_id, asset.id, target.employee_id);
+  requestRules.completeReturnRequests(db, { employeeId: target.employee_id, assetId: asset.id, actorAccountId: req.user.account_id });
   log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name} · ${assignments.TYPE_LABEL[target.assignment_type]}${target.due_date ? ` · return was due ${assignments.returnBy(target.due_date, target.due_time)}` : ''}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.employee_id);
   notify.checkedIn({ name: target.user_name, email: target.user_email }, asset);
   res.json({ ok: true });
@@ -642,6 +658,8 @@ app.use('/uploads', (req, res, next) => (currentUser(req) ? next() : res.status(
 app.get('/api/requests', auth, (req, res) => {
   const where = []; const params = [];
   if (req.user.role !== 'admin') { where.push('r.user_id = ?'); params.push(req.user.employee_id); }
+  if (req.query.status !== undefined && !['open', 'closed'].includes(req.query.status)) throw httpError(400, 'Status must be open or closed');
+  if (req.query.type !== undefined && !['equipment', 'return'].includes(req.query.type)) throw httpError(400, 'Type must be equipment or return');
   if (req.query.status === 'open') where.push("r.status IN ('open','approved','dropped_off')");
   else if (req.query.status === 'closed') where.push("r.status IN ('denied','completed','cancelled')");
   if (req.query.type) { where.push('r.type = ?'); params.push(req.query.type); }
@@ -666,11 +684,15 @@ app.post('/api/requests', auth, (req, res) => {
   if (wantedType === 'permanent' && assetId === null) throw httpError(400, 'Choose the equipment you want assigned permanently');
   if (!Number.isInteger(forUser) || forUser < 1) throw httpError(400, 'Choose a valid person for this request');
   if (assetId !== null && (!Number.isInteger(assetId) || assetId < 1)) throw httpError(400, 'Choose a valid asset');
-  if (!db.prepare('SELECT 1 FROM employees WHERE id = ?').get(forUser)) throw httpError(404, 'User not found');
-  if (assetId !== null && !getAsset(assetId)) throw httpError(404, 'Asset not found');
+  const forPerson = db.prepare('SELECT status FROM employees WHERE id = ?').get(forUser);
+  if (!forPerson) throw httpError(404, 'User not found');
+  if (forPerson.status !== 'active') throw httpError(400, 'That person is inactive, so a request can\'t be made for them');
+  const wanted = assetId === null ? null : getAsset(assetId);
+  if (assetId !== null && !wanted) throw httpError(404, 'Asset not found');
+  if (wanted && wanted.archived_at) throw httpError(400, 'This asset is archived and can\'t be requested.');
   // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
   const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?)")
-    .run(forUser, assetId, category || (wantedType === 'permanent' ? getAsset(assetId).category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType);
+    .run(forUser, assetId, category || (wantedType === 'permanent' ? wanted.category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType);
   const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
   if (assetId) log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
   notify.equipmentRequested(getPerson(forUser), r);
@@ -683,43 +705,70 @@ function loadRequest(id) {
 }
 app.post('/api/requests/:id/approve', admin, (req, res) => {
   const r = loadRequest(req.params.id);
-  if (r.type !== 'equipment' || !['open', 'approved'].includes(r.status)) throw httpError(400, 'This request is not open');
+  if (r.type !== 'equipment') throw httpError(400, 'This request is not open');
+  if (!requestRules.canTransition('equipment', r.status, 'approved') && !requestRules.canTransition('equipment', r.status, 'completed')) {
+    throw httpError(400, requestRules.TERMINAL.includes(r.status) ? 'This request is already closed' : 'This request is not open');
+  }
   const user = getPerson(r.user_id);
-  let asset = null;
+  if (!user || user.status !== 'active') throw httpError(400, 'That person is inactive, so this request can\'t be approved');
   const rawAssetId = num(req.body.asset_id);
   if (rawAssetId !== null && (!Number.isInteger(rawAssetId) || rawAssetId < 0)) throw httpError(400, 'Choose a valid asset');
-  const assetId = rawAssetId || null;
-  if (assetId) {
-    asset = getAsset(assetId);
-    if (!asset) throw httpError(404, 'Asset not found');
-    doCheckout({ asset, user, actor: req.user, assignment_type: req.body.assignment_type || r.requested_assignment_type || undefined, due_date: req.body.due_date, due_time: req.body.due_time, notes: `Request #${r.id}` });
+  let assetId = rawAssetId || null;
+  let assignmentType = req.body.assignment_type || r.requested_assignment_type || undefined;
+  if (r.requested_assignment_type === 'permanent') {
+    // Approving a request for a PERMANENT assignment means making exactly that assignment: for the requested asset, as
+    // permanent. It can't be "approved" with nothing assigned, with different equipment, or downgraded to a loan.
+    if (assetId !== null && assetId !== r.asset_id) throw httpError(400, 'A permanent assignment request can only be approved for the equipment that was requested.');
+    if (req.body.assignment_type && req.body.assignment_type !== 'permanent') throw httpError(400, 'A permanent assignment request can only be approved as a permanent assignment. Decline it or ask for a temporary checkout instead.');
+    assetId = r.asset_id;
+    assignmentType = 'permanent';
   }
-  const status = asset ? 'completed' : 'approved';
-  db.prepare("UPDATE requests SET status = ?, asset_id = COALESCE(?, asset_id), resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?")
-    .run(status, assetId, req.user.account_id, clean(req.body.note), r.id);
+  const asset = assetId ? getAsset(assetId) : null;
+  if (assetId && !asset) throw httpError(404, 'Asset not found');
+  const note = clean(req.body.note);
+  // The assignment (if any) and the request's completion succeed or fail together; emails go out only after commit.
+  const assignment = db.transaction(() => {
+    const made = asset ? assignments.createAssignment(db, {
+      assetId: asset.id, employeeId: user.id, actorAccountId: req.user.account_id, actorIsAdmin: true,
+      type: assignmentType, dueDate: req.body.due_date, dueTime: req.body.due_time, notes: `Request #${r.id}`,
+    }).assignment : null;
+    requestRules.transition(db, r.id, asset ? 'completed' : 'approved', { actorAccountId: req.user.account_id, note, setNote: true, assetId: asset ? asset.id : null });
+    return made;
+  }).immediate();
+  if (assignment) notify.checkedOut(user, getAsset(asset.id), assignment);
   // When an asset is attached the checkout email already went out; only send the approval note if no asset yet or a note was added
-  if (!asset || clean(req.body.note)) notify.requestResolved(user, { ...r, status, resolution_note: clean(req.body.note) }, asset);
+  if (!asset || note) notify.requestResolved(user, { ...r, status: asset ? 'completed' : 'approved', resolution_note: note }, asset);
   res.json({ ok: true });
 });
 app.post('/api/requests/:id/deny', admin, (req, res) => {
   const r = loadRequest(req.params.id);
-  if (!['open', 'approved'].includes(r.status)) throw httpError(400, 'This request is not open');
-  db.prepare("UPDATE requests SET status = 'denied', resolved_by = ?, resolved_at = datetime('now'), resolution_note = ? WHERE id = ?").run(req.user.account_id, clean(req.body.note), r.id);
-  if (r.type === 'equipment') notify.requestResolved(getPerson(r.user_id), { ...r, status: 'denied', resolution_note: clean(req.body.note) });
+  if (r.type !== 'equipment') throw httpError(400, 'Only equipment requests can be declined. Cancel a return request instead.');
+  const note = clean(req.body.note);
+  requestRules.transition(db, r.id, 'denied', { actorAccountId: req.user.account_id, note, setNote: true });
+  notify.requestResolved(getPerson(r.user_id), { ...r, status: 'denied', resolution_note: note });
   res.json({ ok: true });
 });
+// Rescind/cancel: the person who made an equipment request may cancel their own while it is still live; IT may cancel any
+// live request. A cancelled request stays in history — nothing is deleted.
 app.post('/api/requests/:id/cancel', auth, (req, res) => {
   const r = loadRequest(req.params.id);
   if (req.user.role !== 'admin' && (r.user_id !== req.user.employee_id || r.type !== 'equipment')) throw httpError(403, 'Not allowed');
-  if (!['open', 'approved', 'dropped_off'].includes(r.status)) throw httpError(400, 'This request is already closed');
-  db.prepare("UPDATE requests SET status = 'cancelled', resolved_by = ?, resolved_at = datetime('now') WHERE id = ?").run(req.user.account_id, r.id);
+  // Once IT's approval of a PERMANENT-assignment request has been acted on, it can't be rescinded (and history can never
+  // read "cancelled" for a request whose approval made the assignment). Approval completes the request in the same
+  // transaction as the assignment, so this only bites on an approved row (e.g. legacy data) — an employee may rescind a
+  // permanent request only while it is still open; and nobody may cancel one that already produced its assignment.
+  if (r.type === 'equipment' && r.requested_assignment_type === 'permanent' && ['approved', 'completed'].includes(r.status)) {
+    const assigned = r.asset_id && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND notes = ?').get(r.asset_id, r.user_id, `Request #${r.id}`);
+    if (assigned || req.user.role !== 'admin') throw httpError(400, 'IT has already approved this permanent assignment request, so it can no longer be cancelled. Ask IT if the equipment should come back.');
+  }
+  requestRules.transition(db, r.id, 'cancelled', { actorAccountId: req.user.account_id });
   res.json({ ok: true });
 });
 app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.user_id !== req.user.employee_id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
-  if (r.type !== 'return' || r.status !== 'open') throw httpError(400, 'This request is not open');
-  db.prepare("UPDATE requests SET status = 'dropped_off' WHERE id = ?").run(r.id);
+  if (r.type !== 'return') throw httpError(400, 'This request is not open');
+  requestRules.transition(db, r.id, 'dropped_off');
   const asset = getAsset(r.asset_id);
   if (asset) {
     log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
@@ -735,7 +784,7 @@ app.post('/api/assets/:id/return-notice', auth, (req, res) => {
   const mine = me && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, me);
   if (!mine) throw httpError(400, "This isn't checked out to you");
   const existing = db.prepare("SELECT * FROM requests WHERE type='return' AND asset_id=? AND user_id=? AND status IN ('open','dropped_off')").get(asset.id, me);
-  if (existing) db.prepare("UPDATE requests SET status='dropped_off' WHERE id = ?").run(existing.id);
+  if (existing) { if (existing.status === 'open') requestRules.transition(db, existing.id, 'dropped_off'); }
   else db.prepare("INSERT INTO requests (type, status, user_id, asset_id, message, created_by) VALUES ('return', 'dropped_off', ?, ?, ?, ?)")
     .run(me, asset.id, clean(req.body.note) || 'Returned by user', req.user.account_id);
   log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User returned it to IT', me);
@@ -866,14 +915,17 @@ app.post('/api/import/assets', admin, (req, res) => {
       if (existing && existing.archived_at) { errors.push(`Row ${idx + 2}: tag ${tag} belongs to an archived asset — skipped`); return; }
       if (!v.name && !existing) { errors.push(`Row ${idx + 2}: missing name`); return; }
       if (!existing) { v.category = v.category || 'Other'; v.condition = v.condition || 'Good'; }
+      // A serial that belongs to a different asset (already in the inventory, archived or not, or earlier in this file)
+      // skips just this row; an update that leaves the serial blank keeps the stored one.
+      try { assertSerialFree(v.serial, existing ? existing.id : null); } catch (e) { errors.push(`Row ${idx + 2}: ${e.message.split('. ')[0]} — skipped`); return; }
       let id;
       if (existing) {
-        db.prepare(`UPDATE assets SET ${ASSET_FIELDS.map((f) => `${f} = COALESCE(?, ${f})`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
-          .run(...ASSET_FIELDS.map((f) => v[f]), existing.id);
+        db.prepare(`UPDATE assets SET ${ASSET_FIELDS.map((f) => `${f} = COALESCE(?, ${f})`).join(', ')}, serial_normalized = COALESCE(?, serial_normalized), updated_at = datetime('now') WHERE id = ?`)
+          .run(...ASSET_FIELDS.map((f) => v[f]), serialKey(v.serial), existing.id);
         id = existing.id; updated++;
       } else {
-        const cols = ['tag', ...ASSET_FIELDS];
-        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
+        const cols = ['tag', 'serial_normalized', ...ASSET_FIELDS];
+        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
         log(id, req.user.account_id, 'created', 'Imported from CSV'); created++;
       }
       const em = clean(o.assigned_email)?.toLowerCase();
