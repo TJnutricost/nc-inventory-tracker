@@ -753,6 +753,14 @@ app.post('/api/requests/:id/deny', admin, (req, res) => {
 app.post('/api/requests/:id/cancel', auth, (req, res) => {
   const r = loadRequest(req.params.id);
   if (req.user.role !== 'admin' && (r.user_id !== req.user.employee_id || r.type !== 'equipment')) throw httpError(403, 'Not allowed');
+  // Once IT's approval of a PERMANENT-assignment request has been acted on, it can't be rescinded (and history can never
+  // read "cancelled" for a request whose approval made the assignment). Approval completes the request in the same
+  // transaction as the assignment, so this only bites on an approved row (e.g. legacy data) — an employee may rescind a
+  // permanent request only while it is still open; and nobody may cancel one that already produced its assignment.
+  if (r.type === 'equipment' && r.requested_assignment_type === 'permanent' && ['approved', 'completed'].includes(r.status)) {
+    const assigned = r.asset_id && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND notes = ?').get(r.asset_id, r.user_id, `Request #${r.id}`);
+    if (assigned || req.user.role !== 'admin') throw httpError(400, 'IT has already approved this permanent assignment request, so it can no longer be cancelled. Ask IT if the equipment should come back.');
+  }
   requestRules.transition(db, r.id, 'cancelled', { actorAccountId: req.user.account_id });
   res.json({ ok: true });
 });

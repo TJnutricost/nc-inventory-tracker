@@ -465,7 +465,7 @@ module.exports = [
   {
     // Phase 1 Foundation Closeout: serial numbers become unique across the whole asset inventory (archived assets
     // included) once surrounding whitespace and letter case are ignored. `serial` keeps what the user typed (only
-    // surrounding whitespace is trimmed; a blank becomes NULL); `serial_normalized` = trimmed + lower-cased, maintained by
+    // surrounding whitespace is trimmed; a blank or the exact placeholder "N/A", any case, becomes NULL); `serial_normalized` = trimmed + lower-cased, maintained by
     // src/serial.js on every write path, with a plain UNIQUE index (NULLs never collide). Nothing else is stripped:
     // "ABC-123" and "ABC123" stay different. The rule is inlined here on purpose — a migration must never change when
     // src/serial.js does. If existing assets already collide the migration REFUSES and lists them; it never merges,
@@ -475,8 +475,9 @@ module.exports = [
     up: (db) => {
       const rows = db.prepare('SELECT id, tag, serial FROM assets WHERE serial IS NOT NULL ORDER BY id').all()
         .map((r) => {
-          const serial = String(r.serial).trim();
-          return { id: r.id, tag: r.tag, raw: r.serial, serial: serial === '' ? null : serial, key: serial === '' ? null : serial.toLowerCase() };
+          const trimmed = String(r.serial).trim();
+          const serial = trimmed === '' || trimmed.toLowerCase() === 'n/a' ? null : trimmed;
+          return { id: r.id, tag: r.tag, raw: r.serial, serial, key: serial === null ? null : serial.toLowerCase() };
         });
       const groups = new Map();
       for (const r of rows) if (r.key !== null) groups.set(r.key, [...(groups.get(r.key) || []), r]);

@@ -356,6 +356,47 @@ test('a direct checkout only closes the requests of the person it went to', asyn
   assert.equal(asRow(forQ.id).status, 'open');
 });
 
+test('once approval has created the permanent assignment, the request can no longer be cancelled by anyone and still reads "completed"', async () => {
+  const me = await makeLogin('Approved Then Cancels');
+  const a = await newAsset('Approved permanent laptop', { category: 'Laptop' });
+  const r = await asAdminRequest(me, a);
+  assert.equal((await admin.post(`/api/requests/${r.id}/approve`, { note: 'yours' })).status, 200);
+  const frozen = JSON.stringify(asRow(r.id));
+  assert.equal(asRow(r.id).status, 'completed');
+  assert.equal((await me.client.post(`/api/requests/${r.id}/cancel`, {})).status, 400, 'the employee cannot rescind it');
+  assert.equal((await admin.post(`/api/requests/${r.id}/cancel`, {})).status, 400, 'nor can IT turn it into "cancelled"');
+  assert.equal(JSON.stringify(asRow(r.id)), frozen, 'history is untouched');
+  const asg = db.prepare('SELECT * FROM assignments WHERE asset_id = ?').get(a.id);
+  assert.deepEqual([asg.assignment_type, asg.employee_id, asg.returned_at], ['permanent', me.id, null], 'and the assignment stands');
+});
+
+test('a permanent request that is approved without an assignment (legacy row) cannot be rescinded by the employee; open ones still can', async () => {
+  const me = await makeLogin('Legacy Approved');
+  const a = await newAsset('Legacy approved asset', { category: 'Desktop' });
+  const legacy = rawInsert({ user_id: me.id, asset_id: a.id, requested_assignment_type: 'permanent', status: 'approved', created_at: '2025-01-01 00:00:00', resolved_at: '2025-01-02 00:00:00' }).lastInsertRowid;
+  const res = await me.client.post(`/api/requests/${legacy}/cancel`, {});
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /already approved/);
+  assert.equal(asRow(legacy).status, 'approved');
+  // IT may still cancel it while no assignment exists...
+  assert.equal((await admin.post(`/api/requests/${legacy}/cancel`, {})).status, 200);
+  assert.equal(asRow(legacy).status, 'cancelled');
+  // ...but not once an assignment made from that approval exists
+  const b = await newAsset('Legacy approved + assigned', { category: 'Desktop' });
+  const withAsg = rawInsert({ user_id: me.id, asset_id: b.id, requested_assignment_type: 'permanent', status: 'approved', created_at: '2025-01-01 00:00:00', resolved_at: '2025-01-02 00:00:00' }).lastInsertRowid;
+  db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type, notes) VALUES (?, ?, 'permanent', ?)").run(b.id, me.id, `Request #${withAsg}`);
+  assert.equal((await admin.post(`/api/requests/${withAsg}/cancel`, {})).status, 400);
+  assert.equal(asRow(withAsg).status, 'approved');
+  // genuinely open permanent requests keep today's behavior (employee can rescind)
+  const open = await asAdminRequest(me, await newAsset('Still open', { category: 'Desktop' }));
+  assert.equal((await me.client.post(`/api/requests/${open.id}/cancel`, {})).status, 200);
+  assert.equal(asRow(open.id).status, 'cancelled');
+  // and a temporary / unspecified request may still be cancelled while approved
+  const plain = await request(me.client, { category: 'Headset' });
+  await admin.post(`/api/requests/${plain.id}/approve`, { note: 'ordered' });
+  assert.equal((await me.client.post(`/api/requests/${plain.id}/cancel`, {})).status, 200);
+});
+
 // ================================================================ historical safety
 test('archiving an asset keeps every request, assignment and activity row, and the requests still resolve to the asset', async () => {
   const me = await makeLogin('History Keeper');

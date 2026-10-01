@@ -33,6 +33,13 @@ test('normalization: trim + lower-case the KEY only; blank is no serial; punctua
   assert.notEqual(serialKey('ABC 123'), serialKey('ABC123'));
   assert.notEqual(serialKey('ABC  123'), serialKey('ABC 123'), 'internal spacing is meaningful');
   assert.equal(serialKey(12345), '12345');
+  for (const na of ['N/A', 'n/a', 'N/a', '  n/A  ', '\tN/A\n']) {
+    assert.equal(cleanSerial(na), null, `"${na}" is the no-serial placeholder`);
+    assert.equal(serialKey(na), null);
+  }
+  for (const real of ['NA', 'N-A', 'N/A1', 'N /A', 'N//A', 'none', 'unknown', 'n/a n/a']) {
+    assert.equal(cleanSerial(real), real, `"${real}" is NOT a placeholder; the list is exactly one value`);
+  }
 });
 
 // ---------------------------------------------------------------- create
@@ -250,4 +257,75 @@ test('migration 8: existing normalized collisions abort it, list the assets, and
   assert.equal(d.pragma('table_info(assets)').some((c) => c.name === 'serial_normalized'), false, 'no half-applied column');
   assert.deepEqual(d.prepare('SELECT tag, serial FROM assets ORDER BY id').all().map((r) => r.serial), ['SN100', ' sn100 ', 'Sn100', 'SN-100'], 'no serial was altered, merged or discarded');
   assert.equal(d.prepare('SELECT COUNT(*) c FROM assets').get().c, 4);
+});
+
+// ---------------------------------------------------------------- the N/A placeholder means "no serial"
+test('N/A (any case, any surrounding whitespace) is stored as NO serial on create, and any number of assets may have it', async () => {
+  const made = [];
+  for (const na of ['N/A', 'n/a', 'N/a', '  N/A  ', '\tn/A']) made.push(await create(na));
+  for (const r of made) {
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.serial, null);
+    assert.deepEqual(row(r.body.id), { serial: null, serial_normalized: null });
+  }
+});
+
+test('only the exact N/A placeholder is special: NA, N-A, N/A-1 and friends are real serials and stay unique', async () => {
+  for (const real of ['NA', 'N-A', 'N/A-1', 'None']) {
+    const first = await create(real);
+    assert.equal(first.status, 200, real);
+    assert.equal(first.body.serial, real);
+    assert.equal((await create(real.toLowerCase())).status, 400, `${real} is a real serial, so a repeat conflicts`);
+  }
+});
+
+test('edit: setting the serial to N/A clears it (and frees the old one); editing other fields of a no-serial asset keeps it empty', async () => {
+  const a = (await create('WAS-REAL')).body;
+  assert.equal((await admin.put(`/api/assets/${a.id}`, { serial: ' n/a ' })).status, 200);
+  assert.deepEqual(row(a.id), { serial: null, serial_normalized: null });
+  assert.equal((await create('was-real')).status, 200, 'the cleared serial is free again');
+  const b = (await create('N/A')).body;
+  assert.equal((await admin.put(`/api/assets/${b.id}`, { name: 'Renamed' })).status, 200);
+  assert.deepEqual(row(b.id), { serial: null, serial_normalized: null });
+  const other = (await create('SECOND-REAL')).body;
+  assert.equal((await admin.put(`/api/assets/${other.id}`, { serial: 'N/A' })).status, 200, 'N/A never conflicts with anything');
+});
+
+test('import: an N/A serial imports as no serial (many allowed); on an update it keeps the stored serial, like a blank', async () => {
+  const keep = (await create('IMP-NA-KEEP')).body;
+  const r = await importCsv([
+    'name,tag,serial',
+    'First,IMPNA-1,N/A',
+    'Second,IMPNA-2,n/a',
+    'Third,IMPNA-3,"  N/A "',
+  ].join('\r\n'));
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual([r.body.created, r.body.errors.length], [3, 0]);
+  for (const tag of ['IMPNA-1', 'IMPNA-2', 'IMPNA-3']) {
+    assert.deepEqual(row(db.prepare('SELECT id FROM assets WHERE tag = ?').get(tag).id), { serial: null, serial_normalized: null }, tag);
+  }
+  const upd = await importCsv(`tag,serial\r\n${keep.tag},N/A`);
+  assert.equal(upd.body.errors.length, 0);
+  assert.deepEqual(row(keep.id), { serial: 'IMP-NA-KEEP', serial_normalized: 'imp-na-keep' });
+});
+
+test('lookup: N/A is not a meaningful serial — scanning it finds nothing, even though assets have no serial', async () => {
+  await create('N/A');
+  for (const code of ['N/A', 'n/a', ' N/A ']) assert.equal((await lookup(code)).found, false, code);
+});
+
+test('migration 8: legacy N/A placeholders become NO serial instead of colliding; real serials are untouched', () => {
+  const d = upTo(7);
+  const ins = d.prepare('INSERT INTO assets (tag, name, serial) VALUES (?, ?, ?)');
+  ins.run('P-1', 'one', 'N/A');
+  ins.run('P-2', 'two', ' n/a ');
+  ins.run('P-3', 'three', 'N/a');
+  ins.run('P-4', 'real', 'NA');
+  ins.run('P-5', 'real 2', 'N/A-2');
+  assert.deepEqual(runMigrations(d, migrations.filter((m) => m.id <= 8)), [8]);
+  const by = Object.fromEntries(d.prepare('SELECT tag, serial, serial_normalized FROM assets').all().map((r) => [r.tag, r]));
+  for (const t of ['P-1', 'P-2', 'P-3']) assert.deepEqual([by[t].serial, by[t].serial_normalized], [null, null], t);
+  assert.deepEqual([by['P-4'].serial, by['P-4'].serial_normalized], ['NA', 'na']);
+  assert.deepEqual([by['P-5'].serial, by['P-5'].serial_normalized], ['N/A-2', 'n/a-2']);
+  assert.equal(d.prepare('SELECT COUNT(*) c FROM assets').get().c, 5, 'no asset lost');
 });

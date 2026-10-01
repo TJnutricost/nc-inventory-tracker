@@ -1,7 +1,8 @@
 // Serial number normalization (Phase 1 Foundation Closeout).
 //
 // The serial the user typed is kept for display; only SURROUNDING whitespace is removed and a blank value means "no
-// serial" (NULL). Matching and uniqueness use `serialKey`: the same value, lower-cased. Nothing else is touched —
+// serial" (NULL). So does the single placeholder `N/A` (any case) — one exact value, deliberately not a list of
+// guessed placeholders ("NA", "NONE", "UNKNOWN" … are ordinary serials). Matching and uniqueness use `serialKey`: the same value, lower-cased. Nothing else is touched —
 // hyphens, slashes, internal spaces and every other character are meaningful ("ABC-123" and "ABC123" are different).
 //
 // The key is computed here, in the application, and stored in assets.serial_normalized (plain UNIQUE index). It is
@@ -11,7 +12,7 @@
 const cleanSerial = (v) => {
   if (v === undefined || v === null) return null;
   const s = String(v).trim();
-  return s === '' ? null : s;
+  return s === '' || s.toLowerCase() === 'n/a' ? null : s;
 };
 const serialKey = (v) => {
   const s = cleanSerial(v);
