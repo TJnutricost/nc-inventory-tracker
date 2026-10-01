@@ -960,75 +960,73 @@ function mountCatalogChooser(root, rows, { value = null, onChange } = {}) {
   return { get id() { return path[path.length - 1] ?? null; } };
 }
 
-// The employee request flow. Step 1 chooses a catalog level (any level). Step 2 says how specific the ask is — any matching
-// asset, or one particular available item under that choice — and sends it. The server re-checks everything.
+// The employee request flow over the catalog. ONE set of logic, two arrangements of the same pieces:
+//   wide screens   one screen — the cascading columns on the left, and on the right (in the space the columns don't use) the
+//                  request details for whatever level is selected: path, any-matching vs a specific item, notes, Send.
+//                  Any level is requestable at once, with or without children — there is no "Continue".
+//   narrow screens two steps — (1) drill through one level at a time, (2) the same details panel, full width.
+// The server re-checks everything; nothing here decides what an employee may request.
 async function requestFromCatalogSheet({ category, forUser } = {}) {
   let rows;
   try { rows = await getCatalog(); } catch (e) { return fail(e); }
   const startRoot = category && rows.find((r) => r.parent_id === null && r.name.toLowerCase() === String(category).toLowerCase());
-  const st = { id: startRoot ? startRoot.id : null, row: startRoot || null, scope: 'any', assetId: null, items: null };
+  const st = { id: startRoot ? startRoot.id : null, row: startRoot || null, scope: 'any', assetId: null, items: null, itemsFor: null, message: '', needed_by: '' };
+  const split = rows.length > 0 && window.matchMedia('(min-width: 900px)').matches;
   const { el, close } = sheet(`<div class="rq"><div class="rq-head"><h2 id="rq-title"></h2><p class="muted small" id="rq-sub" style="margin:2px 0 0"></p></div><div class="rq-body" id="rq-body"></div><div class="rq-foot" id="rq-foot"></div></div>`, { wide: true });
   el.classList.add('tall');
+  if (split) el.classList.add('split');
   const T = (sel) => $(sel, el);
-  const done = () => { close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); };
+  const to = (path) => location.hash.startsWith(path);
+  const done = () => { close(); toast('Request sent to IT'); refreshBadge(); if (to('#/requests') || to('#/home')) route(true); };
+  let loadToken = 0;
 
-  const pickStep = () => {
-    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
-    T('#rq-sub').textContent = rows.length ? 'Start broad, then narrow down. You can stop at any level.' : '';
-    T('#rq-body').innerHTML = rows.length ? '<div id="cc-mount"></div>' : '<p class="muted">The equipment list is empty. Describe what you need on the next screen.</p>';
-    T('#rq-foot').innerHTML = `<div class="rq-sel" id="rq-sel"></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="rq-next">Continue</button></div>`;
-    const paint = () => {
-      const r = st.row;
-      T('#rq-sel').innerHTML = r ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(r.path))}</strong>` : '<span class="muted small">Choose what you need</span>';
-      T('#rq-next').disabled = rows.length > 0 && !r;
-    };
-    if (rows.length) mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { st.id = id; st.row = row; st.items = null; st.scope = 'any'; st.assetId = null; paint(); } });
-    paint();
-    T('#rq-next').onclick = detailStep;
+  // The request-details panel for the selected level (or, when the catalog is empty, a plain "what do you need" field).
+  const panelHtml = (r, inline) => `${r ? `<div class="rq-picked"><div class="grow"><div class="small muted">You are requesting</div><div class="rq-path">${esc(crumbText(r.path))}</div></div>${inline ? '' : '<button type="button" class="btn sm" id="rq-change">Change</button>'}</div>` : ''}
+    <form class="form-grid" id="f" style="margin-top:14px">
+      ${r ? `<fieldset class="rq-scope"><legend>How specific?</legend>
+        <label class="rq-opt"><input type="radio" name="scope" value="any" ${st.scope === 'any' ? 'checked' : ''}><span><strong>Any matching asset</strong><br><span class="small muted">${r.available_count ? `${r.available_count} available right now. ` : 'None are free right now. '}IT will choose a suitable one.</span></span></label>
+        <label class="rq-opt" id="rq-spec-opt"><input type="radio" name="scope" value="specific" ${st.scope === 'specific' ? 'checked' : ''} disabled><span><strong>A specific item</strong><br><span class="small muted" id="rq-spec-hint">Checking what is available…</span></span></label>
+        <div class="picker-list rq-items" id="rq-items" hidden></div></fieldset>`
+      : `<label class="field"><span>What do you need?</span><input name="category" required maxlength="120" placeholder="e.g. Second monitor, USB-C hub"></label>`}
+      <label class="field"><span>Details</span><textarea name="message" placeholder="e.g. Second monitor for my desk, USB-C if possible">${esc(st.message)}</textarea></label>
+      <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}" value="${esc(st.needed_by)}"></label>
+      <label class="check" id="rq-perm" hidden><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>
+      ${inline ? `<div class="sheet-actions" style="margin-top:4px"><button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary" id="go">${icon('send')} Send to IT</button></div>` : ''}
+    </form>`;
+
+  const paintItems = () => {
+    const box = T('#rq-items'); const hint = T('#rq-spec-hint'); const opt = T('#rq-spec-opt input');
+    if (!box || !hint || !st.items) return; // not rendered (yet), or the panel moved on
+    if (st.items.length) {
+      opt.disabled = false;
+      hint.textContent = `Pick one of ${st.items.length === 60 ? '60+' : st.items.length} available`;
+      box.innerHTML = st.items.map((a) => `<button type="button" data-id="${a.id}" class="${st.assetId === a.id ? 'on' : ''}" aria-pressed="${st.assetId === a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span>${st.assetId === a.id ? icon('check') : ''}</button>`).join('');
+    } else { opt.disabled = true; hint.textContent = 'No individual items are available to pick right now.'; }
+    syncScope();
   };
-
-  const detailStep = async () => {
-    const r = st.row;
-    T('#rq-title').textContent = 'Request details';
-    T('#rq-sub').textContent = '';
-    T('#rq-body').innerHTML = `${r ? `<div class="rq-picked"><div class="grow"><div class="small muted">You are requesting</div><div class="rq-path">${esc(crumbText(r.path))}</div></div><button type="button" class="btn sm" id="rq-change">Change</button></div>` : ''}
-      <form class="form-grid" id="f" style="margin-top:14px">
-        ${r ? `<fieldset class="rq-scope"><legend>How specific?</legend>
-          <label class="rq-opt"><input type="radio" name="scope" value="any" checked><span><strong>Any matching asset</strong><br><span class="small muted">${r.available_count ? `${r.available_count} available right now. ` : 'None are free right now. '}IT will choose a suitable one.</span></span></label>
-          <label class="rq-opt" id="rq-spec-opt"><input type="radio" name="scope" value="specific" disabled><span><strong>A specific item</strong><br><span class="small muted" id="rq-spec-hint">Checking what is available…</span></span></label>
-          <div class="picker-list rq-items" id="rq-items" hidden></div></fieldset>`
-        : `<label class="field"><span>What do you need?</span><input name="category" required maxlength="120" placeholder="e.g. Second monitor, USB-C hub"></label>`}
-        <label class="field"><span>Details</span><textarea name="message" placeholder="e.g. Second monitor for my desk, USB-C if possible"></textarea></label>
-        <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
-        <label class="check" id="rq-perm" hidden><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>
-      </form>`;
-    T('#rq-foot').innerHTML = `<div class="sheet-actions" style="margin-top:0"><button type="button" class="btn" id="rq-back">${rows.length ? 'Back' : 'Cancel'}</button><button type="submit" form="f" class="btn primary" id="go">${icon('send')} Send to IT</button></div>`;
-    T('#rq-back').onclick = rows.length ? pickStep : close;
-    const ch = T('#rq-change'); if (ch) ch.onclick = pickStep;
-    const f = T('#f');
-    const syncScope = () => {
-      const specific = f.scope && f.scope.value === 'specific';
-      T('#rq-items').hidden = !specific;
-      const perm = T('#rq-perm'); if (perm) perm.hidden = !(specific && st.assetId && !forUser);
-      if (!specific) st.assetId = null;
-    };
+  const syncScope = () => {
+    const f = T('#f'); if (!f || !f.scope) return;
+    const specific = f.scope.value === 'specific' && !!st.items && st.items.length > 0;
+    T('#rq-items').hidden = !specific;
+    const perm = T('#rq-perm'); if (perm) perm.hidden = !(specific && st.assetId && !forUser);
+    if (!specific) st.assetId = null;
+  };
+  // Available items under the selected level, fetched once per level (a stale answer for a level the person has left is dropped).
+  const loadItems = async (r) => {
+    if (st.itemsFor === r.id && st.items) return paintItems();
+    const mine = ++loadToken; st.items = null; st.itemsFor = r.id;
+    let list;
+    try { list = (await api('GET', `/api/assets?catalog_node=${r.id}${isAdmin() ? '&status=available' : ''}`)).slice(0, 60); } catch { list = []; }
+    if (mine !== loadToken) return;
+    st.items = list; paintItems();
+  };
+  const wirePanel = (onChange) => {
+    const f = T('#f'); const r = st.row;
+    f.addEventListener('input', (e) => { if (e.target.name === 'message') st.message = e.target.value; if (e.target.name === 'needed_by') st.needed_by = e.target.value; });
     if (r) {
-      f.addEventListener('change', (e) => {
-        if (e.target.name === 'scope') { syncScope(); if (e.target.value === 'specific' && !st.assetId && st.items && st.items.length) { const first = $('#rq-items button', el); if (first) first.focus(); } }
-      });
-      const paintItems = () => {
-        const box = T('#rq-items'); if (!box) return;
-        box.innerHTML = st.items.map((a) => `<button type="button" data-id="${a.id}" class="${st.assetId === a.id ? 'on' : ''}" aria-pressed="${st.assetId === a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span>${st.assetId === a.id ? icon('check') : ''}</button>`).join('');
-        syncScope();
-      };
+      f.addEventListener('change', (e) => { if (e.target.name === 'scope') { st.scope = e.target.value; syncScope(); } });
       T('#rq-items').onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; st.assetId = Number(b.dataset.id); paintItems(); };
-      try {
-        if (!st.items) st.items = (await api('GET', `/api/assets?catalog_node=${r.id}${isAdmin() ? '&status=available' : ''}`)).slice(0, 60);
-      } catch (e) { st.items = []; }
-      if (!T('#rq-spec-hint')) return; // the sheet was closed or moved on while loading
-      const hint = T('#rq-spec-hint'); const opt = T('#rq-spec-opt input');
-      if (st.items.length) { opt.disabled = false; hint.textContent = `Pick one of ${st.items.length === 60 ? '60+' : st.items.length} available`; paintItems(); }
-      else hint.textContent = 'No individual items are available to pick right now.';
+      loadItems(r);
     }
     f.onsubmit = (e) => {
       e.preventDefault();
@@ -1042,14 +1040,56 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
       }
       if (fd.permanent && body.asset_id) {
         const a = st.items.find((x) => x.id === body.asset_id);
-        return busy(T('#go'), async () => { if (await requestPermanentAssignment(a, body.message, r.id)) { close(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); } });
+        return busy(T('#go'), async () => { if (await requestPermanentAssignment(a, body.message, r.id)) { close(); if (to('#/requests') || to('#/home')) route(true); } });
       }
       busy(T('#go'), async () => { await api('POST', '/api/requests', body); done(); });
     };
   };
+  const onChoose = (id, row) => { st.id = id; st.row = row; st.items = null; st.itemsFor = null; st.scope = 'any'; st.assetId = null; };
 
-  rows.length ? pickStep() : detailStep();
+  // ---- wide: one screen
+  const splitScreen = () => {
+    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
+    T('#rq-sub').textContent = 'Choose a category and narrow down as far as you like — you can request at any level.';
+    T('#rq-body').innerHTML = '<div class="rq-split"><div class="rq-left" id="cc-mount"></div><aside class="rq-right" id="rq-panel" aria-label="Request details"></aside></div>';
+    T('#rq-foot').remove();
+    const paintPanel = () => {
+      const panel = T('#rq-panel');
+      if (!st.row) { panel.innerHTML = '<div class="rq-hint">Choose a category on the left. The request form appears here.</div>'; return; }
+      panel.innerHTML = panelHtml(st.row, true);
+      wirePanel();
+    };
+    mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { onChoose(id, row); paintPanel(); } });
+    paintPanel();
+  };
+
+  // ---- narrow: two steps
+  const pickStep = () => {
+    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
+    T('#rq-sub').textContent = rows.length ? 'Start broad, then narrow down. You can stop at any level.' : '';
+    T('#rq-body').innerHTML = rows.length ? '<div id="cc-mount"></div>' : '<p class="muted">The equipment list is empty. Describe what you need on the next screen.</p>';
+    T('#rq-foot').innerHTML = `<div class="rq-sel" id="rq-sel"></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="rq-next">Continue</button></div>`;
+    const paint = () => {
+      T('#rq-sel').innerHTML = st.row ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(st.row.path))}</strong>` : '<span class="muted small">Choose what you need</span>';
+      T('#rq-next').disabled = rows.length > 0 && !st.row;
+    };
+    if (rows.length) mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { onChoose(id, row); paint(); } });
+    paint();
+    T('#rq-next').onclick = detailStep;
+  };
+  const detailStep = () => {
+    T('#rq-title').textContent = 'Request details';
+    T('#rq-sub').textContent = '';
+    T('#rq-body').innerHTML = panelHtml(st.row, false);
+    T('#rq-foot').innerHTML = `<div class="sheet-actions" style="margin-top:0"><button type="button" class="btn" id="rq-back">${rows.length ? 'Back' : 'Cancel'}</button><button type="submit" form="f" class="btn primary" id="go">${icon('send')} Send to IT</button></div>`;
+    T('#rq-back').onclick = rows.length ? pickStep : close;
+    const ch = T('#rq-change'); if (ch) ch.onclick = pickStep;
+    wirePanel();
+  };
+
+  if (split) splitScreen(); else if (rows.length) pickStep(); else detailStep();
 }
+
 async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) {
   const { el, close } = sheet(`<h2>${esc(title)}</h2>
     <div class="row" style="margin:12px 0 0"><div class="search grow">${icon('search')}<input id="ap-q" placeholder="Search available assets" autocomplete="off"></div><button class="btn" id="ap-scan" type="button">${icon('scan')}</button></div>
@@ -1483,33 +1523,84 @@ async function viewSettings() {
 }
 
 // ============================================================ admin: equipment catalog
-// An expandable nested list (not a graphical editor). Everything about one entry — rename, add below it, move, archive/restore,
-// delete when nothing refers to it — is in that entry's "Manage" sheet, which also reads out its full path.
+// An explorer, not a settings list. Clicking an entry INSPECTS it: its child entries and the physical assets filed under it
+// (the entry itself and everything below). Structural edits — add below, rename, move, archive/restore, delete when unused —
+// live behind the explicit "Manage" button. Wide screens show the tree and the selected entry's contents side by side;
+// on a phone, selecting an entry drills into its contents (with a Back button) instead of scrolling a long page.
 async function viewCatalog() {
   S.catOpen = S.catOpen || new Set();
-  const st = { rows: [], archived: false };
+  const st = { rows: [], archived: false, sel: S.catSel ?? null, assets: null, token: 0 };
   main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><button class="btn primary" id="addroot">${icon('plus')} Add category</button></div>
-    <div class="stack">
-      <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Each category can have its own levels — brands, models, operating systems, mounts — whatever suits it. Archive an entry to hide it from new requests without losing history.</p>
-      <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
-      <div class="card" id="tree"><div class="spinner"></div></div>
+    <div class="ct-wrap" id="ctw">
+      <div class="ct-side stack">
+        <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Click a category to see what is inside it; use <strong>Manage</strong> to change the structure. Archive an entry to hide it from new requests without losing history.</p>
+        <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
+        <div class="card" id="tree"><div class="spinner"></div></div>
+      </div>
+      <section class="ct-detail card" id="detail" aria-live="polite"></section>
     </div>`;
-  const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
   const byId = (id) => st.rows.find((r) => r.id === id);
+  const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
+  const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : '');
   const rowHtml = (r, depth) => {
     const ch = kids(r.id); const open = S.catOpen.has(r.id);
-    return `<li><div class="ct-row${r.live ? '' : ' off'}" style="--d:${Math.min(depth, 7)}">
+    return `<li><div class="ct-row${r.live ? '' : ' off'}${st.sel === r.id ? ' sel' : ''}" style="--d:${Math.min(depth, 7)}">
         <button type="button" class="ct-toggle${ch.length ? '' : ' none'}${open ? ' open' : ''}" data-toggle="${r.id}" aria-label="${open ? 'Collapse' : 'Expand'} ${esc(r.name)}" ${ch.length ? '' : 'tabindex="-1" aria-hidden="true"'}>${icon('chev')}</button>
-        <button type="button" class="ct-name" data-toggle="${r.id}"><span class="truncate">${esc(r.name)}</span>${r.archived_at ? ' <span class="pill plain">Archived</span>' : !r.live ? ' <span class="pill plain">Hidden</span>' : ''}</button>
-        <span class="ct-count small muted">${r.asset_count ? `${r.asset_count} asset${r.asset_count === 1 ? '' : 's'}` : ''}</span>
+        <button type="button" class="ct-name" data-select="${r.id}" ${st.sel === r.id ? 'aria-current="true"' : ''}><span class="truncate">${esc(r.name)}</span>${r.archived_at ? ' <span class="pill plain">Archived</span>' : !r.live ? ' <span class="pill plain">Hidden</span>' : ''}</button>
+        <span class="ct-count small muted">${countText(r.asset_count)}</span>
         <button type="button" class="btn sm" data-manage="${r.id}" aria-label="Manage ${esc(r.name)}">${icon('edit')}<span class="desk-only-inline">Manage</span></button></div>
       ${ch.length && open ? `<ul class="ct-tree">${ch.map((c) => rowHtml(c, depth + 1)).join('')}</ul>` : ''}</li>`;
   };
-  const render = () => {
+  const renderTree = () => {
     const roots = kids(null);
     $('#tree').innerHTML = roots.length ? `<ul class="ct-tree ct-root">${roots.map((r) => rowHtml(r, 0)).join('')}</ul>` : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`;
   };
-  const reload = async () => { st.rows = await api('GET', '/api/catalog?include_archived=1'); render(); };
+  const assetRow = (a, node) => {
+    const below = a.catalog_node_id !== node.id && a.catalog_path;
+    const rel = below ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
+    const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
+    return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+      <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+  };
+  const renderDetail = () => {
+    const box = $('#detail'); const n = byId(st.sel);
+    $('#ctw').classList.toggle('has-sel', !!n);
+    if (!n) { box.innerHTML = `<div class="empty">${icon('tag')}<p>Select a category to see its entries and the assets filed under it.</p></div>`; return; }
+    const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
+    const ch = kids(n.id);
+    const list = st.assets;
+    const direct = list ? list.filter((a) => a.catalog_node_id === n.id).length : 0;
+    box.innerHTML = `<div class="ct-dhead"><button type="button" class="btn sm ct-up" data-up aria-label="Back">${icon('back')}<span>Back</span></button>
+        <nav class="cc-crumbs" aria-label="Path"><button type="button" data-crumb="-1">All categories</button>${chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 ? 'cur' : ''}">${esc(c.name)}</button>`).join('')}</nav>
+        <button type="button" class="btn sm" data-manage="${n.id}">${icon('edit')} Manage</button></div>
+      ${n.live ? '' : '<div class="small muted" style="padding:0 16px 8px">Not visible to employees.</div>'}
+      <h3 class="ct-h">Child categories <span class="muted">${ch.length}</span></h3>
+      ${ch.length ? `<ul class="list">${ch.map((c) => `<li><button type="button" class="item ct-child" data-select="${c.id}"><div class="grow"><div class="title truncate">${esc(c.name)}${c.archived_at ? ' <span class="pill plain">Archived</span>' : ''}</div><div class="sub">${c.child_count ? `${c.child_count} ${c.child_count === 1 ? 'entry' : 'entries'} below · ` : ''}${countText(c.asset_count) || 'No assets'}</div></div>${icon('chev', 'chev')}</button></li>`).join('')}</ul>` : '<p class="muted small ct-empty">No entries below this one.</p>'}
+      <h3 class="ct-h">Assets <span class="muted">${list ? list.length : ''}</span></h3>
+      ${list === null ? '<div class="spinner"></div>' : list.length ? `<p class="small muted ct-empty" style="margin-top:0">${direct ? `${direct} filed directly here` : 'None filed directly here'}${list.length - direct ? ` · ${list.length - direct} further down` : ''}</p><ul class="list">${list.map((a) => assetRow(a, n)).join('')}</ul>` : '<p class="muted small ct-empty">No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.</p>'}`;
+  };
+  const loadAssets = async () => {
+    const mine = ++st.token; const id = st.sel;
+    st.assets = null; renderDetail();
+    if (!id) return;
+    try {
+      const list = await api('GET', `/api/assets?catalog_node=${id}`);
+      if (mine !== st.token) return;
+      st.assets = list.sort((a, b) => String(a.catalog_path || '').localeCompare(String(b.catalog_path || '')) || a.name.localeCompare(b.name));
+    } catch (e) { if (mine !== st.token) return; st.assets = []; fail(e); }
+    renderDetail();
+  };
+  const select = (id) => {
+    st.sel = id; S.catSel = id;
+    if (id) { for (let x = byId(id); x && x.parent_id !== null; x = byId(x.parent_id)) S.catOpen.add(x.parent_id); if (kids(id).length) S.catOpen.add(id); }
+    renderTree(); loadAssets();
+    if (id && window.matchMedia('(max-width: 899px)').matches) window.scrollTo(0, 0);
+  };
+  const reload = async () => {
+    st.rows = await api('GET', '/api/catalog?include_archived=1');
+    if (st.sel && !byId(st.sel)) { st.sel = null; S.catSel = null; }
+    renderTree(); await loadAssets();
+  };
   const nameSheet = ({ title, text, label, value = '', okLabel, onOk }) => {
     const { el, close } = sheet(`<h2>${esc(title)}</h2>${text ? `<p class="muted small" style="margin-top:0">${esc(text)}</p>` : ''}
       <form class="form-grid" id="f"><label class="field"><span>${esc(label)}</span><input name="name" required maxlength="100" value="${esc(value)}" autocomplete="off"></label>
@@ -1519,10 +1610,10 @@ async function viewCatalog() {
   };
   const manage = (id) => {
     const r = byId(id); if (!r) return;
-    const inUse = r.child_count > 0 || r.asset_count > 0 || r.request_count > 0;
+    const inUse = r.child_count > 0 || r.direct_asset_count > 0 || r.request_count > 0;
     const { el, close } = sheet(`<h2>${esc(r.name)}</h2>
       <div class="ct-path small"><span class="muted">Full path</span><div><strong>${esc(crumbText(r.path))}</strong></div>${r.live ? '' : '<div class="muted">Not visible to employees.</div>'}</div>
-      <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.asset_count} asset${r.asset_count === 1 ? '' : 's'} filed here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
+      <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.direct_asset_count} asset${r.direct_asset_count === 1 ? '' : 's'} filed directly here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
       <div class="stack">
         <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add an entry below “${esc(r.name)}”</button>
         <button type="button" class="btn lg block" data-act="rename">${icon('edit')} Rename</button>
@@ -1551,13 +1642,19 @@ async function viewCatalog() {
     el.onclick = (e) => { const b = e.target.closest('[data-act]'); if (b) Promise.resolve(act[b.dataset.act]()).catch(fail); };
   };
   $('#addroot').onclick = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
-  $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
+  $('#showarch').onchange = (e) => { st.archived = e.target.checked; renderTree(); renderDetail(); };
+  // Row click inspects (select + expand); the chevron only expands/collapses; Manage is the only way into editing.
   $('#tree').onclick = (e) => {
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
-    const t = e.target.closest('[data-toggle]'); if (!t) return;
-    const id = Number(t.dataset.toggle); if (!kids(id).length) return manage(id);
-    if (S.catOpen.has(id)) S.catOpen.delete(id); else S.catOpen.add(id);
-    render();
+    const t = e.target.closest('[data-toggle]');
+    if (t) { const id = Number(t.dataset.toggle); if (S.catOpen.has(id)) S.catOpen.delete(id); else S.catOpen.add(id); return renderTree(); }
+    const sel = e.target.closest('[data-select]'); if (sel) select(Number(sel.dataset.select));
+  };
+  $('#detail').onclick = (e) => {
+    const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
+    const up = e.target.closest('[data-up]'); if (up) return select((byId(st.sel) || {}).parent_id ?? null);
+    const crumb = e.target.closest('[data-crumb]'); if (crumb) return select(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
+    const sel = e.target.closest('[data-select]'); if (sel) select(Number(sel.dataset.select));
   };
   await reload();
 }

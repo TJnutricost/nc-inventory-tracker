@@ -162,7 +162,7 @@ test('employees can read the live catalog but cannot create, rename, move, archi
   assert.equal(read.status, 200);
   assert.ok(read.body.find((n) => n.id === t.a7.id));
   const sample = read.body.find((n) => n.id === t.a7.id);
-  for (const k of ['archived_at', 'asset_count', 'request_count', 'live']) assert.ok(!(k in sample), `employee payload must not carry ${k}`);
+  for (const k of ['archived_at', 'asset_count', 'direct_asset_count', 'request_count', 'live']) assert.ok(!(k in sample), `employee payload must not carry ${k}`);
   assert.equal((await emp.client.get('/api/catalog?include_archived=1')).body.length, read.body.length, 'include_archived is ignored for employees');
   assert.equal((await emp.client.post('/api/catalog', { name: 'Hack' })).status, 403);
   assert.equal((await emp.client.put(`/api/catalog/${t.sony.id}`, { name: 'Hack' })).status, 403);
@@ -189,6 +189,21 @@ test('an admin assigns an asset to a catalog node; the path shows and the catego
   assert.equal((await admin.put(`/api/assets/${asset.id}`, { catalog_node_id: null })).body.catalog_node_id, null);
   assert.equal(db.prepare('SELECT category FROM assets WHERE id = ?').get(asset.id).category, t.camera.name, 'unlinking keeps the existing category text');
   assert.ok(count("SELECT COUNT(*) c FROM activity WHERE asset_id = ? AND action = 'edited' AND details LIKE '%catalog%'", asset.id) >= 1);
+});
+
+test('an asset created without a catalog entry is filed under its category\'s root; an unknown category is not invented', async () => {
+  const laptop = rootId('Laptop');
+  const a = await newAsset('Plain Laptop', { category: 'laptop' });
+  assert.equal(a.catalog_node_id, laptop, 'matched ignoring case');
+  assert.equal(a.category, 'Laptop');
+  const odd = await newAsset('Strange Thing', { category: 'Zebra Equipment' });
+  assert.equal(odd.catalog_node_id, null, 'no root named that, so no link is made up');
+  assert.equal(odd.category, 'Zebra Equipment');
+  const viaCsv = await admin.rawPost('/api/import/assets', { headers: { 'Content-Type': 'text/csv', 'X-Requested-With': 'fetch' }, body: 'tag,name,category\nCSV-ROOT-1,Imported Monitor,monitor' });
+  assert.equal(viaCsv.body.created, 1, viaCsv.text);
+  assert.equal(db.prepare('SELECT catalog_node_id n FROM assets WHERE tag = ?').get('CSV-ROOT-1').n, rootId('Monitor'));
+  const listed = (await admin.get(`/api/assets?catalog_node=${laptop}`)).body.map((x) => x.id);
+  assert.ok(listed.includes(a.id), 'so it shows up when the Laptop category is opened');
 });
 
 test('assets can only be linked to real, active nodes; an employee cannot assign', async () => {
@@ -253,6 +268,60 @@ test('available counts per node cover the employee\'s subtree and exclude held a
   assert.equal(adm[t.a7.id], 1, 'checked-out assets are not available for anyone');
 });
 
+// ---------------------------------------------------------------- admin explorer: contents of a selected node
+test('admin: selecting a leaf lists its own assets; a parent lists everything beneath it; counts equal what is listed', async () => {
+  const t = await cameraTree('ex');
+  const a1 = await newAsset('Explorer A7 #1', { catalog_node_id: t.a7.id });
+  const a2 = await newAsset('Explorer A7 #2', { catalog_node_id: t.a7.id });
+  const r5 = await newAsset('Explorer R5', { catalog_node_id: t.r5.id });
+  const direct = await newAsset('Explorer Loose Camera', { catalog_node_id: t.camera.id });
+  const gone = await newAsset('Explorer Archived A7', { catalog_node_id: t.a7.id });
+  await admin.post(`/api/assets/${gone.id}/archive`, {});
+  const idsOf = async (node) => (await admin.get(`/api/assets?catalog_node=${node}`)).body.map((a) => a.id).sort((x, y) => x - y);
+
+  assert.deepEqual(await idsOf(t.a7.id), [a1.id, a2.id].sort((x, y) => x - y), 'a leaf shows exactly its own physical assets');
+  assert.deepEqual(await idsOf(t.sony.id), [a1.id, a2.id].sort((x, y) => x - y), 'a branch shows what is filed beneath it');
+  assert.deepEqual(await idsOf(t.camera.id), [a1.id, a2.id, r5.id, direct.id].sort((x, y) => x - y), 'a category shows its own assets plus every descendant\'s');
+  const listed = (await admin.get(`/api/assets?catalog_node=${t.camera.id}`)).body;
+  assert.ok(listed.every((a) => a.catalog_path && a.catalog_path.startsWith(t.camera.name)), 'each row carries its catalog path for disambiguation');
+  assert.ok(listed.every((a) => a.tag && a.status && 'location' in a && 'model' in a), 'and the fields the explorer shows');
+
+  const nodes = (await admin.get('/api/catalog?include_archived=1')).body;
+  for (const n of nodes) {
+    const shown = (await admin.get(`/api/assets?catalog_node=${n.id}`)).body.length;
+    assert.equal(n.asset_count, shown, `count for "${n.path}" must equal the assets the explorer lists`);
+  }
+  const by = (id) => nodes.find((n) => n.id === id);
+  assert.equal(by(t.a7.id).asset_count, 2, 'the archived asset is neither counted nor listed');
+  assert.equal(by(t.a7.id).direct_asset_count, 3, 'but it still blocks deleting the entry');
+  assert.equal(by(t.camera.id).asset_count, 4);
+  assert.equal(by(t.camera.id).direct_asset_count, 1);
+  assert.equal(by(t.canon.id).asset_count, 1);
+});
+
+test('admin catalog contents and counts are admin-only; an employee cannot reach admin figures or archived entries', async () => {
+  const t = await cameraTree('ex2');
+  await newAsset('Hidden Count Camera', { catalog_node_id: t.a7.id });
+  const emp = await makeLogin('Curious Employee');
+  const seen = (await emp.client.get('/api/catalog')).body.find((n) => n.id === t.a7.id);
+  assert.ok(!('asset_count' in seen) && !('direct_asset_count' in seen) && !('request_count' in seen));
+  assert.equal(seen.available_count, 1, 'the only figure an employee gets is what they could actually get');
+  await admin.post(`/api/catalog/${t.sony.id}/archive`, {});
+  assert.equal((await emp.client.get(`/api/assets?catalog_node=${t.sony.id}`)).status, 404);
+  assert.equal((await emp.client.get('/api/catalog?include_archived=1')).body.some((n) => n.id === t.sony.id), false);
+  assert.equal((await makeClient(server).get(`/api/assets?catalog_node=${t.camera.id}`)).status, 401);
+});
+
+test('Manage operations still work after the explorer change: add, rename, move, archive, restore, delete', async () => {
+  const root = await node('Manage Root'); const other = await node('Manage Other');
+  const child = await node('Child', root.id);
+  assert.equal((await admin.put(`/api/catalog/${child.id}`, { name: 'Renamed Child' })).body.name, 'Renamed Child');
+  assert.equal((await admin.put(`/api/catalog/${child.id}`, { parent_id: other.id })).body.path, 'Manage Other > Renamed Child');
+  assert.equal((await admin.post(`/api/catalog/${child.id}/archive`, {})).body.live, false);
+  assert.equal((await admin.post(`/api/catalog/${child.id}/restore`, {})).body.live, true);
+  assert.equal((await admin.del(`/api/catalog/${child.id}`)).status, 200);
+});
+
 // ---------------------------------------------------------------- employee requests against the catalog
 test('an employee requests a broad node: "any matching", with a path snapshot and the root as the category', async () => {
   const t = await cameraTree('rq1');
@@ -287,6 +356,22 @@ test('an employee requests a deeper model node, optionally with a specific avail
   // …but not under a different branch
   const wrong = await emp.client.post('/api/requests', { catalog_node_id: t.canon.id, asset_id: a1.id });
   assert.equal(wrong.status, 400);
+});
+
+test('stopping at a parent node: any matching, or a specific asset several levels below it', async () => {
+  const t = await cameraTree('par');
+  const a = await newAsset('Deep A7', { catalog_node_id: t.a7.id });
+  const emp = await makeLogin('Parent Stopper');
+  const any = await emp.client.post('/api/requests', { catalog_node_id: t.camera.id });
+  assert.equal(any.status, 200);
+  assert.equal(any.body.catalog_path, t.camera.name);
+  assert.equal(any.body.asset_id, null);
+  const specific = await emp.client.post('/api/requests', { catalog_node_id: t.camera.id, asset_id: a.id });
+  assert.equal(specific.status, 200, JSON.stringify(specific.body));
+  assert.equal(specific.body.catalog_path, t.camera.name, 'the request records the level the employee stopped at');
+  assert.equal(specific.body.asset_label, `${a.tag} — Deep A7`);
+  const offered = (await emp.client.get(`/api/assets?catalog_node=${t.camera.id}`)).body.map((x) => x.id);
+  assert.deepEqual(offered, [a.id], 'the parent-level specific list covers descendants');
 });
 
 test('a specific asset held by someone else, unavailable, archived or already mine cannot be requested through the selector', async () => {
@@ -448,7 +533,7 @@ test('CSV export carries a readable catalog_path column at the END, and import m
   assert.equal(get('CT-NEW-1').n, t.r5.id);
   assert.equal(get('CT-NEW-1').c, t.camera.name);
   assert.equal(get('CT-NEW-2').n, null, 'an unmatched path is reported, not guessed');
-  assert.equal(get('CT-NEW-3').n, null);
+  assert.equal(get('CT-NEW-3').n, rootId('Other'), 'no path and no category: filed under the default category, like a manual create');
 });
 
 // ---------------------------------------------------------------- migration 11 on an existing database

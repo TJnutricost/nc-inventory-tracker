@@ -529,7 +529,9 @@ app.post('/api/assets', admin, (req, res) => {
   if (!v.name) throw httpError(400, 'Give the asset a name');
   v.category = v.category || 'Other';
   v.condition = v.condition || 'Good';
-  const nodeId = resolveAssetNode(req.body, null);
+  // No entry chosen: file the asset under the live top-level category its category text names (the same rule the migration
+  // applied to existing assets), so a category's contents are complete. An unknown category is left unlinked — never invented.
+  const nodeId = resolveAssetNode(req.body, null) ?? catalog.findLiveByPath(db, v.category);
   if (nodeId !== null) v.category = catalog.rootOf(db, nodeId).name; // the category text always follows the catalog root
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
   const cols = ['tag', 'status', 'serial_normalized', 'catalog_node_id', ...ASSET_FIELDS];
@@ -741,7 +743,11 @@ app.get('/api/catalog', auth, (req, res) => {
   for (const r of db.prepare(`SELECT a.catalog_node_id id, COUNT(*) c FROM assets a WHERE a.archived_at IS NULL AND a.status = 'available' AND a.catalog_node_id IS NOT NULL ${heldByMe(req.user)} GROUP BY a.catalog_node_id`)
     .all(...(req.user.employee_id ? [req.user.employee_id] : []))) direct.set(r.id, r.c);
   const availableIn = (id) => catalog.subtreeIds(db, id).filter((i) => isAdmin || catalog.isLive(db, i)).reduce((n, i) => n + (direct.get(i) || 0), 0);
+  // Admin counts. asset_count = non-archived assets filed at the entry OR anywhere below it — exactly what
+  // GET /api/assets?catalog_node=ID lists for an admin, so the number and the visible contents always agree.
+  // direct_asset_count = assets filed at this very entry, archived ones included — what blocks a delete.
   const adminCounts = isAdmin ? {
+    active: new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM assets WHERE archived_at IS NULL AND catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c])),
     assets: new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM assets WHERE catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c])),
     requests: new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM requests WHERE catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c])),
   } : null;
@@ -752,7 +758,7 @@ app.get('/api/catalog', auth, (req, res) => {
     const kids = (children.get(n.id) || []).filter((i) => isAdmin ? (withArchived || catalog.isLive(db, i)) : catalog.isLive(db, i));
     out.push({
       id: n.id, parent_id: n.parent_id, name: n.name, path: catalog.pathText(db, n.id), child_count: kids.length, available_count: availableIn(n.id),
-      ...(isAdmin ? { archived_at: n.archived_at, live, asset_count: adminCounts.assets.get(n.id) || 0, request_count: adminCounts.requests.get(n.id) || 0 } : {}),
+      ...(isAdmin ? { archived_at: n.archived_at, live, asset_count: catalog.subtreeIds(db, n.id).reduce((t, i) => t + (adminCounts.active.get(i) || 0), 0), direct_asset_count: adminCounts.assets.get(n.id) || 0, request_count: adminCounts.requests.get(n.id) || 0 } : {}),
     });
   }
   res.json(out);
@@ -1145,6 +1151,8 @@ app.post('/api/import/assets', admin, (req, res) => {
         const cols = ['tag', 'serial_normalized', ...ASSET_FIELDS];
         id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
         log(id, req.user.account_id, 'created', 'Imported from CSV'); created++;
+        const home = clean(o.catalog_path) ? null : catalog.findLiveByPath(db, v.category); // same default as a manual create (the category's root), unless the row named a path
+        if (home) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(home, catalog.rootOf(db, home).name, id);
       }
       // catalog_path ("Laptop > Mac > MacBook Air") must match an active entry exactly (ignoring case/spacing); otherwise the
       // row is still imported but the link is left alone and the row is reported — nothing is guessed.

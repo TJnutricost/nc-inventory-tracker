@@ -363,8 +363,8 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cc-row.on .chev { color: var(--brand-accent); }
 @media (min-width: 700px) {
   .cc-back { display: none; }
-  .cc-cols { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; height: 340px; }
-  .cc-col { display: block !important; flex: 0 0 220px; border: 0; border-right: 1px solid var(--line); border-radius: 0; overflow-y: auto; }
+  .cc-cols { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; max-height: 420px; width: max-content; max-width: 100%; }
+  .cc-col { display: block !important; flex: 0 0 210px; border: 0; border-right: 1px solid var(--line); border-radius: 0; overflow-y: auto; }
   .cc-col:last-child { border-right: 0; }
   .cc-row { min-height: 48px; padding: 9px 12px; }
   .cc-meta { display: none; }
@@ -388,3 +388,36 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .desk-only-inline { display: none; }
 @media (min-width: 700px) { .desk-only-inline { display: inline; margin-left: 6px; } }
 .rq [hidden], .cat-pick [hidden] { display: none !important; }
+
+/* ---- employee request, wide screens: columns on the left, the request form in the space on the right (one screen) ---- */
+@media (min-width: 900px) {
+  .sheet.tall.split { max-width: 1080px !important; }
+  .rq-split { display: flex; align-items: flex-start; gap: 18px; }
+  .rq-left { flex: 0 1 auto; min-width: 0; max-width: 62%; }
+  .rq-right { flex: 1 1 320px; min-width: 300px; border-left: 1px solid var(--line); padding-left: 18px; }
+  .rq-hint { color: var(--muted); font-size: 14px; padding: 18px 4px; }
+}
+/* ---- admin catalog explorer ---- */
+.ct-wrap { display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr); }
+.ct-side, .ct-detail { min-width: 0; }
+.ct-detail { padding-bottom: 8px; overflow-x: hidden; }
+.ct-dhead { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.ct-dhead .cc-crumbs { flex: 1; min-width: 160px; }
+.ct-dhead .ct-up { display: inline-flex; align-items: center; gap: 2px; }
+.ct-dhead .ct-up svg { width: 16px; height: 16px; }
+.ct-h { margin: 14px 16px 6px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.ct-h .muted { font-weight: 500; }
+.ct-empty { margin: 4px 16px 10px; }
+.ct-child { width: 100%; background: transparent; border: 0; font: inherit; color: inherit; text-align: left; cursor: pointer; }
+.ct-child:hover { background: var(--surface-2); }
+.ct-row.sel { background: var(--brand-accent-soft); }
+.ct-row.sel .ct-name { color: var(--brand-accent); }
+@media (max-width: 899px) {
+  .ct-wrap:not(.has-sel) .ct-detail { display: none; }
+  .ct-wrap.has-sel .ct-side { display: none; }
+}
+@media (min-width: 900px) {
+  .ct-wrap { grid-template-columns: minmax(300px, 380px) 1fr; align-items: start; }
+  .ct-detail { position: sticky; top: calc(var(--topbar-h, 56px) + 16px); max-height: calc(100vh - var(--topbar-h, 56px) - 40px); overflow: auto; }
+  .ct-dhead .ct-up { display: none; }
+}
