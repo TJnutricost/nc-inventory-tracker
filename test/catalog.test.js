@@ -626,8 +626,9 @@ test('on a brand-new database migration 11 seeds the built-in category list as r
 // (A string-level guard, like the other front-end wiring tests: there is no browser in the suite. Behavior is checked in a real browser.)
 test('front end: asset pages carry their origin (known sources only) and the catalog title is the current entry', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'app.js'), 'utf8');
-  assert.match(src, /SRC_BY_ROLE = \{ admin: \['assets', 'catalog', 'requests', 'home'\], employee: \['browse', 'equipment', 'history', 'requests', 'home'\] \}/, 'only known sources, per role');
-  for (const s of ["srcQ('assets')", "srcQ('catalog'", "srcQ('browse'", "srcQ('equipment')", "srcQ('history')", "srcQ('requests'"]) assert.ok(src.includes(s), `a list that opens assets must tag its origin: ${s}`);
+  assert.match(src, /SRC_BY_ROLE = \{ admin: \['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity'\], employee: \['browse', 'equipment', 'history', 'requests', 'home', 'scan'\] \}/, 'only known sources, per role');
+  for (const s of ["srcQ('assets')", "srcQ('catalog'", "srcQ('browse'", "srcQ('equipment')", "srcQ('history')", "srcQ('requests'", "srcQ('scan')", "srcQ('person'", "'activity')", "returnBanners(d.mine, 'home')", "returnBanners(d.mine, 'equipment')"]) assert.ok(src.includes(s), `a list that opens assets must tag its origin: ${s}`);
+  assert.ok(src.includes('label: virtual ? `All in ${n.name}` : n.name'), 'back from a virtual "All in" view says so');
   assert.ok(src.includes("$('#pagetitle').textContent = n ? n.name : 'Equipment catalog'"), 'catalog title = the real current entry');
   assert.ok(!/history\.back\(\)[^;]*assetBackTarget/.test(src), 'the asset Back target is not browser history');
 });

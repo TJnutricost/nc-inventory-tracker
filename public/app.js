@@ -214,17 +214,17 @@ function openScanner({ title = 'Scan a barcode', hint = 'Point the camera at the
   return { close: stop };
 }
 
-async function handleScannedCode(code) {
+async function handleScannedCode(code, ctx = '') { // ctx: where the asset page should say it came from (the Scan page passes srcQ('scan'))
   try {
     const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
-    if (r.found) return go('#/asset/' + r.id);
+    if (r.found) return go('#/asset/' + r.id + ctx);
     if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
     if (isAdmin()) {
       const { el, close } = sheet(`<h2>New barcode</h2><p class="muted">No asset uses <strong class="mono">${esc(code)}</strong> yet. Want to tag a new asset with it?</p>
         <div class="stack" style="margin-top:16px"><button class="btn primary lg block" id="mk">${icon('plus')} Add a new asset with this tag</button>
         <button class="btn block" id="again">${icon('scan')} Scan again</button></div>`);
       $('#mk', el).onclick = () => { close(); go('#/new?tag=' + encodeURIComponent(code)); };
-      $('#again', el).onclick = () => { close(); openScanner({ onResult: handleScannedCode }); };
+      $('#again', el).onclick = () => { close(); openScanner({ onResult: (c) => handleScannedCode(c, ctx) }); };
     } else toast(`No asset found for ${code}`, true);
   } catch (e) { fail(e); }
 }
@@ -313,29 +313,36 @@ const backLink = (href, label = 'Back', exact = false) => `<a class="back" href=
 // page's "‹ Back" can name and return to exactly where the person came from — without relying on browser history, which stays
 // free to do its own thing. Only known source types and numeric node ids are accepted; the label shown is derived from real app
 // data (a catalog node's stored name), never from query text. No source (a scan, a typed URL, an old link) = the old fallback.
-const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home'], employee: ['browse', 'equipment', 'history', 'requests', 'home'] };
+const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity'], employee: ['browse', 'equipment', 'history', 'requests', 'home', 'scan'] };
 const srcQ = (src, extra = {}) => `?src=${src}${Object.entries(extra).filter(([, v]) => v).map(([k, v]) => `&${k}=${v === true ? 1 : encodeURIComponent(v)}`).join('')}`;
 function assetCtx() {
   const p = qs(); const src = p.get('src');
   if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
-  const node = Number(p.get('node'));
-  return { src, node: Number.isInteger(node) && node > 0 ? node : null, all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null };
+  const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null };
 }
-const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, all: c.all, tab: c.tab }) : ''; }; // carried on to the edit form and back
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, tab: c.tab }) : ''; }; // carried on to the edit form and back
 async function assetBackTarget() {
   const c = assetCtx();
   const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
   if (!c) return fallback;
-  const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'] };
+  const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'], scan: ['#/scan', 'Scan'], activity: ['#/activity', 'Activity log'] };
   if (fixed[c.src]) return { href: fixed[c.src][0], label: fixed[c.src][1], exact: true };
   if (c.src === 'requests') return { href: `#/requests${c.tab ? '?tab=' + c.tab : ''}`, label: 'Requests', exact: true };
+  if (c.src === 'person') { // an admin's employee page: back to that person, labelled with their real name
+    if (!c.id) return { href: '#/people', label: 'People', exact: true };
+    try { const u = (await api('GET', '/api/users/' + c.id)).user; return { href: `#/person/${c.id}`, label: u.name, exact: true }; } catch { return { href: '#/people', label: 'People', exact: true }; }
+  }
   // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
-  const root = c.src === 'catalog' ? { href: '#/catalog', label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: 'Browse equipment' };
+  const root = c.src === 'catalog' ? { href: '#/catalog', label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
   if (!c.node) return { ...root, exact: true };
   let rows = []; try { rows = await api('GET', '/api/catalog' + (c.src === 'catalog' ? '?include_archived=1' : '')); } catch { /* fall back to the root */ }
   const n = rows.find((r) => r.id === c.node);
   if (!n) return { ...root, exact: true };
-  return { href: `${c.src === 'catalog' ? '#/catalog' : '#/assets'}?node=${n.id}${c.src === 'catalog' && c.all ? '&all=1' : ''}`, label: n.name, exact: true };
+  // Opened from a virtual "All in <name>" view (admin catalog &all=1; employee Browse, where an entry with children always shows its
+  // whole branch): say so. The URL is the same real-entry route — "All in" is never a stored entry.
+  const virtual = c.src === 'catalog' ? c.all : n.child_count > 0;
+  return { href: `${c.src === 'catalog' ? '#/catalog' : '#/assets'}?node=${n.id}${c.src === 'catalog' && c.all ? '&all=1' : ''}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
 }
 
 // ============================================================ router
@@ -462,14 +469,14 @@ function myEquipmentList(mine) {
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
 }
 // Open return requests on the employee's own equipment: ones IT asked for (warning) and ones the employee started (info).
-function returnBanners(mine) {
+function returnBanners(mine, src = '') { // src: which screen shows the banner, so "View item" can say where it came from
   return mine.filter((m) => m.return_status === 'open').map((m) => m.return_self ? `
     <div class="banner info">${icon('in')}<div class="grow"><strong>You asked to return ${esc(m.asset_name)}</strong>
       <div class="small">Bring it to IT, then tap “I've dropped it off”. It stays assigned to you until IT checks it in.</div>
       <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><button class="btn sm" data-withdraw="${m.return_request_id}">Cancel return request</button></div></div></div>` : `
     <div class="banner warn">${icon('alert')}<div class="grow"><strong>IT asked you to return ${esc(m.asset_name)}</strong>
       <div class="small">${m.return_by ? `Please return by ${fmtDate(m.return_by)}. ` : ''}${m.return_message ? esc(m.return_message) : ''}</div>
-      <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><a class="btn sm" href="#/asset/${m.asset_id}">View item</a></div></div></div>`).join('');
+      <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><a class="btn sm" href="#/asset/${m.asset_id}${src ? srcQ(src) : ''}">View item</a></div></div></div>`).join('');
 }
 function wireDropoffs(root) {
   $$('[data-dropoff]', root).forEach((b) => b.onclick = () => busy(b, async () => {
@@ -497,7 +504,7 @@ async function viewHome() {
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   if (!isAdmin()) {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
-      <div class="stack">${returnBanners(d.mine)}
+      <div class="stack">${returnBanners(d.mine, 'home')}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
       ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
@@ -511,7 +518,7 @@ async function viewHome() {
   main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1><a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a></div>
     <div class="stack">
     ${!S.mailConfigured ? `<div class="banner info">${icon('mail')}<div class="grow small"><strong>Email notifications are not set up yet.</strong> Emails are being saved to the outbox instead. <a href="#/settings">Set up Gmail →</a></div></div>` : ''}
-    ${returnBanners(d.mine)}
+    ${returnBanners(d.mine, 'home')}
     <div class="grid stats">
       <a class="card stat" href="#/assets?status=active"><div class="n">${s.total}</div><div class="l">Active assets</div></a>
       <a class="card stat" href="#/assets?status=available"><div class="n">${s.available}</div><div class="l">Available</div></a>
@@ -536,14 +543,14 @@ async function viewHome() {
     </div>
     ${d.expiring.length ? `<div class="card"><div class="card-head"><h2>Expiring in 60 days</h2></div><ul class="list">${d.expiring.map((a) => `<li><a class="item" href="#/asset/${a.id}${srcQ('home')}"><div class="thumb">${icon(catIcon(a.category))}</div><div class="grow"><div class="title truncate">${esc(a.name)}</div><div class="sub">${a.license_expires ? `License expires ${fmtDate(a.license_expires)}` : ''}${a.license_expires && a.warranty_expires ? ' · ' : ''}${a.warranty_expires ? `Warranty ends ${fmtDate(a.warranty_expires)}` : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>` : ''}
     ${d.mine.length ? `<div class="card"><div class="card-head"><h2>My equipment</h2></div>${myEquipmentList(d.mine)}</div>` : ''}
-    <div class="card"><div class="card-head"><h2>Recent activity</h2><a href="#/activity" class="small">See all</a></div>${activityList(d.activity, true)}</div>
+    <div class="card"><div class="card-head"><h2>Recent activity</h2><a href="#/activity" class="small">See all</a></div>${activityList(d.activity, true, 'home')}</div>
     </div>`;
   wireDropoffs(main());
 }
 const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved' };
-function activityList(rows, withAsset) {
+function activityList(rows, withAsset, src = '') {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
-  return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
+  return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}${src ? srcQ(src) : ''}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
     <div class="small muted">${esc(r.details || '')}</div><div class="small muted">${esc(r.actor_name || 'System')} · ${fmtWhen(r.created_at)}</div></div></li>`).join('')}</ul>`;
 }
 
@@ -1335,6 +1342,7 @@ async function viewAssetForm(id) {
 
 // ============================================================ scan
 function viewScan() {
+  const scanned = (c) => handleScannedCode(c, srcQ('scan'));
   main().innerHTML = `<div class="page-head"><h1>Scan</h1></div>
     <div class="stack">
       <button class="card pad" id="go" style="width:100%;border:0;cursor:pointer;text-align:center;padding:36px 16px;background:var(--brand-ink);color:#fff">
@@ -1344,10 +1352,10 @@ function viewScan() {
         <div class="input-group"><input id="code" placeholder="Scan or type a tag / serial" autocomplete="off" autocapitalize="characters" enterkeyhint="go" class="mono"><button class="btn primary">Find</button></div></label></form></div>
       <p class="small muted" style="text-align:center">${isAdmin() ? 'Scanning a barcode that isn’t in the system yet lets you tag a new asset with it.' : 'Scan any tagged item to see it, check it out or request it.'}</p>
     </div>`;
-  $('#go').onclick = () => openScanner({ onResult: handleScannedCode });
-  $('#m').onsubmit = (e) => { e.preventDefault(); const v = $('#code').value.trim(); if (v) handleScannedCode(v); };
+  $('#go').onclick = () => openScanner({ onResult: scanned });
+  $('#m').onsubmit = (e) => { e.preventDefault(); const v = $('#code').value.trim(); if (v) scanned(v); };
   if (window.matchMedia('(min-width: 900px)').matches) $('#code').focus();
-  else if (!S.silent && !$('.scanner')) openScanner({ onResult: handleScannedCode }); // phones: jump straight into the camera
+  else if (!S.silent && !$('.scanner')) openScanner({ onResult: scanned }); // phones: jump straight into the camera
 }
 
 // ============================================================ requests
@@ -1525,9 +1533,9 @@ async function viewPerson(id) {
         <button type="button" class="btn sm toggle ${u.can_self_checkout ? 'on' : ''}" id="selfco" aria-pressed="${u.can_self_checkout ? 'true' : 'false'}" title="Click to ${u.can_self_checkout ? 'turn off' : 'turn on'}">${icon(u.can_self_checkout ? 'check' : 'x')} Self-checkout ${u.can_self_checkout ? 'enabled' : 'disabled'}</button>
         ${u.id !== S.me.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" id="toggle">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</div></div>
     <div class="section-title">Has now (${d.current.length})</div>
-    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtStamp(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
+    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('person', { id })}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtStamp(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
       ${u.active ? `<div class="card-body" style="border-top:1px solid var(--line)"><button class="btn block" id="give">${icon('out')} Check out something to ${esc(u.name.split(' ')[0])}</button></div>` : ''}</div>
-    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
+    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('person', { id })}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
   $('#edit').onclick = () => personSheet(u, () => route(true));
   const gl = $('#give-login');
   if (gl) gl.onclick = () => {
@@ -1626,7 +1634,7 @@ function viewImport() {
 // ============================================================ activity
 async function viewActivity() {
   const rows = await api('GET', '/api/activity?limit=300');
-  main().innerHTML = `<div class="page-head"><h1>Activity log</h1></div><div class="card">${activityList(rows, true)}</div>`;
+  main().innerHTML = `<div class="page-head"><h1>Activity log</h1></div><div class="card">${activityList(rows, true, 'activity')}</div>`;
 }
 
 // ============================================================ settings
@@ -1846,7 +1854,7 @@ async function viewEquipment() {
       <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a>${holdingActions(m)}</li>`;
   const group = (title, rows, empty, iconName) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${rows.length} item${rows.length === 1 ? '' : 's'}</span></div>
     ${rows.length ? `<ul class="list">${rows.join('')}</ul>` : `<div class="empty">${icon(iconName)}<p>${empty}</p></div>`}</div>`;
-  main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine)}
+  main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine, 'equipment')}
     ${group('Permanent assignments', perm.map((m) => row(m, `Assigned since ${esc(fmtStamp(m.checked_out_at))}`, flag(m) || pill('checked_out', 'Assigned'))), 'No equipment is permanently assigned to you.', 'laptop')}
     ${group('Temporary checkouts', temp.map((m) => row(m, `Checked out ${esc(fmtStamp(m.checked_out_at))} · return by ${esc(fmtDate(m.due_date))}${m.due_time ? ' ' + esc(fmtClock(m.due_time)) : ''}`, flag(m))), 'You have nothing checked out temporarily.', 'out')}
     <p class="small muted" style="text-align:center">Looking for something else? <a href="#/assets">Browse equipment</a> · <a href="#/history">History</a></p></div>`;
