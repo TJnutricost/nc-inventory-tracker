@@ -11,6 +11,7 @@ const { db, DATA_DIR, getSettings, setSetting } = require('./db');
 const { notify, APP_URL, mailConfigured } = require('./mailer');
 const assignments = require('./assignments');
 const requestRules = require('./requests');
+const catalog = require('./catalog');
 const { cleanSerial, serialKey } = require('./serial');
 
 const app = express();
@@ -173,9 +174,20 @@ function allocateTag() { // call only inside a transaction
   }
 }
 
+// Adds the readable catalog path to an asset row. An employee never learns about a catalog entry that is archived (or sits
+// under an archived one): for them it is as if the asset were unmapped.
+function withCatalog(a, user) {
+  if (!('catalog_node_id' in a)) return a;
+  const id = a.catalog_node_id;
+  if (id === null || id === undefined) return { ...a, catalog_path: null };
+  if (user.role !== 'admin' && !catalog.isLive(db, id)) return { ...a, catalog_node_id: null, catalog_path: null };
+  return { ...a, catalog_path: catalog.pathText(db, id) };
+}
+
 // Fields a non-admin should not see
 function sanitizeAsset(a, user) {
   if (!a) return a;
+  a = withCatalog(a, user);
   if (user.role === 'admin') return a;
   const mine = db.prepare('SELECT due_date FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
   const { purchase_cost, vendor, notes, holder_names, ...rest } = a; // never other people's names
@@ -425,6 +437,14 @@ app.get('/api/assets', auth, (req, res) => {
     const like = `%${q}%`; params.push(like, like, like, like, like, like); if (isAdmin) params.push(like);
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
+  if (req.query.catalog_node !== undefined && req.query.catalog_node !== '') {
+    // Everything filed under a catalog entry or any of its descendants. Employees can only drill into live entries, and
+    // only live descendants count for them (an archived sub-entry is invisible to them).
+    const nodeId = Number(req.query.catalog_node);
+    if (!Number.isInteger(nodeId) || !catalog.loadIndex(db).nodes.has(nodeId) || (!isAdmin && !catalog.isLive(db, nodeId))) throw httpError(404, 'Catalog entry not found');
+    const ids = catalog.subtreeIds(db, nodeId).filter((i) => isAdmin || catalog.isLive(db, i));
+    where.push(`a.catalog_node_id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
+  }
   if (status === 'overdue') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < date('now'))`); }
   else if (status === 'active') { where.push(`a.status NOT IN ('retired','lost','disposed')`); }
   else if (status) { where.push('a.status = ?'); params.push(status); }
@@ -492,13 +512,27 @@ function assetValues(body) {
   return v;
 }
 
+// The catalog entry for an asset write. Not in the body => unchanged. null/'' => unlinked. Otherwise it must be a live entry
+// (an asset keeps its current entry even if that has since been archived, so editing other fields still works).
+function resolveAssetNode(body, current) {
+  if (!('catalog_node_id' in body)) return current ?? null;
+  const raw = body.catalog_node_id;
+  if (raw === null || raw === '') return null;
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id < 1 || !catalog.loadIndex(db).nodes.has(id)) throw httpError(400, 'Choose a valid catalog entry');
+  if (id !== (current ?? null) && !catalog.isLive(db, id)) throw httpError(400, 'That catalog entry is archived. Choose an active one.');
+  return id;
+}
+
 app.post('/api/assets', admin, (req, res) => {
   const v = assetValues(req.body);
   if (!v.name) throw httpError(400, 'Give the asset a name');
   v.category = v.category || 'Other';
   v.condition = v.condition || 'Good';
+  const nodeId = resolveAssetNode(req.body, null);
+  if (nodeId !== null) v.category = catalog.rootOf(db, nodeId).name; // the category text always follows the catalog root
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
-  const cols = ['tag', 'status', 'serial_normalized', ...ASSET_FIELDS];
+  const cols = ['tag', 'status', 'serial_normalized', 'catalog_node_id', ...ASSET_FIELDS];
   // Number claim + insert are one transaction: a failed create rolls the counter back, and two creates can't share a tag.
   const create = db.transaction(() => {
     const tag = clean(req.body.tag) || allocateTag();
@@ -506,7 +540,7 @@ app.post('/api/assets', admin, (req, res) => {
     if (used) throw httpError(400, used.archived_at ? `Tag ${tag} belongs to an archived asset and can't be reused` : `Tag ${tag} is already used by another asset`);
     assertSerialFree(v.serial);
     const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
-      .run(tag, status, serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f]));
+      .run(tag, status, serialKey(v.serial), nodeId, ...ASSET_FIELDS.map((f) => v[f]));
     log(info.lastInsertRowid, req.user.account_id, 'created', `${tag} · ${v.name}`);
     return info.lastInsertRowid;
   });
@@ -518,6 +552,8 @@ app.put('/api/assets/:id', admin, (req, res) => {
   if (!a) throw httpError(404, 'Asset not found');
   if (a.archived_at) throw httpError(400, 'This asset is archived and can\'t be edited.');
   const v = assetValues({ ...a, ...req.body });
+  const nodeId = resolveAssetNode(req.body, a.catalog_node_id);
+  if (nodeId !== null) v.category = catalog.rootOf(db, nodeId).name;
   // Asset tags are immutable once created (a case-only difference is ignored). No retag workflow exists yet.
   const sentTag = clean(req.body.tag);
   if (sentTag && sentTag.toLowerCase() !== a.tag.toLowerCase()) throw httpError(400, "An asset's tag can't be changed once it's created.");
@@ -536,10 +572,11 @@ app.put('/api/assets/:id', admin, (req, res) => {
   }
   db.transaction(() => {
     assertSerialFree(v.serial, a.id);
-    db.prepare(`UPDATE assets SET tag = ?, status = ?, serial_normalized = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
-      .run(tag, status, serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f]), a.id);
+    db.prepare(`UPDATE assets SET tag = ?, status = ?, serial_normalized = ?, catalog_node_id = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(tag, status, serialKey(v.serial), nodeId, ...ASSET_FIELDS.map((f) => v[f]), a.id);
   }).immediate();
   const changed = ['tag', 'status', ...ASSET_FIELDS].filter((f) => String((f === 'tag' ? tag : f === 'status' ? status : v[f]) ?? '') !== String(a[f] ?? ''));
+  if ((a.catalog_node_id ?? null) !== nodeId) changed.push('catalog');
   if (changed.length) log(a.id, req.user.account_id, 'edited', changed.filter((f) => f !== 'license_key').join(', ') || 'license key');
   refreshStatus(a.id);
   res.json(getAsset(a.id));
@@ -690,6 +727,57 @@ app.use('/uploads', (req, res, next) => {
   next();
 }, express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
 
+// ---------- equipment catalog ----------
+// One tree, one API, for every screen (phone drill-down, desktop columns, the asset form, the admin editor).
+// Employees get only LIVE entries (not archived, no archived ancestor) and no admin-only counts; admins can ask for everything.
+const heldByMe = (user) => (user.employee_id ? 'AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)' : '');
+app.get('/api/catalog', auth, (req, res) => {
+  const isAdmin = req.user.role === 'admin';
+  const withArchived = isAdmin && req.query.include_archived === '1';
+  const { nodes, children } = catalog.loadIndex(db);
+  // Per entry: assets filed directly under it that this viewer could get right now (the Browse contract: available, not
+  // archived, not already theirs), then rolled up through the ancestors so a broad entry shows its whole subtree's count.
+  const direct = new Map();
+  for (const r of db.prepare(`SELECT a.catalog_node_id id, COUNT(*) c FROM assets a WHERE a.archived_at IS NULL AND a.status = 'available' AND a.catalog_node_id IS NOT NULL ${heldByMe(req.user)} GROUP BY a.catalog_node_id`)
+    .all(...(req.user.employee_id ? [req.user.employee_id] : []))) direct.set(r.id, r.c);
+  const availableIn = (id) => catalog.subtreeIds(db, id).filter((i) => isAdmin || catalog.isLive(db, i)).reduce((n, i) => n + (direct.get(i) || 0), 0);
+  const adminCounts = isAdmin ? {
+    assets: new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM assets WHERE catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c])),
+    requests: new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM requests WHERE catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c])),
+  } : null;
+  const out = [];
+  for (const n of nodes.values()) {
+    const live = catalog.isLive(db, n.id);
+    if (!live && !withArchived) continue;
+    const kids = (children.get(n.id) || []).filter((i) => isAdmin ? (withArchived || catalog.isLive(db, i)) : catalog.isLive(db, i));
+    out.push({
+      id: n.id, parent_id: n.parent_id, name: n.name, path: catalog.pathText(db, n.id), child_count: kids.length, available_count: availableIn(n.id),
+      ...(isAdmin ? { archived_at: n.archived_at, live, asset_count: adminCounts.assets.get(n.id) || 0, request_count: adminCounts.requests.get(n.id) || 0 } : {}),
+    });
+  }
+  res.json(out);
+});
+// Keeps assets.category (kept for display/filters/import) equal to the name of the root of the entry they are filed under,
+// after a rename or move. History is never touched: requests keep the path text they were made with.
+function syncAssetCategories(nodeId) {
+  const upd = db.prepare('UPDATE assets SET category = ? WHERE catalog_node_id = ? AND category <> ?');
+  for (const id of catalog.subtreeIds(db, nodeId)) { const root = catalog.rootOf(db, id).name; upd.run(root, id, root); }
+}
+const catalogOut = (id) => { const n = catalog.getNode(db, id); return { id: n.id, parent_id: n.parent_id, name: n.name, path: catalog.pathText(db, n.id), archived_at: n.archived_at, live: catalog.isLive(db, n.id), ...catalog.usage(db, n.id) }; };
+app.post('/api/catalog', admin, (req, res) => {
+  const parentId = catalog.parseParent(req.body.parent_id);
+  const id = db.transaction(() => catalog.createNode(db, { name: req.body.name, parentId: parentId ?? null })).immediate();
+  res.json(catalogOut(id));
+});
+app.put('/api/catalog/:id', admin, (req, res) => {
+  const id = Number(req.params.id);
+  db.transaction(() => { catalog.updateNode(db, id, { name: req.body.name, parentId: catalog.parseParent(req.body.parent_id) }); syncAssetCategories(id); }).immediate();
+  res.json(catalogOut(id));
+});
+app.post('/api/catalog/:id/archive', admin, (req, res) => { const id = Number(req.params.id); catalog.archiveNode(db, id); res.json(catalogOut(id)); });
+app.post('/api/catalog/:id/restore', admin, (req, res) => { const id = Number(req.params.id); catalog.restoreNode(db, id); res.json(catalogOut(id)); });
+app.delete('/api/catalog/:id', admin, (req, res) => { catalog.deleteNode(db, Number(req.params.id)); res.json({ ok: true }); });
+
 // ---------- requests ----------
 app.get('/api/requests', auth, (req, res) => {
   const where = []; const params = [];
@@ -713,9 +801,14 @@ app.get('/api/requests', auth, (req, res) => {
   res.json(rows.map((r) => ({ ...r, can_cancel: requestRules.LIVE.includes(r.status) && !cancelBlock(r, req.user) })));
 });
 app.post('/api/requests', auth, (req, res) => {
-  const category = clean(req.body.category);
+  let category = clean(req.body.category);
   const message = clean(req.body.message);
-  if (!category && !message) throw httpError(400, 'Tell IT what you need');
+  let nodeId = null; // what was asked for in the catalog (any level); asset_id set as well => a specific item, else "any matching"
+  if (req.body.catalog_node_id !== undefined && req.body.catalog_node_id !== null && req.body.catalog_node_id !== '') {
+    nodeId = Number(req.body.catalog_node_id);
+    if (!Number.isInteger(nodeId) || nodeId < 1 || !catalog.isLive(db, nodeId)) throw httpError(400, 'Choose equipment from the catalog list');
+  }
+  if (!category && !message && nodeId === null) throw httpError(400, 'Tell IT what you need');
   const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.employee_id;
   if (forUser === null) throw httpError(400, "Your login isn't linked to an employee record. Choose who the request is for.");
   const assetId = num(req.body.asset_id);
@@ -730,11 +823,23 @@ app.post('/api/requests', auth, (req, res) => {
   const wanted = assetId === null ? null : getAsset(assetId);
   if (assetId !== null && (!wanted || !canViewAsset(req.user, wanted))) throw httpError(404, 'Asset not found'); // an employee can only ask for equipment they can see
   if (wanted && wanted.archived_at) throw httpError(400, 'This asset is archived and can\'t be requested.');
+  if (wanted && nodeId !== null) {
+    // A specific item picked under a catalog selection: it must really be filed under that entry, and an employee may only
+    // pick what they could get anyway (available, not archived, not theirs already) — never something someone else holds.
+    if (req.user.role !== 'admin' && (wanted.status !== 'available' || db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(wanted.id, forUser))) throw httpError(404, 'Asset not found');
+    if (!catalog.subtreeIds(db, nodeId).includes(wanted.catalog_node_id)) throw httpError(400, "That item isn't part of the equipment you chose.");
+  } else if (wanted && wanted.catalog_node_id && catalog.isLive(db, wanted.catalog_node_id)) {
+    nodeId = wanted.catalog_node_id; // asked for one particular item (e.g. from its page): record where it sits in the catalog
+  }
+  // Snapshots, so the request still reads the same after a rename, a move or an asset edit.
+  const catalogPath = nodeId !== null ? catalog.pathText(db, nodeId) : null;
+  if (nodeId !== null) category = catalog.rootOf(db, nodeId).name;
+  const assetLabel = wanted ? `${wanted.tag} — ${wanted.name}` : null;
   // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
-  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?)")
-    .run(forUser, assetId, category || (wantedType === 'permanent' ? wanted.category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType);
+  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type, catalog_node_id, catalog_path, asset_label) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(forUser, assetId, category || (wantedType === 'permanent' ? wanted.category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType, nodeId, catalogPath, assetLabel);
   const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-  if (assetId) log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
+  if (assetId) log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || catalogPath || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
   notify.equipmentRequested(getPerson(forUser), r);
   res.json(r);
 });
@@ -981,7 +1086,8 @@ app.get('/api/activity', admin, (req, res) => {
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) || /^[=+\-@]/.test(s) ? `"${(/^[=+\-@]/.test(s) ? "'" : '') + s.replace(/"/g, '""')}"` : s; };
 app.get('/api/export/assets.csv', admin, (req, res) => {
   const rows = db.prepare(`${ASSET_LIST_SQL} WHERE a.archived_at IS NULL ORDER BY a.tag`).all();
-  const cols = ['tag', 'name', 'category', 'status', 'holder_names', 'due_date', 'brand', 'model', 'serial', 'condition', 'location', 'purchase_date', 'purchase_cost', 'vendor', 'warranty_expires', 'license_seats', 'seats_used', 'license_expires', 'notes'];
+  const cols = ['tag', 'name', 'category', 'status', 'holder_names', 'due_date', 'brand', 'model', 'serial', 'condition', 'location', 'purchase_date', 'purchase_cost', 'vendor', 'warranty_expires', 'license_seats', 'seats_used', 'license_expires', 'notes', 'catalog_path'];
+  for (const r of rows) r.catalog_path = r.catalog_node_id ? catalog.pathText(db, r.catalog_node_id) : '';
   const csv = [cols.join(',')].concat(rows.map((r) => cols.map((c) => csvCell(r[c])).join(','))).join('\r\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="nutricost-assets-${today()}.csv"`);
@@ -1009,7 +1115,7 @@ app.post('/api/import/assets', admin, (req, res) => {
   const rows = parseCsv(String(req.body || ''));
   if (rows.length < 2) throw httpError(400, 'The file needs a header row and at least one asset');
   const header = rows[0].map((h) => h.trim().toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, ''));
-  const alias = { asset_tag: 'tag', serial_number: 'serial', s_n: 'serial', type: 'category', manufacturer: 'brand', cost: 'purchase_cost', price: 'purchase_cost', warranty: 'warranty_expires', seats: 'license_seats', assigned_to: 'assigned_email', email: 'assigned_email' };
+  const alias = { asset_tag: 'tag', serial_number: 'serial', s_n: 'serial', type: 'category', manufacturer: 'brand', cost: 'purchase_cost', price: 'purchase_cost', warranty: 'warranty_expires', seats: 'license_seats', assigned_to: 'assigned_email', email: 'assigned_email', catalog: 'catalog_path' };
   const keys = header.map((h) => alias[h] || h);
   let created = 0, updated = 0; const errors = [];
   // assigned_email matches an active employee by work email (or their login email); no login is needed to receive equipment.
@@ -1039,6 +1145,14 @@ app.post('/api/import/assets', admin, (req, res) => {
         const cols = ['tag', 'serial_normalized', ...ASSET_FIELDS];
         id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
         log(id, req.user.account_id, 'created', 'Imported from CSV'); created++;
+      }
+      // catalog_path ("Laptop > Mac > MacBook Air") must match an active entry exactly (ignoring case/spacing); otherwise the
+      // row is still imported but the link is left alone and the row is reported — nothing is guessed.
+      const cpath = clean(o.catalog_path);
+      if (cpath) {
+        const nid = catalog.findLiveByPath(db, cpath);
+        if (nid) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(nid, catalog.rootOf(db, nid).name, id);
+        else errors.push(`Row ${idx + 2}: catalog path “${cpath}” doesn't match an active catalog entry — imported without a catalog link`);
       }
       const em = clean(o.assigned_email)?.toLowerCase();
       if (em && users.has(em) && !openAssignments(id).length) {

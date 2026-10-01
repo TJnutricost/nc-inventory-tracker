@@ -54,7 +54,7 @@ Emails are saved to **Settings → Outbox** until SMTP is configured, so everyth
 
 ## Development dataset (seed)
 
-For local development you don't have to add data by hand. `npm run seed:dev` wipes and rebuilds an **isolated** database at `./data-dev` (never touches the real `./data`) with 9 people, 48 realistic assets (tags `NC-00001`–`NC-00048`), and a mix of current/past assignments, requests and activity history.
+For local development you don't have to add data by hand. `npm run seed:dev` wipes and rebuilds an **isolated** database at `./data-dev` (never touches the real `./data`) with 9 people, 55 realistic assets (tags `NC-00001`–`NC-00055`), a demonstration **equipment catalog** (Laptop › Mac › MacBook Air › M2, Camera › Sony › A7 IV, …), and a mix of current/past assignments, requests and activity history.
 
 ```bash
 npm run seed:dev

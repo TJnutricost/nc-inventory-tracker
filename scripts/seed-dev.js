@@ -84,6 +84,42 @@ const ASSET_GROUPS = [
   { category: 'Other', cost: 900, vendor: 'B&H Photo', items: [
     ['Sony', 'a6400 Camera Body'], ['Rode', 'NT-USB Mic + Tripod Kit'],
   ] },
+  // Appended last so every earlier asset keeps its tag. These two groups exist to demonstrate the hierarchical catalog.
+  { category: 'Camera', cost: 2500, vendor: 'B&H Photo', items: [
+    ['Sony', 'A7 IV'], ['Sony', 'A7 IV'], ['Sony', 'FX3'], ['Canon', 'R5'], ['Nikon', 'Z8'],
+  ] },
+  { category: 'Lens', cost: 2100, vendor: 'B&H Photo', items: [
+    ['Sony', '24-70mm GM II'], ['Canon', 'RF 24-70mm F2.8'],
+  ] },
+];
+
+// The demonstration equipment catalog, built through the real API. Each category has its OWN shape: Laptop goes
+// Mac/Windows > family/brand > model, Camera and Monitor go brand > model, Lens goes mount > lens. The migration already
+// created the standard roots (Laptop, Desktop, Monitor …); Camera and Lens are added here. A model's key is
+// 'Category|Brand|Model' as in the asset data; assets with no key (e.g. the HP EliteBook) stay filed at the category root,
+// which is how existing assets look before IT maps them. Keys with a leaf listed here are linked on creation.
+const CATALOG = [
+  ['Laptop', [
+    ['Mac', [['MacBook Air', [['M2', 'Laptop|Apple|MacBook Air M2']]], ['MacBook Pro', [['14"', 'Laptop|Apple|MacBook Pro 14"']]]]],
+    ['Windows', [['Dell', [['Latitude 5440', 'Laptop|Dell|Latitude 5440']]], ['Lenovo', [['ThinkPad T14', 'Laptop|Lenovo|ThinkPad T14']]]]],
+  ]],
+  ['Desktop', [
+    ['Dell', [['OptiPlex 7010', 'Desktop|Dell|OptiPlex 7010']]],
+    ['Apple', [['Mac Mini M2', 'Desktop|Apple|Mac Mini M2']]],
+  ]],
+  ['Monitor', [
+    ['Dell', [['P2422H', 'Monitor|Dell|P2422H']]],
+    ['LG', [['27UL850-W', 'Monitor|LG|27UL850-W']]],
+  ]],
+  ['Camera', [
+    ['Sony', [['A7 IV', 'Camera|Sony|A7 IV'], ['FX3', 'Camera|Sony|FX3']]],
+    ['Canon', [['R5', 'Camera|Canon|R5']]],
+    ['Nikon', [['Z8', 'Camera|Nikon|Z8']]],
+  ]],
+  ['Lens', [
+    ['Sony E-Mount', [['24-70mm GM II', 'Lens|Sony|24-70mm GM II']]],
+    ['Canon RF', [['24-70mm F2.8', 'Lens|Canon|RF 24-70mm F2.8']]],
+  ]],
 ];
 const EXPECTED_ASSET_COUNT = ASSET_GROUPS.reduce((n, g) => n + g.items.length, 0);
 
@@ -252,13 +288,36 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
 
     const jules = await admin.post('/api/users', NO_LOGIN_EMPLOYEE);
 
+    // Catalog: walk CATALOG, creating nodes below the (migration-created) roots, and remember the node for each model key.
+    const existing = await admin.get('/api/catalog');
+    const nodeByKey = new Map(); const nodeByPath = new Map();
+    const build = async (entries, parentId, trail) => {
+      for (const [name, rest] of entries) {
+        if (typeof rest === 'string') {
+          const id = (await admin.post('/api/catalog', { name, parent_id: parentId })).id;
+          nodeByKey.set(rest, id); nodeByPath.set([...trail, name].join(' > '), id);
+        } else {
+          const id = (await admin.post('/api/catalog', { name, parent_id: parentId })).id;
+          nodeByPath.set([...trail, name].join(' > '), id);
+          await build(rest, id, [...trail, name]);
+        }
+      }
+    };
+    for (const [rootName, children] of CATALOG) {
+      const found = existing.find((n) => n.parent_id === null && n.name === rootName);
+      const rootId = found ? found.id : (await admin.post('/api/catalog', { name: rootName })).id;
+      nodeByPath.set(rootName, rootId);
+      await build(children, rootId, [rootName]);
+    }
+
     const defs = buildAssetDefs();
     if (defs.length !== EXPECTED_ASSET_COUNT) throw new Error(`Asset def count drifted: ${defs.length} vs ${EXPECTED_ASSET_COUNT}`);
     const special = applySpecialCases(defs);
 
     const idByDef = new Map();
     for (const def of defs) {
-      const created = await admin.post('/api/assets', def);
+      const nodeId = nodeByKey.get(`${def.category}|${def.brand}|${def.model}`);
+      const created = await admin.post('/api/assets', nodeId ? { ...def, catalog_node_id: nodeId } : def);
       idByDef.set(def, created);
     }
     const assetFor = (def) => idByDef.get(def);
@@ -291,6 +350,10 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
 
     await checkout(admin, assetFor(defs.find((d) => d.category === 'Keyboard & Mouse')), jules);
 
+    // One of the two Sony A7 IV bodies is out on loan, so the employee request flow has a held asset it must NOT offer.
+    const a7Bodies = defs.filter((d) => d.name === 'Sony A7 IV');
+    await checkout(admin, assetFor(a7Bodies[0]), casey, { assignment_type: 'checkout', due_date: '2026-12-01', notes: 'Event coverage' });
+
     await checkoutThenCheckin(admin, assetFor(special.availableOptiplex), harper, { condition: 'Good' });
 
     await admin.post('/api/requests', { user_id: emerson.id, category: 'Monitor', message: 'Need a second monitor for my desk.' });
@@ -299,6 +362,10 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     await admin.post(`/api/requests/${approvable.id}/approve`, { asset_id: assetFor(spareHeadset).id });
     const toDeny = await admin.post('/api/requests', { user_id: indigo.id, category: 'Other', message: 'Requesting a company drone.' });
     await admin.post(`/api/requests/${toDeny.id}/deny`, { note: 'Not a supported equipment category.' });
+
+    // Catalog requests: a broad "any matching" ask, and a request for one specific available item (the second A7 IV).
+    await admin.post('/api/requests', { user_id: casey.id, catalog_node_id: nodeByPath.get('Laptop > Mac'), message: 'Need a Mac laptop for design reviews; the exact model is flexible.' });
+    await admin.post('/api/requests', { user_id: gray.id, catalog_node_id: nodeByPath.get('Camera > Sony > A7 IV'), asset_id: assetFor(a7Bodies[1]).id, message: 'Booked for the product shoot — this body specifically.' });
 
     const macBookAirId = assetFor(special.assignedMacBookAir).id;
     await admin.post(`/api/assets/${macBookAirId}/request-return`, { message: 'Please return by end of quarter — reassigning to a new hire.' });
@@ -327,6 +394,10 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
       permanentAssignments: db.prepare("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'permanent'").get().c,
       temporaryCheckouts: db.prepare("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'checkout'").get().c,
       requests: db.prepare('SELECT COUNT(*) c FROM requests').get().c,
+      catalogNodes: db.prepare('SELECT COUNT(*) c FROM catalog_nodes').get().c,
+      catalogRoots: db.prepare('SELECT COUNT(*) c FROM catalog_nodes WHERE parent_id IS NULL').get().c,
+      assetsBelowCatalogRoot: db.prepare('SELECT COUNT(*) c FROM assets a JOIN catalog_nodes n ON n.id = a.catalog_node_id WHERE n.parent_id IS NOT NULL').get().c,
+      catalogRequests: db.prepare('SELECT COUNT(*) c FROM requests WHERE catalog_node_id IS NOT NULL').get().c,
       firstAssetTag: firstAsset && firstAsset.tag,
       nextTag: nextTag.tag,
       adminEmail: ADMIN.email,
@@ -351,7 +422,8 @@ if (require.main === module) {
       console.log(`  Historical assignments: ${s.historicalAssignments}`);
       console.log(`  Permanent / temporary:  ${s.permanentAssignments} / ${s.temporaryCheckouts}`);
       console.log(`  Self-checkout on/off:   ${s.selfCheckoutEnabled} / ${s.selfCheckoutDisabled} (logins; Harper Hughes is off)`);
-      console.log(`  Requests:               ${s.requests}`);
+      console.log(`  Requests:               ${s.requests} (${s.catalogRequests} against the catalog)`);
+      console.log(`  Equipment catalog:      ${s.catalogNodes} entries (${s.catalogRoots} categories), ${s.assetsBelowCatalogRoot} assets mapped below a category`);
       console.log('');
       console.log(`  Admin login:  ${s.adminEmail} / ${s.devPassword}`);
       console.log(`  All seeded accounts share that password.`);

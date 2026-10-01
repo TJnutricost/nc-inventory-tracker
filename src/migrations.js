@@ -615,5 +615,67 @@ module.exports = [
       }
     },
   },
+  {
+    // Phase 2 Slice 3 (Hierarchical Equipment Catalog): a generic parent/child tree of equipment types, admin-managed.
+    //   catalog_nodes   id, parent_id (NULL = root = a broad category), name, name_key (normalized for sibling uniqueness),
+    //                   archived_at (archive, never delete, once anything depends on a node), timestamps.
+    //                   Sibling names are unique ignoring case/whitespace INCLUDING archived siblings, so a restore can never
+    //                   collide. Cycles are prevented in src/catalog.js (a CHECK cannot see ancestors; it only blocks self-parent).
+    //   assets.catalog_node_id      optional link from a physical asset to its most specific node. category/brand/model stay.
+    //   requests.catalog_node_id    what was asked for (any level). Together with the two SNAPSHOT columns below it keeps a
+    //   requests.catalog_path       request readable after a rename/move: the path text as it was at request time, and for a
+    //   requests.asset_label        specific-asset request, "TAG — name" as it was then. asset_id set => specific asset;
+    //                               asset_id NULL + catalog_node_id set => any matching asset.
+    // Existing data: ONE root node per existing category (the settings category list, or the built-in defaults on a fresh
+    // database, plus any category text found on assets), and every asset is linked to the root matching its own category text.
+    // That is a lossless copy of what the data already says. Nothing deeper is inferred from brand/model (Apple is not "Mac",
+    // Dell is not "Windows"): IT maps assets to deeper nodes themselves. Existing requests are untouched (category text kept).
+    id: 11,
+    name: 'equipment catalog: catalog_nodes, asset and request links',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE catalog_nodes (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          parent_id INTEGER REFERENCES catalog_nodes(id) ON DELETE RESTRICT,
+          name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+          name_key TEXT NOT NULL CHECK (length(name_key) > 0),
+          archived_at TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (parent_id IS NULL OR parent_id <> id)
+        );
+        CREATE UNIQUE INDEX idx_catalog_sibling_name ON catalog_nodes(COALESCE(parent_id, 0), name_key);
+        CREATE INDEX idx_catalog_parent ON catalog_nodes(parent_id);
+        ALTER TABLE assets ADD COLUMN catalog_node_id INTEGER REFERENCES catalog_nodes(id) ON DELETE RESTRICT;
+        CREATE INDEX idx_assets_catalog ON assets(catalog_node_id);
+        ALTER TABLE requests ADD COLUMN catalog_node_id INTEGER REFERENCES catalog_nodes(id) ON DELETE RESTRICT;
+        ALTER TABLE requests ADD COLUMN catalog_path TEXT;
+        ALTER TABLE requests ADD COLUMN asset_label TEXT;
+        CREATE INDEX idx_requests_catalog ON requests(catalog_node_id);`);
+
+      const norm = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
+      const DEFAULT_CATEGORIES = ['Laptop', 'Desktop', 'Monitor', 'Keyboard & Mouse', 'Headset', 'Dock / Adapter', 'Phone', 'Tablet',
+        'Printer / Scanner', 'Networking', 'Appliance', 'Software License', 'Other'];
+      let configured = null;
+      try {
+        const row = db.prepare("SELECT value FROM settings WHERE key = 'categories'").get();
+        if (row) configured = JSON.parse(row.value);
+      } catch { /* a missing/odd settings row just means "use the defaults" */ }
+      const names = [...(Array.isArray(configured) ? configured : DEFAULT_CATEGORIES),
+        ...db.prepare('SELECT DISTINCT category FROM assets WHERE category IS NOT NULL ORDER BY category').all().map((r) => r.category)];
+      const ins = db.prepare('INSERT INTO catalog_nodes (parent_id, name, name_key) VALUES (NULL, ?, ?)');
+      const rootByKey = new Map();
+      for (const raw of names) {
+        const name = norm(raw); const key = name.toLowerCase();
+        if (!name || rootByKey.has(key)) continue;
+        rootByKey.set(key, ins.run(name, key).lastInsertRowid);
+      }
+      const link = db.prepare('UPDATE assets SET catalog_node_id = ? WHERE id = ?');
+      for (const a of db.prepare('SELECT id, category FROM assets').all()) {
+        const id = rootByKey.get(norm(a.category).toLowerCase());
+        if (id) link.run(id, a.id);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

@@ -249,6 +249,7 @@ function navItems() {
   ];
   if (isAdmin()) side.push({ sep: true },
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
+    { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
     { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
@@ -289,7 +290,7 @@ function mountShell() {
   S.shell = true;
 }
 function setActive(key) {
-  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
+  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'catalog', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
 }
 async function refreshBadge() {
   try {
@@ -323,6 +324,7 @@ const ROUTES = [
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
+  [/^#\/catalog$/, viewCatalog, { key: 'catalog', admin: true }],
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
   [/^#\/activity$/, viewActivity, { key: 'activity', admin: true }],
   [/^#\/settings$/, viewSettings, { key: 'settings', admin: true }],
@@ -459,7 +461,7 @@ async function viewHome() {
       <div class="stack">${returnBanners(d.mine)}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
-      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
     wireDropoffs(main());
@@ -482,7 +484,7 @@ async function viewHome() {
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
           ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
-            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
+            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'equipment'))}`}</div>
             <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}</a></li>`).join('')}
           ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
@@ -509,6 +511,7 @@ function activityList(rows, withAsset) {
 // ============================================================ assets list
 async function viewAssets() {
   const p = qs();
+  const roots = await rootNames();
   const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
   const statuses = isAdmin()
     ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
@@ -518,7 +521,7 @@ async function viewAssets() {
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
       ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
-      <select id="cat"><option value="">All categories</option>${S.settings.categories.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <div class="card" id="results"><div class="spinner"></div></div>
     </div>
     ${isAdmin() ? `<a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>` : ''}`;
@@ -601,7 +604,7 @@ async function viewAsset(id) {
   }
 
   const kv = [
-    ['Category', a.category], ['Brand', a.brand], ['Model', a.model], ['Serial #', a.serial ? `<span class="mono">${esc(a.serial)}</span>` : '', true],
+    ['Catalog', a.catalog_path ? esc(a.catalog_path.split(' > ').join(' › ')) : '', true], ['Category', a.category], ['Brand', a.brand], ['Model', a.model], ['Serial #', a.serial ? `<span class="mono">${esc(a.serial)}</span>` : '', true],
     ['Condition', a.condition], ['Location', a.location], ['Purchased', fmtDate(a.purchase_date)], ['Cost', admin ? money(a.purchase_cost) : ''],
     ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
@@ -706,10 +709,10 @@ function personPicker(container, users, onPick, selectedId) {
 }
 // Employees never create a permanent assignment directly: they ask IT. Shows the approval notice, and only on
 // "Send request" records a request (no assignment, no check-out). Resolves true when the request was sent.
-async function requestPermanentAssignment(asset, message) {
+async function requestPermanentAssignment(asset, message, catalogNodeId) {
   const ok = await confirmSheet('Permanent assignment requires approval', 'Permanent equipment assignments must be approved by IT.', 'Send request');
   if (!ok) return false;
-  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, message: message || undefined, requested_assignment_type: 'permanent' });
+  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, catalog_node_id: catalogNodeId || undefined, message: message || undefined, requested_assignment_type: 'permanent' });
   toast('Request sent to IT. Nothing is assigned until IT approves it.');
   refreshBadge();
   return true;
@@ -887,14 +890,16 @@ function reportIssueSheet(asset, done) {
     busy($('#go', el), async () => { await api('POST', `/api/assets/${asset.id}/report-issue`, Object.fromEntries(new FormData(e.target))); close(); toast('Issue sent to IT. You can follow it under Requests.'); refreshBadge(); done && done(); });
   };
 }
+// Request equipment. Picking ONE specific item (from its own page) keeps the simple sheet; everything else goes through the
+// catalog: choose a level, then "any matching" or one specific available item.
 function requestEquipmentSheet({ asset, category, forUser } = {}) {
-  const { el, close } = sheet(`<h2>${asset ? 'Request this item' : 'Request equipment'}</h2><p class="muted small" style="margin-top:0">IT will get an email and follow up with you.</p>
+  if (!asset) return requestFromCatalogSheet({ category, forUser });
+  const { el, close } = sheet(`<h2>Request this item</h2><p class="muted small" style="margin-top:0">IT will get an email and follow up with you.</p>
     <form class="form-grid" id="f">
-      ${asset ? `<input type="hidden" name="asset_id" value="${asset.id}"><input type="hidden" name="category" value="${esc(asset.category)}"><div class="holder">${icon(catIcon(asset.category))}<div><strong>${esc(asset.name)}</strong><div class="small muted mono">${esc(asset.tag)}</div></div></div>`
-        : `<label class="field"><span>What do you need?</span><select name="category" required><option value="">Choose…</option>${S.settings.categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`}
-      <label class="field"><span>Details</span><textarea name="message" placeholder="${asset ? 'Anything IT should know?' : 'e.g. Second monitor for my desk, USB-C if possible'}"></textarea></label>
+      <input type="hidden" name="asset_id" value="${asset.id}"><input type="hidden" name="category" value="${esc(asset.category)}"><div class="holder">${icon(catIcon(asset.category))}<div><strong>${esc(asset.name)}</strong><div class="small muted mono">${esc(asset.tag)}</div>${asset.catalog_path ? `<div class="small muted">${esc(asset.catalog_path.split(' > ').join(' › '))}</div>` : ''}</div></div>
+      <label class="field"><span>Details</span><textarea name="message" placeholder="Anything IT should know?"></textarea></label>
       <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
-      ${asset && !forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
+      ${!forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
     </form>`);
   $('#f', el).onsubmit = (e) => {
@@ -906,15 +911,154 @@ function requestEquipmentSheet({ asset, category, forUser } = {}) {
     busy($('#go', el), async () => { await api('POST', '/api/requests', fd); close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); });
   };
 }
-async function assetPickerSheet({ title, filterCategory, onPick }) {
+
+// ============================================================ equipment catalog (shared by every screen)
+// One tree and one API for phone and desktop. The tree is read whole (it is small) and cached only for the life of one screen.
+const getCatalog = () => api('GET', '/api/catalog');
+const rootNames = async () => { try { return (await getCatalog()).filter((n) => n.parent_id === null).map((n) => n.name); } catch { return S.settings.categories; } };
+const crumbText = (path) => String(path || '').split(' > ').join(' › ');
+
+// A drill-down chooser over the catalog. It is ONE implementation: it renders a column per level of the current path, and the
+// stylesheet decides the presentation — on a phone only the deepest level is shown (big touch rows, a Back button and a
+// breadcrumb); on a wide screen the levels sit side by side (Camera | Sony | A7 IV). Choosing a row selects that entry AND
+// opens its children, so a person can stop at any level. onChange(id|null, entryRow|null) fires on every choice.
+function mountCatalogChooser(root, rows, { value = null, onChange } = {}) {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const kids = new Map();
+  for (const r of rows) { const k = r.parent_id ?? 0; if (!kids.has(k)) kids.set(k, []); kids.get(k).push(r); }
+  let path = [];
+  for (let n = value && byId.get(value); n; n = byId.get(n.parent_id)) path.unshift(n.id);
+  const render = (fromUser) => {
+    const cols = [];
+    for (let k = 0; k <= path.length; k++) {
+      const list = kids.get(k === 0 ? 0 : path[k - 1]) || [];
+      if (list.length) cols.push({ k, list });
+    }
+    const names = path.map((id) => byId.get(id).name);
+    root.innerHTML = `<div class="cc">
+      <div class="cc-top"><button type="button" class="cc-back" data-back ${path.length ? '' : 'hidden'} aria-label="Back">${icon('back')}<span>Back</span></button>
+        <nav class="cc-crumbs" aria-label="Selected path"><button type="button" data-crumb="-1" class="${path.length ? '' : 'cur'}">All equipment</button>${names.map((n, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${i}" class="${i === names.length - 1 ? 'cur' : ''}">${esc(n)}</button>`).join('')}</nav></div>
+      <div class="cc-cols">${cols.map(({ k, list }, i) => `<div class="cc-col${i === cols.length - 1 ? ' cc-last' : ''}" role="group" aria-label="Level ${i + 1}">${list.map((r) => {
+        const has = r.child_count > 0; const on = path[k] === r.id;
+        return `<button type="button" class="cc-row${on ? ' on' : ''}" data-level="${k}" data-id="${r.id}" ${on ? 'aria-current="true"' : ''}><span class="cc-name">${esc(r.name)}</span><span class="cc-meta">${r.available_count ? `${r.available_count} available` : 'None available'}</span>${has ? icon('chev', 'chev') : (on ? icon('check', 'chev') : '')}</button>`;
+      }).join('')}</div>`).join('')}</div>
+    </div>`;
+    const colsEl = $('.cc-cols', root);
+    if (fromUser) { $$('.cc-col', root).forEach((c) => { c.scrollTop = 0; }); colsEl.scrollLeft = colsEl.scrollWidth; }
+  };
+  const emit = () => { const id = path[path.length - 1] ?? null; onChange && onChange(id, id ? byId.get(id) : null); };
+  root.onclick = (e) => {
+    const row = e.target.closest('.cc-row'); const crumb = e.target.closest('[data-crumb]'); const back = e.target.closest('[data-back]');
+    if (row) path = [...path.slice(0, Number(row.dataset.level)), Number(row.dataset.id)];
+    else if (crumb) path = path.slice(0, Number(crumb.dataset.crumb) + 1);
+    else if (back) path = path.slice(0, -1);
+    else return;
+    render(true); emit();
+  };
+  render(false);
+  if (path.length) emit(); // a pre-selected entry counts as chosen
+  return { get id() { return path[path.length - 1] ?? null; } };
+}
+
+// The employee request flow. Step 1 chooses a catalog level (any level). Step 2 says how specific the ask is — any matching
+// asset, or one particular available item under that choice — and sends it. The server re-checks everything.
+async function requestFromCatalogSheet({ category, forUser } = {}) {
+  let rows;
+  try { rows = await getCatalog(); } catch (e) { return fail(e); }
+  const startRoot = category && rows.find((r) => r.parent_id === null && r.name.toLowerCase() === String(category).toLowerCase());
+  const st = { id: startRoot ? startRoot.id : null, row: startRoot || null, scope: 'any', assetId: null, items: null };
+  const { el, close } = sheet(`<div class="rq"><div class="rq-head"><h2 id="rq-title"></h2><p class="muted small" id="rq-sub" style="margin:2px 0 0"></p></div><div class="rq-body" id="rq-body"></div><div class="rq-foot" id="rq-foot"></div></div>`, { wide: true });
+  el.classList.add('tall');
+  const T = (sel) => $(sel, el);
+  const done = () => { close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); };
+
+  const pickStep = () => {
+    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
+    T('#rq-sub').textContent = rows.length ? 'Start broad, then narrow down. You can stop at any level.' : '';
+    T('#rq-body').innerHTML = rows.length ? '<div id="cc-mount"></div>' : '<p class="muted">The equipment list is empty. Describe what you need on the next screen.</p>';
+    T('#rq-foot').innerHTML = `<div class="rq-sel" id="rq-sel"></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="rq-next">Continue</button></div>`;
+    const paint = () => {
+      const r = st.row;
+      T('#rq-sel').innerHTML = r ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(r.path))}</strong>` : '<span class="muted small">Choose what you need</span>';
+      T('#rq-next').disabled = rows.length > 0 && !r;
+    };
+    if (rows.length) mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { st.id = id; st.row = row; st.items = null; st.scope = 'any'; st.assetId = null; paint(); } });
+    paint();
+    T('#rq-next').onclick = detailStep;
+  };
+
+  const detailStep = async () => {
+    const r = st.row;
+    T('#rq-title').textContent = 'Request details';
+    T('#rq-sub').textContent = '';
+    T('#rq-body').innerHTML = `${r ? `<div class="rq-picked"><div class="grow"><div class="small muted">You are requesting</div><div class="rq-path">${esc(crumbText(r.path))}</div></div><button type="button" class="btn sm" id="rq-change">Change</button></div>` : ''}
+      <form class="form-grid" id="f" style="margin-top:14px">
+        ${r ? `<fieldset class="rq-scope"><legend>How specific?</legend>
+          <label class="rq-opt"><input type="radio" name="scope" value="any" checked><span><strong>Any matching asset</strong><br><span class="small muted">${r.available_count ? `${r.available_count} available right now. ` : 'None are free right now. '}IT will choose a suitable one.</span></span></label>
+          <label class="rq-opt" id="rq-spec-opt"><input type="radio" name="scope" value="specific" disabled><span><strong>A specific item</strong><br><span class="small muted" id="rq-spec-hint">Checking what is available…</span></span></label>
+          <div class="picker-list rq-items" id="rq-items" hidden></div></fieldset>`
+        : `<label class="field"><span>What do you need?</span><input name="category" required maxlength="120" placeholder="e.g. Second monitor, USB-C hub"></label>`}
+        <label class="field"><span>Details</span><textarea name="message" placeholder="e.g. Second monitor for my desk, USB-C if possible"></textarea></label>
+        <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
+        <label class="check" id="rq-perm" hidden><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>
+      </form>`;
+    T('#rq-foot').innerHTML = `<div class="sheet-actions" style="margin-top:0"><button type="button" class="btn" id="rq-back">${rows.length ? 'Back' : 'Cancel'}</button><button type="submit" form="f" class="btn primary" id="go">${icon('send')} Send to IT</button></div>`;
+    T('#rq-back').onclick = rows.length ? pickStep : close;
+    const ch = T('#rq-change'); if (ch) ch.onclick = pickStep;
+    const f = T('#f');
+    const syncScope = () => {
+      const specific = f.scope && f.scope.value === 'specific';
+      T('#rq-items').hidden = !specific;
+      const perm = T('#rq-perm'); if (perm) perm.hidden = !(specific && st.assetId && !forUser);
+      if (!specific) st.assetId = null;
+    };
+    if (r) {
+      f.addEventListener('change', (e) => {
+        if (e.target.name === 'scope') { syncScope(); if (e.target.value === 'specific' && !st.assetId && st.items && st.items.length) { const first = $('#rq-items button', el); if (first) first.focus(); } }
+      });
+      const paintItems = () => {
+        const box = T('#rq-items'); if (!box) return;
+        box.innerHTML = st.items.map((a) => `<button type="button" data-id="${a.id}" class="${st.assetId === a.id ? 'on' : ''}" aria-pressed="${st.assetId === a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span>${st.assetId === a.id ? icon('check') : ''}</button>`).join('');
+        syncScope();
+      };
+      T('#rq-items').onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; st.assetId = Number(b.dataset.id); paintItems(); };
+      try {
+        if (!st.items) st.items = (await api('GET', `/api/assets?catalog_node=${r.id}${isAdmin() ? '&status=available' : ''}`)).slice(0, 60);
+      } catch (e) { st.items = []; }
+      if (!T('#rq-spec-hint')) return; // the sheet was closed or moved on while loading
+      const hint = T('#rq-spec-hint'); const opt = T('#rq-spec-opt input');
+      if (st.items.length) { opt.disabled = false; hint.textContent = `Pick one of ${st.items.length === 60 ? '60+' : st.items.length} available`; paintItems(); }
+      else hint.textContent = 'No individual items are available to pick right now.';
+    }
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const fd = Object.fromEntries(new FormData(f));
+      const body = { message: fd.message, needed_by: fd.needed_by };
+      if (r) body.catalog_node_id = r.id; else body.category = fd.category;
+      if (forUser) body.user_id = forUser.id;
+      if (r && fd.scope === 'specific') {
+        if (!st.assetId) return toast('Choose which item you want, or pick “Any matching asset”.', true);
+        body.asset_id = st.assetId;
+      }
+      if (fd.permanent && body.asset_id) {
+        const a = st.items.find((x) => x.id === body.asset_id);
+        return busy(T('#go'), async () => { if (await requestPermanentAssignment(a, body.message, r.id)) { close(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); } });
+      }
+      busy(T('#go'), async () => { await api('POST', '/api/requests', body); done(); });
+    };
+  };
+
+  rows.length ? pickStep() : detailStep();
+}
+async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) {
   const { el, close } = sheet(`<h2>${esc(title)}</h2>
     <div class="row" style="margin:12px 0 0"><div class="search grow">${icon('search')}<input id="ap-q" placeholder="Search available assets" autocomplete="off"></div><button class="btn" id="ap-scan" type="button">${icon('scan')}</button></div>
     <div class="picker-list" id="ap-list"><div class="spinner"></div></div>
     <div class="sheet-actions"><button class="btn" data-close>Cancel</button></div>`);
   const load = async (q = '') => {
-    const u = new URLSearchParams({ status: 'available' }); if (q) u.set('q', q); else if (filterCategory) u.set('category', filterCategory);
-    let rows = await api('GET', '/api/assets?' + u);
-    if (!rows.length && filterCategory && !q) rows = await api('GET', '/api/assets?status=available');
+    const u = new URLSearchParams({ status: 'available' }); if (q) u.set('q', q); else if (catalogNode) u.set('catalog_node', catalogNode); else if (filterCategory) u.set('category', filterCategory);
+    let rows = await api('GET', '/api/assets?' + u).catch(() => []); // the requested catalog entry may have been archived since
+    if (!rows.length && (filterCategory || catalogNode) && !q) rows = await api('GET', '/api/assets?status=available');
     $('#ap-list', el).innerHTML = rows.length ? rows.map((a) => `<button data-id="${a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span> · ${esc(a.category)}${a.license_seats > 1 ? ` · ${a.license_seats - a.seats_used} seats free` : ''}</span></span></button>`).join('') : '<div class="empty small">No available assets match.</div>';
   };
   load();
@@ -932,13 +1076,17 @@ async function viewAssetForm(id) {
   let a = { category: S.settings.categories[0] || 'Other', condition: 'Good', tag: qs().get('tag') || '' };
   if (editing) a = (await api('GET', '/api/assets/' + id)).asset;
   const nextTag = editing ? null : (await api('GET', '/api/next-tag')).tag;
-  const cats = S.settings.categories.includes(a.category) ? S.settings.categories : [...S.settings.categories, a.category];
+  const rootList = await rootNames();
+  const cats = rootList.includes(a.category) ? rootList : [...rootList, a.category];
   const f = (name, label, attrs = '') => `<label class="field"><span>${label}</span><input name="${name}" value="${esc(a[name] ?? '')}" ${attrs}></label>`;
   main().innerHTML = `${backLink(editing ? '#/asset/' + id : '#/assets', 'Cancel')}
     <div class="page-head"><h1>${editing ? 'Edit asset' : 'Add an asset'}</h1></div>
     <form id="f" class="stack" autocomplete="off">
       <div class="card pad"><fieldset class="form-grid cols"><legend>The basics</legend>
         <label class="field full"><span>Name *</span><input name="name" required value="${esc(a.name || '')}" placeholder="e.g. Dell Latitude 7440"></label>
+        <label class="field full"><span>Equipment catalog</span><input type="hidden" name="catalog_node_id" id="cnode" value="${a.catalog_node_id || ''}">
+          <div class="cat-pick"><button type="button" class="btn grow cat-pick-btn" id="cpick">${icon('tag')}<span id="cpath">${a.catalog_path ? esc(crumbText(a.catalog_path)) : 'Not set — choose where this belongs'}</span></button><button type="button" class="btn" id="cclear" ${a.catalog_node_id ? '' : 'hidden'} aria-label="Clear catalog entry">${icon('x')}</button></div>
+          <span class="small muted">Pick the most specific entry that fits, e.g. Camera › Sony › A7 IV. The category follows the top level.</span></label>
         <label class="field"><span>Category</span><select name="category" id="cat">${cats.map((c) => `<option ${c === a.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
         ${editing
           ? `<label class="field"><span>Asset tag</span><input value="${esc(a.tag)}" class="mono" disabled title="Asset tags can't be changed once created"></label>`
@@ -965,6 +1113,24 @@ async function viewAssetForm(id) {
   const catSel = $('#cat');
   const toggleLic = () => { const show = catSel.value === 'Software License' || /license|software|subscription/i.test(catSel.value) || a.license_key || a.license_seats; $('#lic').classList.toggle('hidden', !show); };
   catSel.onchange = toggleLic; toggleLic();
+  const setCatalog = (id, pathText) => {
+    $('#cnode').value = id || '';
+    $('#cpath').textContent = id ? crumbText(pathText) : 'Not set — choose where this belongs';
+    $('#cclear').hidden = !id;
+    if (id) { const top = pathText.split(' > ')[0]; if (![...catSel.options].some((o) => o.value === top)) catSel.add(new Option(top, top)); catSel.value = top; }
+    catSel.disabled = !!id; toggleLic();
+  };
+  if (a.catalog_node_id) catSel.disabled = true;
+  $('#cclear').onclick = () => setCatalog(null);
+  $('#cpick').onclick = async () => {
+    let rows; try { rows = await getCatalog(); } catch (e) { return fail(e); }
+    let picked = null;
+    const { el: sh, close } = sheet(`<div class="rq"><div class="rq-head"><h2>Equipment catalog</h2><p class="muted small" style="margin:2px 0 0">Choose the most specific entry for this asset.</p></div><div class="rq-body" id="cc-mount"></div>
+      <div class="rq-foot"><div class="rq-sel" id="rq-sel"><span class="muted small">Choose an entry</span></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="cuse" disabled>Use this entry</button></div></div></div>`, { wide: true });
+    sh.classList.add('tall');
+    mountCatalogChooser($('#cc-mount', sh), rows, { value: Number($('#cnode').value) || null, onChange: (id, row) => { picked = row; $('#cuse', sh).disabled = !row; $('#rq-sel', sh).innerHTML = row ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(row.path))}</strong>` : '<span class="muted small">Choose an entry</span>'; } });
+    $('#cuse', sh).onclick = () => { if (picked) setCatalog(picked.id, picked.path); close(); };
+  };
   $$('[data-scan]').forEach((b) => b.onclick = () => openScanner({ title: b.dataset.scan === 'tag' ? 'Scan asset tag' : 'Scan serial number', onResult: (code) => { $(`[name=${b.dataset.scan}]`).value = code; toast('Scanned ' + code); } }));
   const ph = $('#ph'); if (ph) ph.onchange = () => { $('#ph-label').textContent = ph.files.length ? `${ph.files.length} photo${ph.files.length > 1 ? 's' : ''} selected` : 'Take or choose photos'; };
   $('#f').onsubmit = (e) => {
@@ -1018,7 +1184,10 @@ async function viewRequests() {
     if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
     const find = (id) => rows.find((r) => r.id === Number(id));
     const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
-    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`);
+    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${r.asset_name && !r.catalog_path ? ` — ${esc(r.asset_name)}` : ''}`);
+    // What exactly was asked for: the catalog level as it was when the request was made, and whether any matching asset or
+    // one specific item. (Older requests have only the free-text category.)
+    const scopeOf = (r) => (r.type !== 'equipment' ? '' : r.asset_id ? `Specific asset: ${esc(r.asset_label || [r.asset_tag, r.asset_name].filter(Boolean).join(' — '))}` : r.catalog_path ? 'Any matching asset' : '');
     // The action buttons a request offers; used by both the list card and the detail sheet (wired by wireActions).
     const actionsFor = (r) => {
       const isRet = r.type === 'return'; const isIssue = r.type === 'issue'; const perm = isPermReq(r);
@@ -1039,7 +1208,7 @@ async function viewRequests() {
     // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
     const wireActions = (root, before) => {
       const on = (sel, attr, fn) => $$(sel, root).forEach((b) => b.onclick = (e) => { before && before(); fn(find(b.dataset[attr]), e.currentTarget); });
-      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, onPick: (assetId) => {
+      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, catalogNode: r.catalog_node_id, onPick: (assetId) => {
         const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
           <form class="form-grid" id="f">${assignTypeFields()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
           <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
@@ -1063,7 +1232,9 @@ async function viewRequests() {
         <div class="kv">
           ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
           ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
-          ${row('Category', esc(r.category || ''))}
+          ${row('Requested', r.catalog_path ? `<strong>${esc(crumbText(r.catalog_path))}</strong>` : '')}
+          ${row('Scope', r.type === 'equipment' ? scopeOf(r) : '')}
+          ${row('Category', r.catalog_path ? '' : esc(r.category || ''))}
           ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
           ${row('Submitted', esc(fmtStamp(r.created_at)))}
           ${row(r.type === 'issue' ? 'Description' : 'Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
@@ -1082,6 +1253,7 @@ async function viewRequests() {
         <div class="thumb">${icon(requestIcon(r))}</div>
         <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, statusLabel(r))}</div>
           <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
+          ${scopeOf(r) && r.type === 'equipment' ? `<div class="small" style="margin-top:4px"><span class="scope-tag ${r.asset_id ? 'spec' : ''}">${scopeOf(r)}</span></div>` : ''}
           ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
           <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
@@ -1282,7 +1454,7 @@ async function viewSettings() {
         <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label>
         <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
       <div class="card pad"><div class="form-grid cols">
-        <label class="field"><span>Categories (one per line)</span><textarea name="categories" rows="8">${esc(s.categories.join('\n'))}</textarea></label>
+        <div class="field"><span>Categories &amp; equipment types</span><a class="btn" href="#/catalog">${icon('tag')} Manage the equipment catalog</a><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
         <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="8">${esc(s.locations.join('\n'))}</textarea></label></div></div>
       <button class="btn primary lg block" id="save">Save settings</button>
     </form>
@@ -1300,7 +1472,7 @@ async function viewSettings() {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
-      categories: fd.get('categories').split('\n'), locations: fd.get('locations').split('\n') };
+      locations: fd.get('locations').split('\n') };
     busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); });
   };
   $('#test').onclick = (e) => busy(e.currentTarget, async () => {
@@ -1310,15 +1482,96 @@ async function viewSettings() {
   });
 }
 
+// ============================================================ admin: equipment catalog
+// An expandable nested list (not a graphical editor). Everything about one entry — rename, add below it, move, archive/restore,
+// delete when nothing refers to it — is in that entry's "Manage" sheet, which also reads out its full path.
+async function viewCatalog() {
+  S.catOpen = S.catOpen || new Set();
+  const st = { rows: [], archived: false };
+  main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><button class="btn primary" id="addroot">${icon('plus')} Add category</button></div>
+    <div class="stack">
+      <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Each category can have its own levels — brands, models, operating systems, mounts — whatever suits it. Archive an entry to hide it from new requests without losing history.</p>
+      <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
+      <div class="card" id="tree"><div class="spinner"></div></div>
+    </div>`;
+  const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
+  const byId = (id) => st.rows.find((r) => r.id === id);
+  const rowHtml = (r, depth) => {
+    const ch = kids(r.id); const open = S.catOpen.has(r.id);
+    return `<li><div class="ct-row${r.live ? '' : ' off'}" style="--d:${Math.min(depth, 7)}">
+        <button type="button" class="ct-toggle${ch.length ? '' : ' none'}${open ? ' open' : ''}" data-toggle="${r.id}" aria-label="${open ? 'Collapse' : 'Expand'} ${esc(r.name)}" ${ch.length ? '' : 'tabindex="-1" aria-hidden="true"'}>${icon('chev')}</button>
+        <button type="button" class="ct-name" data-toggle="${r.id}"><span class="truncate">${esc(r.name)}</span>${r.archived_at ? ' <span class="pill plain">Archived</span>' : !r.live ? ' <span class="pill plain">Hidden</span>' : ''}</button>
+        <span class="ct-count small muted">${r.asset_count ? `${r.asset_count} asset${r.asset_count === 1 ? '' : 's'}` : ''}</span>
+        <button type="button" class="btn sm" data-manage="${r.id}" aria-label="Manage ${esc(r.name)}">${icon('edit')}<span class="desk-only-inline">Manage</span></button></div>
+      ${ch.length && open ? `<ul class="ct-tree">${ch.map((c) => rowHtml(c, depth + 1)).join('')}</ul>` : ''}</li>`;
+  };
+  const render = () => {
+    const roots = kids(null);
+    $('#tree').innerHTML = roots.length ? `<ul class="ct-tree ct-root">${roots.map((r) => rowHtml(r, 0)).join('')}</ul>` : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`;
+  };
+  const reload = async () => { st.rows = await api('GET', '/api/catalog?include_archived=1'); render(); };
+  const nameSheet = ({ title, text, label, value = '', okLabel, onOk }) => {
+    const { el, close } = sheet(`<h2>${esc(title)}</h2>${text ? `<p class="muted small" style="margin-top:0">${esc(text)}</p>` : ''}
+      <form class="form-grid" id="f"><label class="field"><span>${esc(label)}</span><input name="name" required maxlength="100" value="${esc(value)}" autocomplete="off"></label>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${esc(okLabel)}</button></div></form>`);
+    setTimeout(() => $('input', el).select(), 60);
+    $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await onOk(new FormData(e.target).get('name')); close(); }); };
+  };
+  const manage = (id) => {
+    const r = byId(id); if (!r) return;
+    const inUse = r.child_count > 0 || r.asset_count > 0 || r.request_count > 0;
+    const { el, close } = sheet(`<h2>${esc(r.name)}</h2>
+      <div class="ct-path small"><span class="muted">Full path</span><div><strong>${esc(crumbText(r.path))}</strong></div>${r.live ? '' : '<div class="muted">Not visible to employees.</div>'}</div>
+      <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.asset_count} asset${r.asset_count === 1 ? '' : 's'} filed here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
+      <div class="stack">
+        <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add an entry below “${esc(r.name)}”</button>
+        <button type="button" class="btn lg block" data-act="rename">${icon('edit')} Rename</button>
+        <button type="button" class="btn lg block" data-act="move">${icon('out')} Move to a different parent</button>
+        ${r.archived_at ? `<button type="button" class="btn lg block" data-act="restore">${icon('in')} Restore</button>` : `<button type="button" class="btn lg block" data-act="archive">${icon('archive')} Archive</button>`}
+        ${inUse ? `<p class="small muted" style="margin:0">It can't be deleted while it has entries below it, assets, or requests. Archive it instead.</p>` : `<button type="button" class="btn lg block danger" data-act="delete">${icon('trash')} Delete (nothing uses it)</button>`}
+      </div>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+    const act = {
+      add: () => { close(); nameSheet({ title: `Add below ${r.name}`, text: r.path ? crumbText(r.path) : '', label: 'Name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name, parent_id: r.id }); S.catOpen.add(r.id); await reload(); toast('Added'); } }); },
+      rename: () => { close(); nameSheet({ title: 'Rename', text: 'Past requests keep the wording they were made with.', label: 'Name', value: r.name, okLabel: 'Save', onOk: async (name) => { await api('PUT', `/api/catalog/${r.id}`, { name }); await reload(); toast('Renamed'); } }); },
+      move: () => {
+        close();
+        const bad = new Set([r.id]); let grew = true;
+        while (grew) { grew = false; for (const x of st.rows) if (!bad.has(x.id) && bad.has(x.parent_id)) { bad.add(x.id); grew = true; } }
+        const opts = st.rows.filter((x) => x.live && !bad.has(x.id));
+        const { el: m, close: closeM } = sheet(`<h2>Move “${esc(r.name)}”</h2><p class="muted small" style="margin-top:0">Everything below it moves too. Pick the new parent.</p>
+          <form class="form-grid" id="f"><label class="field"><span>New parent</span><select name="parent_id"><option value="">(top level — a category)</option>${opts.map((x) => `<option value="${x.id}" ${x.id === r.parent_id ? 'selected' : ''}>${esc(crumbText(x.path))}</option>`).join('')}</select></label>
+          <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Move</button></div></form>`);
+        $('#f', m).onsubmit = (e) => { e.preventDefault(); busy($('#go', m), async () => { await api('PUT', `/api/catalog/${r.id}`, { parent_id: new FormData(e.target).get('parent_id') || null }); closeM(); await reload(); toast('Moved'); }); };
+      },
+      archive: async () => { if (await confirmSheet(`Archive “${r.name}”?`, `It and everything below it will stop appearing for employees. Assets and past requests keep their history. You can restore it later.`, 'Archive')) { close(); await api('POST', `/api/catalog/${r.id}/archive`, {}); await reload(); toast('Archived'); } },
+      restore: async () => { await api('POST', `/api/catalog/${r.id}/restore`, {}); close(); await reload(); toast('Restored'); },
+      delete: async () => { if (await confirmSheet(`Delete “${r.name}”?`, 'Nothing uses it, so it can be removed completely. This cannot be undone.', 'Delete', true)) { close(); await api('DELETE', `/api/catalog/${r.id}`); await reload(); toast('Deleted'); } },
+    };
+    el.onclick = (e) => { const b = e.target.closest('[data-act]'); if (b) Promise.resolve(act[b.dataset.act]()).catch(fail); };
+  };
+  $('#addroot').onclick = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
+  $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
+  $('#tree').onclick = (e) => {
+    const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
+    const t = e.target.closest('[data-toggle]'); if (!t) return;
+    const id = Number(t.dataset.toggle); if (!kids(id).length) return manage(id);
+    if (S.catOpen.has(id)) S.catOpen.delete(id); else S.catOpen.add(id);
+    render();
+  };
+  await reload();
+}
+
 // ============================================================ profile / more
 function viewMore() {
   if (window.matchMedia('(min-width: 900px)').matches && !isAdmin()) return go('#/profile');
   const items = isAdmin() ? [
     ['#/people', 'users', 'People', 'Add employees, set admins, see who has what'],
+    ['#/catalog', 'tag', 'Equipment catalog', 'Categories, brands and models people can request'],
     ['#/labels', 'printer', 'Print labels', 'Barcode stickers for your asset tags'],
     ['#/import', 'upload', 'Import / export', 'Bulk add from a spreadsheet, download CSV'],
     ['#/activity', 'history', 'Activity log', 'Every check-out, check-in and change'],
-    ['#/settings', 'settings', 'Settings', 'Check-out rules, categories, email'],
+    ['#/settings', 'settings', 'Settings', 'Check-out rules, locations, email'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ] : [
     ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],

@@ -111,8 +111,8 @@ const notify = {
   },
   equipmentRequested(user, req) {
     const perm = req.requested_assignment_type === 'permanent';
-    fire(send(adminEmails(), `${perm ? 'Permanent assignment request' : 'Equipment request'} from ${user.name}: ${req.category || 'Equipment'}`,
-      layout(perm ? 'New permanent assignment request' : 'New equipment request', `<p><strong>${esc(user.name)}</strong>${user.department ? ` (${esc(user.department)})` : ''} is requesting${perm ? ' a <strong>permanent assignment</strong> of' : ''}: <strong>${esc(req.category || 'Equipment')}</strong></p>
+    fire(send(adminEmails(), `${perm ? 'Permanent assignment request' : 'Equipment request'} from ${user.name}: ${req.catalog_path || req.category || 'Equipment'}`,
+      layout(perm ? 'New permanent assignment request' : 'New equipment request', `<p><strong>${esc(user.name)}</strong>${user.department ? ` (${esc(user.department)})` : ''} is requesting${perm ? ' a <strong>permanent assignment</strong> of' : ''}: <strong>${esc(req.catalog_path || req.category || 'Equipment')}</strong>${req.catalog_path ? (req.asset_label ? `<br>Specific item: ${esc(req.asset_label)}` : '<br>Any matching item') : ''}</p>
         ${req.message ? `<p style="background:#f3f4f6;border-radius:8px;padding:10px 12px">${esc(req.message)}</p>` : ''}
         ${req.needed_by ? `<p><strong>Needed by:</strong> ${fmtDate(req.needed_by)}</p>` : ''}`,
         { url: `${APP_URL}/#/requests`, label: 'Review request' })));
@@ -120,7 +120,7 @@ const notify = {
   requestResolved(user, req, asset) {
     const approved = req.status === 'approved' || req.status === 'completed';
     fire(send(user.email, `Your equipment request was ${approved ? 'approved' : 'declined'}`,
-      layout(approved ? 'Request approved' : 'Request declined', `<p>Hi ${esc(user.name)}, your request for <strong>${esc(req.category || 'equipment')}</strong> was ${approved ? 'approved' : 'declined'}.</p>
+      layout(approved ? 'Request approved' : 'Request declined', `<p>Hi ${esc(user.name)}, your request for <strong>${esc(req.catalog_path || req.category || 'equipment')}</strong> was ${approved ? 'approved' : 'declined'}.</p>
         ${asset ? `<p>Assigned item:</p>${assetLine(asset)}` : ''}
         ${req.resolution_note ? `<p style="background:#f3f4f6;border-radius:8px;padding:10px 12px">${esc(req.resolution_note)}</p>` : ''}`,
         { url: `${APP_URL}/#/home`, label: 'Open IT Assets' })));
