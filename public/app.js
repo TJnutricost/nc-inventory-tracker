@@ -334,6 +334,7 @@ const ROUTES = [
   [/^#\/more$/, viewMore, { key: 'more' }],
 ];
 async function route(silent) {
+  S.soft = null; // a route-backed screen registers itself again below
   const hash = (location.hash || '#/home').split('?')[0];
   const match = ROUTES.find(([re]) => re.test(hash));
   if (!match) return go('#/home');
@@ -357,7 +358,15 @@ async function loadMe() {
   const r = await api('GET', '/api/me');
   S.me = r.user; S.settings = r.settings; S.mailConfigured = r.mailConfigured;
 }
-window.addEventListener('hashchange', () => route());
+// Route-backed drill-down screens (Browse equipment, Equipment catalog) keep their state in the hash query (#/catalog?node=12).
+// A change that stays on the same screen is applied in place — no reload, no flicker — by the screen's own `S.soft.fn`; anything
+// else goes through the normal router. Because the URL is the single source of truth, the sidebar link, breadcrumbs, the Back
+// button, browser Back/Forward and a refresh all land on the same state, and nothing stale can survive.
+window.addEventListener('hashchange', () => {
+  const base = (location.hash || '').split('?')[0];
+  if (S.soft && S.soft.base === base && $('#main')) { $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; return S.soft.fn(); }
+  route();
+});
 
 // ============================================================ auth views
 function authPanel(inner) {
@@ -571,6 +580,15 @@ async function viewBrowse() {
   const byId = new Map(rows.map((r) => [r.id, r]));
   const kidsOf = (pid) => rows.filter((r) => (r.parent_id ?? null) === pid);
   const st = { q: qs().get('q') || '', path: [], everything: false, token: 0 };
+  // State lives in the URL: #/assets?node=<id> (a category/entry) and #/assets?all=1 (All equipment, only meaningful at the top).
+  const hashFor = (id, all) => '#/assets' + (id ? `?node=${id}` : all ? '?all=1' : '');
+  const fromHash = () => {
+    const p = qs(); const id = Number(p.get('node'));
+    st.path = [];
+    if (byId.has(id)) for (let n = byId.get(id); n; n = byId.get(n.parent_id)) st.path.unshift(n.id);
+    st.everything = !st.path.length && p.get('all') === '1';
+    if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
+  };
   main().innerHTML = `<div class="page-head"><h1>Browse equipment</h1></div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
@@ -618,20 +636,24 @@ async function viewBrowse() {
     } catch (e) { if (mine === st.token) fail(e); }
   };
   const go2 = () => { renderNav(); load(); };
+  // Every move is a navigation to a URL; the hashchange handler (S.soft) then re-reads it and repaints in place.
   $('#bn').onclick = (e) => {
     const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]'); const back = e.target.closest('[data-back]');
-    if (e.target.closest('[data-everything]')) st.everything = !st.everything;
+    const parentOf = (id) => (byId.get(id) || {}).parent_id ?? null;
+    let target;
+    if (e.target.closest('[data-everything]')) target = hashFor(null, !st.everything);
     else if (e.target.closest('[data-all]')) return; // already showing the whole branch
-    else if (card) { const c = cur(); const id = Number(card.dataset.id); st.path = c && !kidsOf(c.id).length ? [...st.path.slice(0, -1), id] : [...st.path, id]; }
-    else if (crumb) { const id = Number(crumb.dataset.crumb); st.path = id > 0 ? st.path.slice(0, st.path.indexOf(id) + 1) : []; }
-    else if (back) st.path = st.path.slice(0, -1);
+    else if (card) target = hashFor(Number(card.dataset.id));
+    else if (crumb) target = hashFor(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
+    else if (back) target = hashFor(parentOf(st.path[st.path.length - 1]));
     else return;
-    go2(); if (back || crumb) window.scrollTo(0, 0);
+    go(target); window.scrollTo(0, 0);
   };
+  S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
   $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   $('#reqlink').onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
-  go2();
+  fromHash(); go2();
 }
 
 // ============================================================ asset detail
@@ -1618,8 +1640,11 @@ async function viewSettings() {
 // "All in <name>" (browse-only: every non-archived asset in the branch, no management). Without it the page lists what is
 // filed directly in the category.
 async function viewCatalog() {
-  const st = { rows: [], archived: false, sel: S.catSel ?? null, all: false, assets: null, token: 0 };
-  main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><button class="btn primary" id="addroot">${icon('plus')} Add category</button></div>
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0 };
+  // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
+  // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
+  const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
+  main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><span id="headact"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
@@ -1651,7 +1676,11 @@ async function viewCatalog() {
         ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
         : `<p class="muted small ct-empty">${inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
     }
-    const controls = n && !inAll ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
+    // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
+    const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
+    // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
+    $('#headact').innerHTML = n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`;
+    if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
       ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
@@ -1667,11 +1696,23 @@ async function viewCatalog() {
     } catch (e) { if (mine !== st.token) return; st.assets = []; fail(e); }
     render();
   };
-  const select = (id) => { st.sel = id; S.catSel = id; st.all = false; loadAssets(); window.scrollTo(0, 0); };
+  // Read the URL into state; refetch the asset list only when the viewed entry changed.
+  const apply = () => {
+    if (!st.rows.length && !st.loaded) return;
+    const p = qs(); const id = Number(p.get('node')); const prev = st.sel;
+    st.sel = byId(id) ? id : null;
+    st.all = !!st.sel && p.get('all') === '1';
+    if (p.get('node') && !st.sel) history.replaceState(null, '', '#/catalog'); // unknown/stale node in the URL: fall back to the root
+    if (st.sel !== prev || st.assets === null) loadAssets(); else render();
+  };
   const reload = async () => {
-    st.rows = await api('GET', '/api/catalog?include_archived=1');
-    if (st.sel && !byId(st.sel)) { st.sel = null; S.catSel = null; st.all = false; }
-    await loadAssets();
+    const was = byId(st.sel);
+    st.rows = await api('GET', '/api/catalog?include_archived=1'); st.loaded = true;
+    if (st.sel && !byId(st.sel)) { // the entry we were in no longer exists (deleted): step up to where it was
+      st.sel = null; const up = was && byId(was.parent_id) ? was.parent_id : null;
+      history.replaceState(null, '', hashFor(up));
+    }
+    st.assets = null; apply();
   };
   const nameSheet = ({ title, text, label, value = '', okLabel, onOk }) => {
     const { el, close } = sheet(`<h2>${esc(title)}</h2>${text ? `<p class="muted small" style="margin-top:0">${esc(text)}</p>` : ''}
@@ -1714,17 +1755,20 @@ async function viewCatalog() {
     };
     el.onclick = (e) => { const b = e.target.closest('[data-act]'); if (b) Promise.resolve(act[b.dataset.act]()).catch(fail); };
   };
-  $('#addroot').onclick = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
+  const addRoot = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
   $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
   // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
   $('#ct').onclick = (e) => {
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
     const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
-    if (e.target.closest('[data-all]')) { st.all = !st.all; render(); return window.scrollTo(0, 0); }
-    const sel = e.target.closest('[data-select]'); if (sel) return select(Number(sel.dataset.select));
-    if (e.target.closest('[data-back]')) { if (st.all) { st.all = false; return render(); } return select((byId(st.sel) || {}).parent_id ?? null); }
-    const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return select(id > 0 ? id : null); }
+    const to = (h) => { go(h); window.scrollTo(0, 0); };
+    if (e.target.closest('[data-all]')) return to(hashFor(st.sel, !st.all));
+    const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
+    // Back = one step up: out of "All in <name>" to the entry itself, otherwise to the parent entry (or the root).
+    if (e.target.closest('[data-back]')) return to(st.all ? hashFor(st.sel) : hashFor((byId(st.sel) || {}).parent_id ?? null));
+    const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
+  S.soft = { base: '#/catalog', fn: apply };
   await reload();
 }
 

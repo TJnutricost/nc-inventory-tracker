@@ -417,3 +417,6 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .rq-selected.ok { border-style: solid; border-color: var(--brand-accent); background: var(--brand-accent-soft); }
 .rq-sel-ok { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--brand-accent); color: var(--brand-accent-ink); flex: none; }
 .rq-sel-ok svg { width: 16px; height: 16px; }
+/* In-app Back is always visible on drill-down screens (it is not just a phone affordance). */
+.cg-top .cc-back { display: inline-flex; }
+.cg-top .cc-back[hidden] { display: none; }
