@@ -564,5 +564,56 @@ module.exports = [
       }
     },
   },
+  {
+    // Phase 2 Slice 2 (Employee Actions V1): an employee can report an issue with equipment they hold. The smallest durable
+    // design is a third request `type`, 'issue', riding the same table, queue and state machine — not a ticketing system.
+    // Rebuilds `requests` (ids, AUTOINCREMENT mark, indexes kept) so the CHECKs accept it:
+    //   issue statuses  open -> completed ("resolved" by IT) | cancelled (withdrawn); no approve/deny/dropped_off
+    //   issue asset     an issue is always about one asset (asset_id NOT NULL for type 'issue')
+    // Every other rule from migration 9 is unchanged, so the rebuild is a pure widening: no existing row can violate it.
+    id: 10,
+    name: "requests: add the 'issue' type (employee-reported equipment issues)",
+    disableForeignKeys: true,
+    up: (db) => {
+      const seq = (db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'requests'").get() || {}).seq || 0;
+      db.exec(`
+        CREATE TABLE requests_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          type TEXT NOT NULL CHECK (type IN ('equipment','return','issue')),
+          status TEXT NOT NULL DEFAULT 'open'
+            CHECK (status IN ('open','approved','denied','dropped_off','completed','cancelled')),
+          user_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+          asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+          category TEXT,
+          message TEXT,
+          needed_by TEXT,
+          created_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          resolved_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          resolved_at TEXT,
+          resolution_note TEXT,
+          requested_assignment_type TEXT CHECK (requested_assignment_type IN ('permanent','checkout')),
+          CHECK ((type = 'equipment' AND status IN ('open','approved','denied','completed','cancelled'))
+              OR (type = 'return' AND status IN ('open','dropped_off','completed','cancelled'))
+              OR (type = 'issue' AND status IN ('open','completed','cancelled'))),
+          CHECK ((status IN ('open','dropped_off') AND resolved_at IS NULL AND resolved_by IS NULL)
+              OR (status IN ('approved','denied','completed','cancelled') AND resolved_at IS NOT NULL)),
+          CHECK (resolved_at IS NULL OR resolved_at >= created_at),
+          CHECK (requested_assignment_type IS NULL OR type = 'equipment'),
+          CHECK (requested_assignment_type IS NULL OR requested_assignment_type <> 'permanent' OR asset_id IS NOT NULL),
+          CHECK (type <> 'issue' OR asset_id IS NOT NULL)
+        );
+        INSERT INTO requests_new (id, type, status, user_id, asset_id, category, message, needed_by, created_by, created_at, resolved_by, resolved_at, resolution_note, requested_assignment_type)
+          SELECT id, type, status, user_id, asset_id, category, message, needed_by, created_by, created_at, resolved_by, resolved_at, resolution_note, requested_assignment_type FROM requests;
+        DROP TABLE requests;
+        ALTER TABLE requests_new RENAME TO requests;
+        CREATE INDEX idx_requests_asset ON requests(asset_id);
+        CREATE INDEX idx_requests_employee_status ON requests(user_id, status);
+        CREATE UNIQUE INDEX idx_requests_live_return ON requests(asset_id, user_id) WHERE type = 'return' AND status IN ('open','dropped_off');`);
+      if (seq && !db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'requests'").run(seq).changes) {
+        db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('requests', ?)").run(seq);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

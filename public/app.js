@@ -112,6 +112,9 @@ const catIcon = (c) => CAT_ICON[c] || (/laptop|notebook/i.test(c) ? 'laptop' : /
 const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', disposed: 'Disposed', lost: 'Lost', overdue: 'Overdue' };
 const isPermReq = (r) => r.requested_assignment_type === 'permanent';
 const REQ_LABEL = { open: 'Pending', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
+// The label for a request's status, which reads differently by type (an open return is "Return requested", a completed issue "Resolved").
+const statusLabel = (r) => (r.type === 'return' && r.status === 'open' ? 'Return requested' : r.type === 'issue' ? ({ open: 'Open', completed: 'Resolved' }[r.status] || REQ_LABEL[r.status]) : REQ_LABEL[r.status]);
+const requestIcon = (r) => (r.type === 'return' ? 'in' : r.type === 'issue' ? 'alert' : 'inbox');
 const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
 const fmtClock = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const h = Number(m[1]); return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`; };
 const typeText = (m) => `${esc(TYPE_LABEL[m.assignment_type] || TYPE_LABEL.permanent)}${m.assignment_type === 'checkout' && m.due_date ? ` · return by ${fmtDate(m.due_date)}${m.due_time ? ' ' + fmtClock(m.due_time) : ''}` : ''}`;
@@ -291,7 +294,8 @@ function setActive(key) {
 async function refreshBadge() {
   try {
     const rows = await api('GET', '/api/requests?status=open');
-    const n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open').length;
+    // For an employee the badge means "IT is waiting on you": a return IT asked for, not one they started themselves.
+    const n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
     S.badge = n;
     const tab = $('.tabbar a[data-key=requests]');
     if (tab) { $('.badge-dot', tab)?.remove(); if (n) tab.insertAdjacentHTML('beforeend', `<span class="badge-dot">${n}</span>`); }
@@ -416,8 +420,12 @@ function myEquipmentList(mine) {
     ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
 }
+// Open return requests on the employee's own equipment: ones IT asked for (warning) and ones the employee started (info).
 function returnBanners(mine) {
-  return mine.filter((m) => m.return_status === 'open').map((m) => `
+  return mine.filter((m) => m.return_status === 'open').map((m) => m.return_self ? `
+    <div class="banner info">${icon('in')}<div class="grow"><strong>You asked to return ${esc(m.asset_name)}</strong>
+      <div class="small">Bring it to IT, then tap “I've dropped it off”. It stays assigned to you until IT checks it in.</div>
+      <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><button class="btn sm" data-withdraw="${m.return_request_id}">Cancel return request</button></div></div></div>` : `
     <div class="banner warn">${icon('alert')}<div class="grow"><strong>IT asked you to return ${esc(m.asset_name)}</strong>
       <div class="small">${m.return_by ? `Please return by ${fmtDate(m.return_by)}. ` : ''}${m.return_message ? esc(m.return_message) : ''}</div>
       <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><a class="btn sm" href="#/asset/${m.asset_id}">View item</a></div></div></div>`).join('');
@@ -427,6 +435,19 @@ function wireDropoffs(root) {
     await api('POST', `/api/requests/${b.dataset.dropoff}/dropped-off`, {});
     toast('Thanks! IT has been notified.'); refreshBadge(); route(true);
   }));
+  $$('[data-withdraw]', root).forEach((b) => b.onclick = () => busy(b, async () => {
+    await api('POST', `/api/requests/${b.dataset.withdraw}/cancel`, {});
+    toast('Return request cancelled'); refreshBadge(); route(true);
+  }));
+}
+// The two things an employee can do about equipment they hold. Both are re-checked on the server; hiding them is only tidiness.
+const holdingActions = (m) => `<div class="row wrap" style="padding:0 16px 14px 16px;gap:8px">
+  ${m.return_status ? '' : `<button class="btn sm" data-ask-return="${m.asset_id}" data-asset-name="${esc(m.asset_name)}">${icon('in')} Request return</button>`}
+  <button class="btn sm" data-report-issue="${m.asset_id}" data-asset-name="${esc(m.asset_name)}" data-asset-tag="${esc(m.tag)}">${icon('alert')} Report issue</button>
+  ${m.open_issues ? `<span class="small muted" style="align-self:center">${m.open_issues} open issue${m.open_issues === 1 ? '' : 's'} · <a href="#/requests">see Requests</a></span>` : ''}</div>`;
+function wireHoldingActions(root) {
+  $$('[data-ask-return]', root).forEach((b) => b.onclick = () => requestMyReturnSheet({ id: Number(b.dataset.askReturn), name: b.dataset.assetName }, () => route(true)));
+  $$('[data-report-issue]', root).forEach((b) => b.onclick = () => reportIssueSheet({ id: Number(b.dataset.reportIssue), name: b.dataset.assetName, tag: b.dataset.assetTag }, () => route(true)));
 }
 async function viewHome() {
   const d = await api('GET', '/api/dashboard');
@@ -460,9 +481,9 @@ async function viewHome() {
     <div class="grid two">
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
-          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div>
-            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
-            <div class="sub truncate">${r.type === 'return' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</a></li>`).join('')}
+          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
+            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
+            <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}</a></li>`).join('')}
           ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
         </ul>` : `<div class="empty">${icon('check')}<p>All caught up.</p></div>`}
@@ -478,7 +499,7 @@ async function viewHome() {
     </div>`;
   wireDropoffs(main());
 }
-const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested' };
+const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved' };
 function activityList(rows, withAsset) {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
   return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
@@ -539,6 +560,7 @@ async function viewAsset(id) {
   const multi = d.capacity > 1;
   const seatsFree = d.capacity - d.seats_used;
   const myReturnReq = d.requests.find((r) => r.type === 'return' && r.user_id === S.me.id && r.status === 'open');
+  const myIssues = d.requests.filter((r) => r.type === 'issue' && r.user_id === S.me.id);
   const cover = d.photos.find((p) => p.id === a.cover_photo_id) || d.photos[0];
   const photos = cover ? [cover, ...d.photos.filter((p) => p !== cover)] : [];
 
@@ -557,12 +579,18 @@ async function viewAsset(id) {
     actions = `<div class="actions">${btns.join('')}</div>`;
   } else {
     if (d.is_mine) {
-      actions = myReturnReq
-        ? `<div class="banner warn">${icon('alert')}<div class="grow"><strong>IT asked you to return this${myReturnReq.needed_by ? ` by ${fmtDate(myReturnReq.needed_by)}` : ''}.</strong>${myReturnReq.message ? `<div class="small">${esc(myReturnReq.message)}</div>` : ''}
-           <button class="btn dark sm" style="margin-top:10px" data-dropoff="${myReturnReq.id}">${icon('check')} I've dropped it off</button></div></div>`
+      const reportBtn = `<button class="btn lg block" id="act-issue">${icon('alert')} Report an issue</button>`;
+      const issueNote = myIssues.length ? `<div class="banner info">${icon('alert')}<div class="grow"><strong>You've reported ${myIssues.length === 1 ? 'an issue' : myIssues.length + ' issues'} with this item.</strong>
+           <div class="small">${myIssues.map((i) => esc(i.message || '')).join(' · ')}</div><a class="small" href="#/requests">See Requests</a></div></div>` : '';
+      actions = (myReturnReq
+        ? (myReturnReq.self_initiated
+          ? `<div class="banner info">${icon('in')}<div class="grow"><strong>You asked to return this.</strong><div class="small">Bring it to IT, then tap “I've dropped it off”. It stays assigned to you until IT checks it in.</div>
+             <div class="row wrap" style="margin-top:10px"><button class="btn dark sm" data-dropoff="${myReturnReq.id}">${icon('check')} I've dropped it off</button><button class="btn sm" data-withdraw="${myReturnReq.id}">Cancel return request</button></div></div></div>`
+          : `<div class="banner warn">${icon('alert')}<div class="grow"><strong>IT asked you to return this${myReturnReq.needed_by ? ` by ${fmtDate(myReturnReq.needed_by)}` : ''}.</strong>${myReturnReq.message ? `<div class="small">${esc(myReturnReq.message)}</div>` : ''}
+             <button class="btn dark sm" style="margin-top:10px" data-dropoff="${myReturnReq.id}">${icon('check')} I've dropped it off</button></div></div>`)
         : d.requests.some((r) => r.type === 'return' && r.status === 'dropped_off' && r.user_id === S.me.id)
           ? `<div class="banner info">${icon('check')}<div>You've told IT you dropped this off. It'll come off your list once IT checks it in.</div></div>`
-          : `<button class="btn lg block" id="act-return">${icon('in')} I'm returning this</button>`;
+          : `<div class="actions"><button class="btn lg" id="act-ask-return">${icon('send')} Request return</button><button class="btn lg" id="act-return">${icon('in')} I'm returning this</button></div>`) + issueNote + reportBtn;
     } else if (a.status === 'available' && seatsFree > 0) {
       actions = S.me.can_self_checkout
         ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out to me</button>`
@@ -591,7 +619,7 @@ async function viewAsset(id) {
           <div class="sub">${typeText(h)} · since ${fmtStamp(h.checked_out_at)}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
           ${isOverdue(h.due_date) ? pill('overdue', 'Overdue') : ''}
           ${admin && multi ? `<button class="btn sm" data-in="${h.id}">Check in</button>` : ''}</div></li>`).join('')}</ul></div>` : ''}
-      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(r.type === 'return' ? 'in' : 'inbox')}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(requestIcon(r))}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : r.type === 'issue' ? 'Issue reported by ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}${r.type === 'issue' ? `<a class="btn sm" href="#/requests">Review</a>` : ''}</div></li>`).join('')}</ul></div>` : ''}
       ${a.license_key || a.license_expires || multi || a.category === 'Software License' ? `<div class="card"><div class="card-head"><h2>License</h2></div><div class="kv">
           ${a.license_key ? `<div class="k">Key</div><div class="v"><span class="license-key">${esc(a.license_key)}</span> <button class="iconbtn" style="width:32px;height:32px;display:inline-grid;vertical-align:middle" id="copykey" title="Copy">${icon('copy')}</button></div>` : ''}
           <div class="k">Seats</div><div class="v">${d.seats_used} used of ${d.capacity}</div>
@@ -621,6 +649,8 @@ async function viewAsset(id) {
   on('#act-self', () => selfCheckoutSheet(a));
   on('#act-request', () => requestEquipmentSheet({ asset: a }));
   on('#act-similar', (e) => { e.preventDefault(); requestEquipmentSheet({ category: a.category }); });
+  on('#act-ask-return', () => requestMyReturnSheet({ id: a.id, name: a.name }, reload));
+  on('#act-issue', () => reportIssueSheet({ id: a.id, name: a.name, tag: a.tag }, reload));
   on('#act-return', async () => {
     const ok = await confirmSheet('Returning this item?', "Tap confirm once you've handed it to IT or left it at the IT drop-off. IT will check it in.", "I've dropped it off");
     if (!ok) return;
@@ -832,6 +862,31 @@ function requestReturnSheet(asset, holders, done) {
     busy($('#go', el), async () => { await api('POST', `/api/assets/${asset.id}/request-return`, Object.fromEntries(new FormData(e.target))); close(); toast('Return requested — email sent'); refreshBadge(); done && done(); });
   };
 }
+// Employee: ask to give back equipment they hold. Nothing is unassigned — IT checks it in once it is handed over.
+function requestMyReturnSheet(asset, done) {
+  const { el, close } = sheet(`<h2>Request return</h2><p class="muted small" style="margin-top:0">Let IT know you want to return <strong>${esc(asset.name)}</strong>. It stays assigned to you until IT checks it in.</p>
+    <form class="form-grid" id="f">
+      <label class="field"><span>Note for IT (optional)</span><textarea name="message" maxlength="500" placeholder="e.g. Getting a new laptop, leaving the company, no longer need it"></textarea></label>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Request return</button></div>
+    </form>`);
+  $('#f', el).onsubmit = (e) => {
+    e.preventDefault();
+    busy($('#go', el), async () => { await api('POST', `/api/assets/${asset.id}/my-return-request`, Object.fromEntries(new FormData(e.target))); close(); toast('Return requested. Drop it off with IT, then tap “I’ve dropped it off”.'); refreshBadge(); done && done(); });
+  };
+}
+// Employee: a short description of what is wrong with equipment they hold. The asset is fixed, never chosen.
+function reportIssueSheet(asset, done) {
+  const { el, close } = sheet(`<h2>Report an issue</h2><p class="muted small" style="margin-top:0">Tell IT what is wrong. This does not change who has the item.</p>
+    <form class="form-grid" id="f">
+      <div class="holder">${icon('alert')}<div><strong>${esc(asset.name)}</strong>${asset.tag ? `<div class="small muted mono">${esc(asset.tag)}</div>` : ''}</div></div>
+      <label class="field"><span>What's the problem?</span><textarea name="message" required maxlength="1000" placeholder="e.g. Screen flickers when I plug in the charger"></textarea></label>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
+    </form>`);
+  $('#f', el).onsubmit = (e) => {
+    e.preventDefault();
+    busy($('#go', el), async () => { await api('POST', `/api/assets/${asset.id}/report-issue`, Object.fromEntries(new FormData(e.target))); close(); toast('Issue sent to IT. You can follow it under Requests.'); refreshBadge(); done && done(); });
+  };
+}
 function requestEquipmentSheet({ asset, category, forUser } = {}) {
   const { el, close } = sheet(`<h2>${asset ? 'Request this item' : 'Request equipment'}</h2><p class="muted small" style="margin-top:0">IT will get an email and follow up with you.</p>
     <form class="form-grid" id="f">
@@ -962,17 +1017,23 @@ async function viewRequests() {
     const list = $('#list'); if (!list) return;
     if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
     const find = (id) => rows.find((r) => r.id === Number(id));
-    const kindOf = (r) => (r.type === 'return' ? 'Return request' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
-    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`);
+    const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
+    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`);
     // The action buttons a request offers; used by both the list card and the detail sheet (wired by wireActions).
     const actionsFor = (r) => {
-      const isRet = r.type === 'return'; const perm = isPermReq(r);
+      const isRet = r.type === 'return'; const isIssue = r.type === 'issue'; const perm = isPermReq(r);
       if (!['open', 'approved', 'dropped_off'].includes(r.status)) return '';
+      if (isAdmin() && isIssue) return `<button class="btn sm primary" data-resolve="${r.id}">${icon('check')} Mark resolved</button>${r.asset_id ? `<a class="btn sm" href="#/asset/${r.asset_id}">View asset</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Dismiss</button>`;
+      // Employees: Cancel is offered only when the server says this exact request is still eligible (can_cancel). A return IT
+      // asked for, or one already dropped off, is answered with "I've dropped it off" instead.
+      if (!isAdmin()) {
+        const cancel = r.can_cancel ? `<button class="btn sm" data-cancel="${r.id}">${isIssue ? 'Withdraw' : 'Cancel'}</button>` : '';
+        const drop = isRet && r.status === 'open' ? `<button class="btn sm dark" data-dropoff="${r.id}">${icon('check')} I've dropped it off</button>` : '';
+        return drop + cancel;
+      }
       if (isAdmin() && perm && r.asset_id) return `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
       if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
       if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
-      if (!isRet) return `<button class="btn sm" data-cancel="${r.id}">Cancel</button>`;
-      if (r.status === 'open') return `<button class="btn sm dark" data-dropoff="${r.id}">${icon('check')} I've dropped it off</button>`;
       return '';
     };
     // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
@@ -990,23 +1051,24 @@ async function viewRequests() {
         async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: r.asset_id, assignment_type: 'permanent', note }); toast('Permanently assigned'); refreshBadge(); render(); }));
       on('[data-approve]', 'approve', (r) => noteSheet('Approve request', 'Let them know what happens next (optional).', 'Approve', 'e.g. Ordered — should arrive next week', async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { note }); toast('Approved — they’ve been emailed'); refreshBadge(); render(); }));
       on('[data-deny]', 'deny', (r) => noteSheet('Decline request', 'Add a short reason (optional). They’ll get an email.', 'Decline', 'e.g. Please talk to your manager first', async (note) => { await api('POST', `/api/requests/${r.id}/deny`, { note }); toast('Declined'); refreshBadge(); render(); }, true));
-      on('[data-cancel]', 'cancel', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/cancel`, {}); toast('Cancelled'); refreshBadge(); render(); }));
+      on('[data-resolve]', 'resolve', (r) => noteSheet('Mark issue resolved', `Add a short note about what was done (optional). ${r.user_name} will see it on their request.`, 'Mark resolved', 'e.g. Replaced the charger', async (note) => { await api('POST', `/api/requests/${r.id}/resolve`, { note }); toast('Marked resolved'); refreshBadge(); render(); }));
+      on('[data-cancel]', 'cancel', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/cancel`, {}); toast(r.type === 'issue' ? 'Issue closed' : 'Cancelled'); refreshBadge(); render(); }));
       on('[data-dropoff]', 'dropoff', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/dropped-off`, {}); toast('Thanks! IT has been notified.'); refreshBadge(); render(); }));
     };
     // Full read-only view of a request (notes included) with the same actions, so IT can read before approving or declining.
     const openDetail = (r) => {
       const row = (k, v) => (v ? `<div class="k">${k}</div><div class="v">${v}</div>` : '');
       const { el, close } = sheet(`<h2>${esc(kindOf(r))}</h2>
-        <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, REQ_LABEL[r.status])}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
+        <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, statusLabel(r))}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
-          ${row('Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
+          ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
           ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
           ${row('Category', esc(r.category || ''))}
           ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
           ${row('Submitted', esc(fmtStamp(r.created_at)))}
-          ${row('Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
+          ${row(r.type === 'issue' ? 'Description' : 'Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
           ${row('IT note', r.resolution_note ? `<div style="white-space:pre-wrap">${esc(r.resolution_note)}</div>` : '')}
-          ${row('Resolved', r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `${esc(REQ_LABEL[r.status])} by ${esc(r.resolved_by_name)} · ${esc(fmtStamp(r.resolved_at))}` : '')}
+          ${row('Resolved', r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `${esc(statusLabel(r))} by ${esc(r.resolved_by_name)} · ${esc(fmtStamp(r.resolved_at))}` : '')}
         </div>
         <div class="row wrap" id="d-actions" style="margin-top:14px;gap:8px">${actionsFor(r)}</div>
         <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
@@ -1017,9 +1079,9 @@ async function viewRequests() {
       const isRet = r.type === 'return';
       const btns = actionsFor(r);
       return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
-        <div class="thumb">${icon(isRet ? 'in' : 'inbox')}</div>
-        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, REQ_LABEL[r.status])}</div>
-          <div class="sub">${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
+        <div class="thumb">${icon(requestIcon(r))}</div>
+        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, statusLabel(r))}</div>
+          <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
           ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
           <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
@@ -1281,7 +1343,7 @@ async function viewEquipment() {
   const detail = (m) => [m.category, [m.brand, m.model].filter(Boolean).join(' '), m.location].filter((v) => v && v !== m.asset_name).map(esc).join(' · ');
   const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
     <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub truncate"><span class="mono">${esc(m.tag)}</span>${detail(m) ? ' · ' + detail(m) : ''}</div>
-      <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a></li>`;
+      <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a>${holdingActions(m)}</li>`;
   const group = (title, rows, empty, iconName) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${rows.length} item${rows.length === 1 ? '' : 's'}</span></div>
     ${rows.length ? `<ul class="list">${rows.join('')}</ul>` : `<div class="empty">${icon(iconName)}<p>${empty}</p></div>`}</div>`;
   main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine)}
@@ -1289,6 +1351,7 @@ async function viewEquipment() {
     ${group('Temporary checkouts', temp.map((m) => row(m, `Checked out ${esc(fmtStamp(m.checked_out_at))} · return by ${esc(fmtDate(m.due_date))}${m.due_time ? ' ' + esc(fmtClock(m.due_time)) : ''}`, flag(m))), 'You have nothing checked out temporarily.', 'out')}
     <p class="small muted" style="text-align:center">Looking for something else? <a href="#/assets">Browse equipment</a> · <a href="#/history">History</a></p></div>`;
   wireDropoffs(main());
+  wireHoldingActions(main());
 }
 
 // Employee History: the signed-in employee's own assignments, newest first, from the same record the admin person page

@@ -3,6 +3,7 @@
 //
 //   equipment  open -> approved | completed | denied | cancelled      approved -> completed | denied | cancelled
 //   return     open -> dropped_off | completed | cancelled            dropped_off -> completed | cancelled
+//   issue      open -> completed (IT resolved it) | cancelled (the reporter withdrew it, or IT dismissed it)
 //   denied / completed / cancelled are terminal: nothing moves out of them, and there is no edit or delete of a request.
 //
 // Every status change goes through `transition`, which writes with `WHERE id = ? AND status = <the status we validated>`
@@ -13,6 +14,7 @@
 const TRANSITIONS = {
   equipment: { open: ['approved', 'completed', 'denied', 'cancelled'], approved: ['completed', 'denied', 'cancelled'], denied: [], completed: [], cancelled: [] },
   return: { open: ['dropped_off', 'completed', 'cancelled'], dropped_off: ['completed', 'cancelled'], completed: [], cancelled: [] },
+  issue: { open: ['completed', 'cancelled'], completed: [], cancelled: [] },
 };
 const TERMINAL = ['denied', 'completed', 'cancelled'];
 const LIVE = ['open', 'approved', 'dropped_off']; // not yet closed (the "Open" tab)
