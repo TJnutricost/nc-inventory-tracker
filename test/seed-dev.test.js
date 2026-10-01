@@ -59,6 +59,10 @@ test('seeding produces the expected deterministic dataset, twice in a row, witho
     assert.ok(first.selfCheckoutEnabled >= 1, 'expected login-enabled employees with self-checkout on');
     assert.ok(first.selfCheckoutDisabled >= 1, 'expected a login-enabled employee with self-checkout off');
     assert.ok(first.requests > 0);
+    assert.ok(first.catalogRoots >= 15, 'standard roots plus Camera and Lens');
+    assert.ok(first.catalogNodes >= 35, 'a real multi-level hierarchy, not just roots');
+    assert.ok(first.assetsBelowCatalogRoot >= 15, 'a good share of assets are mapped to deep model nodes');
+    assert.ok(first.catalogRequests >= 2, 'one any-matching and one specific-asset catalog request');
     assert.equal(first.devPassword, DEV_PASSWORD);
 
     const second = await seedDatabase({ dataDir, quiet: true });
@@ -127,6 +131,41 @@ test('the documented seeded admin (dana.ito@example.com / DevPass!2026) is creat
       const me = await client.get('/api/me');
       assert.equal(me.user.role, 'admin');
       assert.equal(me.user.email, 'dana.ito@example.com');
+    } finally {
+      await stopServer(server);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The seed has to demonstrate the catalog meaningfully: deep paths, an unmapped-below-root asset, and a held asset that the
+// employee request flow must not offer.
+test('the seeded catalog supports the employee request flow: deep path, one available A7 IV, the loaned one hidden', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-seed-test-'));
+  const dataDir = path.join(dir, 'data-dev');
+  try {
+    await seedDatabase({ dataDir, quiet: true });
+    const server = await startServer(bootApp(dataDir).app);
+    try {
+      const admin = makeClient(server);
+      await admin.post('/api/login', { email: 'dana.ito@example.com', password: DEV_PASSWORD });
+      const tree = await admin.get('/api/catalog');
+      const byPath = (p) => tree.find((n) => n.path === p);
+      assert.ok(byPath('Laptop > Mac > MacBook Air > M2'));
+      assert.ok(byPath('Laptop > Windows > Dell > Latitude 5440'));
+      assert.ok(byPath('Camera > Sony > A7 IV'));
+      assert.ok(byPath('Lens > Canon RF > 24-70mm F2.8'));
+
+      const emp = makeClient(server);
+      await emp.post('/api/login', { email: 'emerson.ellis@example.com', password: DEV_PASSWORD });
+      const a7 = (await emp.get('/api/catalog')).find((n) => n.path === 'Camera > Sony > A7 IV');
+      assert.equal(a7.available_count, 1, 'two bodies exist, one is on loan');
+      const offered = await emp.get(`/api/assets?catalog_node=${a7.id}`);
+      assert.equal(offered.length, 1);
+      assert.ok(!('holder_names' in offered[0]), 'no holder information for an employee');
+      const camera = (await emp.get('/api/catalog')).find((n) => n.path === 'Camera');
+      assert.ok((await emp.get(`/api/assets?catalog_node=${camera.id}`)).length >= 4, 'the whole subtree is browsable');
     } finally {
       await stopServer(server);
     }

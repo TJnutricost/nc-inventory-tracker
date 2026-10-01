@@ -214,17 +214,17 @@ function openScanner({ title = 'Scan a barcode', hint = 'Point the camera at the
   return { close: stop };
 }
 
-async function handleScannedCode(code) {
+async function handleScannedCode(code, ctx = '') { // ctx: where the asset page should say it came from (the Scan page passes srcQ('scan'))
   try {
     const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
-    if (r.found) return go('#/asset/' + r.id);
+    if (r.found) return go('#/asset/' + r.id + ctx);
     if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
     if (isAdmin()) {
       const { el, close } = sheet(`<h2>New barcode</h2><p class="muted">No asset uses <strong class="mono">${esc(code)}</strong> yet. Want to tag a new asset with it?</p>
         <div class="stack" style="margin-top:16px"><button class="btn primary lg block" id="mk">${icon('plus')} Add a new asset with this tag</button>
         <button class="btn block" id="again">${icon('scan')} Scan again</button></div>`);
       $('#mk', el).onclick = () => { close(); go('#/new?tag=' + encodeURIComponent(code)); };
-      $('#again', el).onclick = () => { close(); openScanner({ onResult: handleScannedCode }); };
+      $('#again', el).onclick = () => { close(); openScanner({ onResult: (c) => handleScannedCode(c, ctx) }); };
     } else toast(`No asset found for ${code}`, true);
   } catch (e) { fail(e); }
 }
@@ -249,6 +249,7 @@ function navItems() {
   ];
   if (isAdmin()) side.push({ sep: true },
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
+    { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
     { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
@@ -289,7 +290,7 @@ function mountShell() {
   S.shell = true;
 }
 function setActive(key) {
-  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
+  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'catalog', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
 }
 async function refreshBadge() {
   try {
@@ -305,7 +306,44 @@ async function refreshBadge() {
 }
 const main = () => $('#main');
 const loading = () => { main().innerHTML = '<div class="spinner"></div>'; };
-const backLink = (href, label = 'Back') => `<a class="back" href="${href}" onclick="if(history.length>1){history.back();return false}">${icon('back')}${esc(label)}</a>`;
+const backLink = (href, label = 'Back', exact = false) => `<a class="back" href="${href}"${exact ? '' : ' onclick="if(history.length>1){history.back();return false}"'}>${icon('back')}${esc(label)}</a>`;
+
+// ---- where an asset page was opened from ----
+// Every link to an asset page from a list that matters carries its origin in the hash (#/asset/44?src=catalog&node=11), so the
+// page's "‹ Back" can name and return to exactly where the person came from — without relying on browser history, which stays
+// free to do its own thing. Only known source types and numeric node ids are accepted; the label shown is derived from real app
+// data (a catalog node's stored name), never from query text. No source (a scan, a typed URL, an old link) = the old fallback.
+const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity'], employee: ['browse', 'equipment', 'history', 'requests', 'home', 'scan'] };
+const srcQ = (src, extra = {}) => `?src=${src}${Object.entries(extra).filter(([, v]) => v).map(([k, v]) => `&${k}=${v === true ? 1 : encodeURIComponent(v)}`).join('')}`;
+function assetCtx() {
+  const p = qs(); const src = p.get('src');
+  if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
+  const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null };
+}
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, tab: c.tab }) : ''; }; // carried on to the edit form and back
+async function assetBackTarget() {
+  const c = assetCtx();
+  const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
+  if (!c) return fallback;
+  const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'], scan: ['#/scan', 'Scan'], activity: ['#/activity', 'Activity log'] };
+  if (fixed[c.src]) return { href: fixed[c.src][0], label: fixed[c.src][1], exact: true };
+  if (c.src === 'requests') return { href: `#/requests${c.tab ? '?tab=' + c.tab : ''}`, label: 'Requests', exact: true };
+  if (c.src === 'person') { // an admin's employee page: back to that person, labelled with their real name
+    if (!c.id) return { href: '#/people', label: 'People', exact: true };
+    try { const u = (await api('GET', '/api/users/' + c.id)).user; return { href: `#/person/${c.id}`, label: u.name, exact: true }; } catch { return { href: '#/people', label: 'People', exact: true }; }
+  }
+  // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
+  const root = c.src === 'catalog' ? { href: '#/catalog', label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
+  if (!c.node) return { ...root, exact: true };
+  let rows = []; try { rows = await api('GET', '/api/catalog' + (c.src === 'catalog' ? '?include_archived=1' : '')); } catch { /* fall back to the root */ }
+  const n = rows.find((r) => r.id === c.node);
+  if (!n) return { ...root, exact: true };
+  // Opened from a virtual "All in <name>" view (admin catalog &all=1; employee Browse, where an entry with children always shows its
+  // whole branch): say so. The URL is the same real-entry route — "All in" is never a stored entry.
+  const virtual = c.src === 'catalog' ? c.all : n.child_count > 0;
+  return { href: `${c.src === 'catalog' ? '#/catalog' : '#/assets'}?node=${n.id}${c.src === 'catalog' && c.all ? '&all=1' : ''}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
+}
 
 // ============================================================ router
 const ROUTES = [
@@ -323,6 +361,7 @@ const ROUTES = [
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
+  [/^#\/catalog$/, viewCatalog, { key: 'catalog', admin: true }],
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
   [/^#\/activity$/, viewActivity, { key: 'activity', admin: true }],
   [/^#\/settings$/, viewSettings, { key: 'settings', admin: true }],
@@ -332,6 +371,7 @@ const ROUTES = [
   [/^#\/more$/, viewMore, { key: 'more' }],
 ];
 async function route(silent) {
+  S.soft = null; // a route-backed screen registers itself again below
   const hash = (location.hash || '#/home').split('?')[0];
   const match = ROUTES.find(([re]) => re.test(hash));
   if (!match) return go('#/home');
@@ -355,7 +395,15 @@ async function loadMe() {
   const r = await api('GET', '/api/me');
   S.me = r.user; S.settings = r.settings; S.mailConfigured = r.mailConfigured;
 }
-window.addEventListener('hashchange', () => route());
+// Route-backed drill-down screens (Browse equipment, Equipment catalog) keep their state in the hash query (#/catalog?node=12).
+// A change that stays on the same screen is applied in place — no reload, no flicker — by the screen's own `S.soft.fn`; anything
+// else goes through the normal router. Because the URL is the single source of truth, the sidebar link, breadcrumbs, the Back
+// button, browser Back/Forward and a refresh all land on the same state, and nothing stale can survive.
+window.addEventListener('hashchange', () => {
+  const base = (location.hash || '').split('?')[0];
+  if (S.soft && S.soft.base === base && $('#main')) { $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; return S.soft.fn(); }
+  route();
+});
 
 // ============================================================ auth views
 function authPanel(inner) {
@@ -415,20 +463,20 @@ async function viewSetup() {
 // ============================================================ home
 function myEquipmentList(mine) {
   if (!mine.length) return `<div class="empty">${icon('laptop')}<p>No equipment is checked out to you.</p></div>`;
-  return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
+  return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('home')}">${thumbHtml(m.thumb, m.category)}
     <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtStamp(m.checked_out_at)} · ${typeText(m)}</div></div>
     ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
 }
 // Open return requests on the employee's own equipment: ones IT asked for (warning) and ones the employee started (info).
-function returnBanners(mine) {
+function returnBanners(mine, src = '') { // src: which screen shows the banner, so "View item" can say where it came from
   return mine.filter((m) => m.return_status === 'open').map((m) => m.return_self ? `
     <div class="banner info">${icon('in')}<div class="grow"><strong>You asked to return ${esc(m.asset_name)}</strong>
       <div class="small">Bring it to IT, then tap “I've dropped it off”. It stays assigned to you until IT checks it in.</div>
       <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><button class="btn sm" data-withdraw="${m.return_request_id}">Cancel return request</button></div></div></div>` : `
     <div class="banner warn">${icon('alert')}<div class="grow"><strong>IT asked you to return ${esc(m.asset_name)}</strong>
       <div class="small">${m.return_by ? `Please return by ${fmtDate(m.return_by)}. ` : ''}${m.return_message ? esc(m.return_message) : ''}</div>
-      <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><a class="btn sm" href="#/asset/${m.asset_id}">View item</a></div></div></div>`).join('');
+      <div class="row wrap" style="margin-top:10px"><button class="btn sm dark" data-dropoff="${m.return_request_id}">${icon('check')} I've dropped it off</button><a class="btn sm" href="#/asset/${m.asset_id}${src ? srcQ(src) : ''}">View item</a></div></div></div>`).join('');
 }
 function wireDropoffs(root) {
   $$('[data-dropoff]', root).forEach((b) => b.onclick = () => busy(b, async () => {
@@ -456,10 +504,10 @@ async function viewHome() {
   const greet = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
   if (!isAdmin()) {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
-      <div class="stack">${returnBanners(d.mine)}
+      <div class="stack">${returnBanners(d.mine, 'home')}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
-      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.category || 'Equipment')}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
     wireDropoffs(main());
@@ -470,7 +518,7 @@ async function viewHome() {
   main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1><a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a></div>
     <div class="stack">
     ${!S.mailConfigured ? `<div class="banner info">${icon('mail')}<div class="grow small"><strong>Email notifications are not set up yet.</strong> Emails are being saved to the outbox instead. <a href="#/settings">Set up Gmail →</a></div></div>` : ''}
-    ${returnBanners(d.mine)}
+    ${returnBanners(d.mine, 'home')}
     <div class="grid stats">
       <a class="card stat" href="#/assets?status=active"><div class="n">${s.total}</div><div class="l">Active assets</div></a>
       <a class="card stat" href="#/assets?status=available"><div class="n">${s.available}</div><div class="l">Available</div></a>
@@ -481,10 +529,10 @@ async function viewHome() {
     <div class="grid two">
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
-          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
-            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.category || 'equipment')}`}</div>
+          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id + srcQ('home') : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
+            <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'equipment'))}`}</div>
             <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}</a></li>`).join('')}
-          ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
+          ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}${srcQ('home')}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
         </ul>` : `<div class="empty">${icon('check')}<p>All caught up.</p></div>`}
       </div>
@@ -493,22 +541,24 @@ async function viewHome() {
         ${s.value ? `<div class="card-body small muted" style="border-top:1px solid var(--line)">Total purchase value: <strong style="color:var(--text)">${money(s.value)}</strong></div>` : ''}
       </div>
     </div>
-    ${d.expiring.length ? `<div class="card"><div class="card-head"><h2>Expiring in 60 days</h2></div><ul class="list">${d.expiring.map((a) => `<li><a class="item" href="#/asset/${a.id}"><div class="thumb">${icon(catIcon(a.category))}</div><div class="grow"><div class="title truncate">${esc(a.name)}</div><div class="sub">${a.license_expires ? `License expires ${fmtDate(a.license_expires)}` : ''}${a.license_expires && a.warranty_expires ? ' · ' : ''}${a.warranty_expires ? `Warranty ends ${fmtDate(a.warranty_expires)}` : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>` : ''}
+    ${d.expiring.length ? `<div class="card"><div class="card-head"><h2>Expiring in 60 days</h2></div><ul class="list">${d.expiring.map((a) => `<li><a class="item" href="#/asset/${a.id}${srcQ('home')}"><div class="thumb">${icon(catIcon(a.category))}</div><div class="grow"><div class="title truncate">${esc(a.name)}</div><div class="sub">${a.license_expires ? `License expires ${fmtDate(a.license_expires)}` : ''}${a.license_expires && a.warranty_expires ? ' · ' : ''}${a.warranty_expires ? `Warranty ends ${fmtDate(a.warranty_expires)}` : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>` : ''}
     ${d.mine.length ? `<div class="card"><div class="card-head"><h2>My equipment</h2></div>${myEquipmentList(d.mine)}</div>` : ''}
-    <div class="card"><div class="card-head"><h2>Recent activity</h2><a href="#/activity" class="small">See all</a></div>${activityList(d.activity, true)}</div>
+    <div class="card"><div class="card-head"><h2>Recent activity</h2><a href="#/activity" class="small">See all</a></div>${activityList(d.activity, true, 'home')}</div>
     </div>`;
   wireDropoffs(main());
 }
 const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved' };
-function activityList(rows, withAsset) {
+function activityList(rows, withAsset, src = '') {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
-  return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
+  return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}${src ? srcQ(src) : ''}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
     <div class="small muted">${esc(r.details || '')}</div><div class="small muted">${esc(r.actor_name || 'System')} · ${fmtWhen(r.created_at)}</div></div></li>`).join('')}</ul>`;
 }
 
 // ============================================================ assets list
 async function viewAssets() {
   const p = qs();
+  if (!isAdmin()) return viewBrowse(); // employees get the catalog card-grid browser
+  const roots = await rootNames();
   const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
   const statuses = isAdmin()
     ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
@@ -518,7 +568,7 @@ async function viewAssets() {
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
       ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
-      <select id="cat"><option value="">All categories</option>${S.settings.categories.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      <select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
       <div class="card" id="results"><div class="spinner"></div></div>
     </div>
     ${isAdmin() ? `<a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>` : ''}`;
@@ -535,7 +585,7 @@ async function viewAssets() {
       res.innerHTML = rows.length ? `<div class="card-head"><span class="muted small">${rows.length} asset${rows.length === 1 ? '' : 's'}</span>${isAdmin() ? `<a class="small" href="/api/export/assets.csv">${'Export CSV'}</a>` : ''}</div><ul class="list">${rows.map((a) => {
         const st = assetStatus(a);
         const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-        return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}
+        return `<li><a class="item" href="#/asset/${a.id}${srcQ('assets')}">${thumbHtml(a.thumb, a.category)}
           <div class="grow"><div class="title truncate">${esc(a.name)}</div>
           <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${a.holder_names && isAdmin() ? ' · ' + esc(a.holder_names) : ''}${seats}${!a.holder_names && a.location ? ' · ' + esc(a.location) : ''}</div></div>
           ${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
@@ -550,9 +600,108 @@ async function viewAssets() {
   load();
 }
 
+// ============================================================ catalog card grid (shared by Browse and the admin catalog)
+// Category navigation is a responsive grid of cards that wraps onto as many rows as it needs — never a scrolling strip, never a
+// tree. Same drill-down model everywhere: pick a card to go one level deeper; breadcrumbs jump back up; Back on narrow screens.
+// A level with child categories starts with the VIRTUAL "All in <name>" card: not a catalog entry, just "the whole branch".
+const cgCard = ({ attrs, name, meta, kind = '', chev = true, extra = '' }) => `<button type="button" class="cg-card ${kind}" ${attrs}><span class="cg-name">${esc(name)}${extra}</span><span class="cg-meta">${meta}</span>${chev ? icon('chev', 'cg-chev') : kind.includes('on') ? icon('check', 'cg-chev') : ''}</button>`;
+// Drill-down screens reuse the app's existing back-link (the `.back` style used on asset pages: "‹ Assets"), placed ABOVE the
+// page title so the title never moves. It is a real link to the parent's URL, labelled with where it goes.
+const backAnchor = (href, label) => `<a class="back" href="${href}">${icon('back')}${esc(label)}</a>`;
+const cgTop = (chain, { allLabel, curAll, trailing = '' }) => `<div class="cc-top cg-top">
+  <nav class="cc-crumbs" aria-label="Where you are"><button type="button" data-crumb="-1" class="${chain.length ? '' : 'cur'}">${esc(allLabel)}</button>${chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 && !curAll ? 'cur' : ''}">${esc(c.name)}</button>`).join('')}${curAll ? `<span aria-hidden="true">›</span><button type="button" class="cur" aria-current="true">All in ${esc(chain[chain.length - 1].name)}</button>` : ''}</nav>${trailing}</div>`;
+
+// ============================================================ employee Browse equipment
+// Search stays on top (global, available equipment only). Below it: category cards -> drill down. What is listed is always
+// the server's employee view (available, not archived, not already yours) — a card's count and its list use the same rule.
+async function viewBrowse() {
+  let rows = [];
+  try { rows = await getCatalog(); } catch { /* an empty catalog just means search-only browsing */ }
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const kidsOf = (pid) => rows.filter((r) => (r.parent_id ?? null) === pid);
+  const st = { q: qs().get('q') || '', path: [], everything: false, token: 0 };
+  // State lives in the URL: #/assets?node=<id> (a category/entry) and #/assets?all=1 (All equipment, only meaningful at the top).
+  const hashFor = (id, all) => '#/assets' + (id ? `?node=${id}` : all ? '?all=1' : '');
+  const fromHash = () => {
+    const p = qs(); const id = Number(p.get('node'));
+    st.path = [];
+    if (byId.has(id)) for (let n = byId.get(id); n; n = byId.get(n.parent_id)) st.path.unshift(n.id);
+    st.everything = !st.path.length && p.get('all') === '1';
+    if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
+  };
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1></div>
+    <div class="stack">
+      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
+        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
+      <p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>
+      <div id="bn"></div>
+      <div class="card" id="results" hidden></div>
+    </div>
+    <p class="small muted" style="margin-top:12px">Don't see what you need? <a href="#" id="reqlink">Send IT a request</a>.</p>`;
+  const cur = () => byId.get(st.path[st.path.length - 1]);
+  const availMeta = (n) => (n ? `${n} available` : 'None available');
+  const renderNav = () => {
+    const bn = $('#bn');
+    const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
+    $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
+    $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
+    if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
+    const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
+    const chain = st.path.map((id) => byId.get(id));
+    const cards = [];
+    if (!c) cards.push(cgCard({ attrs: 'data-everything', name: 'All equipment', meta: 'Everything available', kind: `all${st.everything ? ' on' : ''}`, chev: false }));
+    else if (!leaf) cards.push(cgCard({ attrs: 'data-all', name: `All in ${c.name}`, meta: availMeta(c.available_count), kind: 'all on', chev: false }));
+    // Only THIS entry's children. Never the top-level (or sibling) cards again: a leaf shows just its assets; going elsewhere is Back / a breadcrumb.
+    for (const r of kids) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count) }));
+    bn.innerHTML = `${chain.length ? cgTop(chain, { allLabel: 'All equipment' }) : ''}${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : ''}`;
+  };
+  const rowHtml = (a) => {
+    const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id, all: !cur() && st.everything })}">${thumbHtml(a.thumb, a.category)}
+      <div class="grow"><div class="title truncate">${esc(a.name)}</div>
+      <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${a.location ? ' · ' + esc(a.location) : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+  };
+  const load = async () => {
+    const box = $('#results'); const mine = ++st.token;
+    const c = cur(); const kids = c ? kidsOf(c.id) : [];
+    // What is listed: a search (global), else the selected branch, else — at the top — everything, only if asked for.
+    const u = new URLSearchParams(); let label = '';
+    if (st.q) { u.set('q', st.q); label = 'Search results'; }
+    else if (c) { u.set('catalog_node', c.id); label = kids.length ? `All in ${c.name}` : crumbText(c.path); }
+    else if (st.everything) label = 'All equipment';
+    else { box.hidden = true; return; }
+    box.hidden = false; box.innerHTML = '<div class="spinner"></div>';
+    try {
+      const list = await api('GET', '/api/assets?' + u.toString());
+      if (mine !== st.token) return;
+      box.innerHTML = `<div class="card-head"><span class="muted small">${esc(label)} · ${list.length} asset${list.length === 1 ? '' : 's'}</span></div>${list.length
+        ? `<ul class="list">${list.map(rowHtml).join('')}</ul>`
+        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search.' : 'Nothing is available right now. You can still send IT a request.'}</p></div>`}`;
+    } catch (e) { if (mine === st.token) fail(e); }
+  };
+  const go2 = () => { renderNav(); load(); };
+  // Every move is a navigation to a URL; the hashchange handler (S.soft) then re-reads it and repaints in place.
+  $('#bn').onclick = (e) => {
+    const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]');
+    let target;
+    if (e.target.closest('[data-everything]')) target = hashFor(null, !st.everything);
+    else if (e.target.closest('[data-all]')) return; // already showing the whole branch
+    else if (card) target = hashFor(Number(card.dataset.id));
+    else if (crumb) target = hashFor(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
+    else return;
+    go(target); window.scrollTo(0, 0);
+  };
+  $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
+  S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
+  $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
+  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
+  $('#reqlink').onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
+  fromHash(); go2();
+}
+
 // ============================================================ asset detail
 async function viewAsset(id) {
-  const d = await api('GET', '/api/assets/' + id);
+  const [d, backTo] = await Promise.all([api('GET', '/api/assets/' + id), assetBackTarget()]);
   const a = d.asset;
   const admin = isAdmin();
   const st = !['retired', 'lost', 'disposed'].includes(a.status) && d.holders.some((h) => isOverdue(h.due_date)) ? 'overdue' : a.status;
@@ -573,7 +722,7 @@ async function viewAsset(id) {
     if (['available', 'checked_out'].includes(a.status) && seatsFree > 0) btns.push(`<button class="btn primary lg" id="act-out">${icon('out')} Check out${multi ? ' a seat' : ''}</button>`);
     if (d.holders.length) btns.push(`<button class="btn ${seatsFree > 0 ? '' : 'primary'} lg" id="act-in">${icon('in')} Check in</button>`);
     if (d.holders.length) btns.push(`<button class="btn lg" id="act-ret">${icon('send')} Request return</button>`);
-    btns.push(`<a class="btn lg" href="#/asset/${a.id}/edit">${icon('edit')} Edit</a>`);
+    btns.push(`<a class="btn lg" href="#/asset/${a.id}/edit${ctxQuery()}">${icon('edit')} Edit</a>`);
     btns.push(`<a class="btn lg" href="#/labels?ids=${a.id}">${icon('printer')} Print label</a>`);
     if (btns.length % 2) btns[btns.length - 1] = btns[btns.length - 1].replace('class="btn', 'class="full btn');
     actions = `<div class="actions">${btns.join('')}</div>`;
@@ -601,12 +750,12 @@ async function viewAsset(id) {
   }
 
   const kv = [
-    ['Category', a.category], ['Brand', a.brand], ['Model', a.model], ['Serial #', a.serial ? `<span class="mono">${esc(a.serial)}</span>` : '', true],
+    ['Catalog', a.catalog_path ? esc(a.catalog_path.split(' > ').join(' › ')) : '', true], ['Category', a.category], ['Brand', a.brand], ['Model', a.model], ['Serial #', a.serial ? `<span class="mono">${esc(a.serial)}</span>` : '', true],
     ['Condition', a.condition], ['Location', a.location], ['Purchased', fmtDate(a.purchase_date)], ['Cost', admin ? money(a.purchase_cost) : ''],
     ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
-  main().innerHTML = `<div class="asset-bar">${backLink('#/assets', 'Assets')}
+  main().innerHTML = `<div class="asset-bar">${backLink(backTo.href, backTo.label, backTo.exact)}
       <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${st === 'overdue' ? pill('overdue') : statusPill(a)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
@@ -706,10 +855,10 @@ function personPicker(container, users, onPick, selectedId) {
 }
 // Employees never create a permanent assignment directly: they ask IT. Shows the approval notice, and only on
 // "Send request" records a request (no assignment, no check-out). Resolves true when the request was sent.
-async function requestPermanentAssignment(asset, message) {
+async function requestPermanentAssignment(asset, message, catalogNodeId) {
   const ok = await confirmSheet('Permanent assignment requires approval', 'Permanent equipment assignments must be approved by IT.', 'Send request');
   if (!ok) return false;
-  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, message: message || undefined, requested_assignment_type: 'permanent' });
+  await api('POST', '/api/requests', { asset_id: asset.id, category: asset.category, catalog_node_id: catalogNodeId || undefined, message: message || undefined, requested_assignment_type: 'permanent' });
   toast('Request sent to IT. Nothing is assigned until IT approves it.');
   refreshBadge();
   return true;
@@ -781,7 +930,7 @@ async function checkoutSheet(asset, done, presetUser) {
 // "Scan barcode" reuses the app's one scanner (openScanner) and the same tag/serial lookup as everywhere else; a scan
 // swaps the sheet to the scanned asset, so the return-date rules and the server's permission check stay the same.
 function selfCheckoutSheet(a) {
-  const back = () => (location.hash === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id));
+  const back = () => (location.hash.split('?')[0] === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id + ctxQuery()));
   const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
     <button type="button" class="btn sm" id="self-scan" style="margin-bottom:12px">${icon('scan')} Scan barcode</button>
     <form class="form-grid" id="f">
@@ -887,14 +1036,16 @@ function reportIssueSheet(asset, done) {
     busy($('#go', el), async () => { await api('POST', `/api/assets/${asset.id}/report-issue`, Object.fromEntries(new FormData(e.target))); close(); toast('Issue sent to IT. You can follow it under Requests.'); refreshBadge(); done && done(); });
   };
 }
+// Request equipment. Picking ONE specific item (from its own page) keeps the simple sheet; everything else goes through the
+// catalog: choose a level, then "any matching" or one specific available item.
 function requestEquipmentSheet({ asset, category, forUser } = {}) {
-  const { el, close } = sheet(`<h2>${asset ? 'Request this item' : 'Request equipment'}</h2><p class="muted small" style="margin-top:0">IT will get an email and follow up with you.</p>
+  if (!asset) return requestFromCatalogSheet({ category, forUser });
+  const { el, close } = sheet(`<h2>Request this item</h2><p class="muted small" style="margin-top:0">IT will get an email and follow up with you.</p>
     <form class="form-grid" id="f">
-      ${asset ? `<input type="hidden" name="asset_id" value="${asset.id}"><input type="hidden" name="category" value="${esc(asset.category)}"><div class="holder">${icon(catIcon(asset.category))}<div><strong>${esc(asset.name)}</strong><div class="small muted mono">${esc(asset.tag)}</div></div></div>`
-        : `<label class="field"><span>What do you need?</span><select name="category" required><option value="">Choose…</option>${S.settings.categories.map((c) => `<option ${c === category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>`}
-      <label class="field"><span>Details</span><textarea name="message" placeholder="${asset ? 'Anything IT should know?' : 'e.g. Second monitor for my desk, USB-C if possible'}"></textarea></label>
+      <input type="hidden" name="asset_id" value="${asset.id}"><input type="hidden" name="category" value="${esc(asset.category)}"><div class="holder">${icon(catIcon(asset.category))}<div><strong>${esc(asset.name)}</strong><div class="small muted mono">${esc(asset.tag)}</div>${asset.catalog_path ? `<div class="small muted">${esc(asset.catalog_path.split(' > ').join(' › '))}</div>` : ''}</div></div>
+      <label class="field"><span>Details</span><textarea name="message" placeholder="Anything IT should know?"></textarea></label>
       <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}"></label>
-      ${asset && !forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
+      ${!forUser ? `<label class="check"><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
     </form>`);
   $('#f', el).onsubmit = (e) => {
@@ -906,15 +1057,203 @@ function requestEquipmentSheet({ asset, category, forUser } = {}) {
     busy($('#go', el), async () => { await api('POST', '/api/requests', fd); close(); toast('Request sent to IT'); refreshBadge(); if (location.hash.startsWith('#/requests') || location.hash.startsWith('#/home')) route(true); });
   };
 }
-async function assetPickerSheet({ title, filterCategory, onPick }) {
+
+// ============================================================ equipment catalog (shared by every screen)
+// One tree and one API for phone and desktop. The tree is read whole (it is small) and cached only for the life of one screen.
+const getCatalog = () => api('GET', '/api/catalog');
+const rootNames = async () => { try { return (await getCatalog()).filter((n) => n.parent_id === null).map((n) => n.name); } catch { return S.settings.categories; } };
+const crumbText = (path) => String(path || '').split(' > ').join(' › ');
+
+// A drill-down chooser over the catalog. It is ONE implementation: it renders a column per level of the current path, and the
+// stylesheet decides the presentation — on a phone only the deepest level is shown (big touch rows, a Back button and a
+// breadcrumb); on a wide screen the levels sit side by side (Camera | Sony | A7 IV). Choosing a row selects that entry AND
+// opens its children, so a person can stop at any level. onChange(id|null, entryRow|null) fires on every choice.
+function mountCatalogChooser(root, rows, { value = null, onChange } = {}) {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  const kids = new Map();
+  for (const r of rows) { const k = r.parent_id ?? 0; if (!kids.has(k)) kids.set(k, []); kids.get(k).push(r); }
+  let path = [];
+  for (let n = value && byId.get(value); n; n = byId.get(n.parent_id)) path.unshift(n.id);
+  const render = (fromUser) => {
+    const cols = [];
+    for (let k = 0; k <= path.length; k++) {
+      const list = kids.get(k === 0 ? 0 : path[k - 1]) || [];
+      if (list.length) cols.push({ k, list });
+    }
+    const names = path.map((id) => byId.get(id).name);
+    root.innerHTML = `<div class="cc">
+      <div class="cc-top"><button type="button" class="cc-back" data-back ${path.length ? '' : 'hidden'} aria-label="Back">${icon('back')}<span>Back</span></button>
+        <nav class="cc-crumbs" aria-label="Selected path"><button type="button" data-crumb="-1" class="${path.length ? '' : 'cur'}">All equipment</button>${names.map((n, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${i}" class="${i === names.length - 1 ? 'cur' : ''}">${esc(n)}</button>`).join('')}</nav></div>
+      <div class="cc-cols">${cols.map(({ k, list }, i) => `<div class="cc-col${i === cols.length - 1 ? ' cc-last' : ''}" role="group" aria-label="Level ${i + 1}">${list.map((r) => {
+        const has = r.child_count > 0; const on = path[k] === r.id;
+        return `<button type="button" class="cc-row${on ? ' on' : ''}" data-level="${k}" data-id="${r.id}" ${on ? 'aria-current="true"' : ''}><span class="cc-name">${esc(r.name)}</span><span class="cc-meta">${r.available_count ? `${r.available_count} available` : 'None available'}</span>${has ? icon('chev', 'chev') : (on ? icon('check', 'chev') : '')}</button>`;
+      }).join('')}</div>`).join('')}</div>
+    </div>`;
+    const colsEl = $('.cc-cols', root);
+    if (fromUser) { $$('.cc-col', root).forEach((c) => { c.scrollTop = 0; }); colsEl.scrollLeft = colsEl.scrollWidth; }
+  };
+  const emit = () => { const id = path[path.length - 1] ?? null; onChange && onChange(id, id ? byId.get(id) : null); };
+  root.onclick = (e) => {
+    const row = e.target.closest('.cc-row'); const crumb = e.target.closest('[data-crumb]'); const back = e.target.closest('[data-back]');
+    if (row) path = [...path.slice(0, Number(row.dataset.level)), Number(row.dataset.id)];
+    else if (crumb) path = path.slice(0, Number(crumb.dataset.crumb) + 1);
+    else if (back) path = path.slice(0, -1);
+    else return;
+    render(true); emit();
+  };
+  render(false);
+  if (path.length) emit(); // a pre-selected entry counts as chosen
+  return { get id() { return path[path.length - 1] ?? null; } };
+}
+
+// The employee request flow over the catalog. ONE set of logic, two arrangements of the same pieces:
+//   wide screens   one screen — the cascading columns on the left, and on the right (in the space the columns don't use) the
+//                  request details for whatever level is selected: path, any-matching vs a specific item, notes, Send.
+//                  Any level is requestable at once, with or without children — there is no "Continue".
+//   narrow screens two steps — (1) drill through one level at a time, (2) the same details panel, full width.
+// The server re-checks everything; nothing here decides what an employee may request.
+async function requestFromCatalogSheet({ category, forUser } = {}) {
+  let rows;
+  try { rows = await getCatalog(); } catch (e) { return fail(e); }
+  const startRoot = category && rows.find((r) => r.parent_id === null && r.name.toLowerCase() === String(category).toLowerCase());
+  const st = { id: startRoot ? startRoot.id : null, row: startRoot || null, scope: 'any', assetId: null, items: null, itemsFor: null, message: '', needed_by: '' };
+  const split = rows.length > 0 && window.matchMedia('(min-width: 900px)').matches;
+  const { el, close } = sheet(`<div class="rq"><div class="rq-head"><h2 id="rq-title"></h2><p class="muted small" id="rq-sub" style="margin:2px 0 0"></p></div><div class="rq-body" id="rq-body"></div><div class="rq-foot" id="rq-foot"></div></div>`, { wide: true });
+  el.classList.add('tall');
+  if (split) el.classList.add('split');
+  const T = (sel) => $(sel, el);
+  const to = (path) => location.hash.startsWith(path);
+  const done = () => { close(); toast('Request sent to IT'); refreshBadge(); if (to('#/requests') || to('#/home')) route(true); };
+  let loadToken = 0;
+
+  // The request-details panel for the selected level (or, when the catalog is empty, a plain "what do you need" field).
+  const panelHtml = (r, inline) => `${r ? `<div class="rq-picked"><div class="grow"><div class="small muted">You are requesting</div><div class="rq-path">${esc(crumbText(r.path))}</div></div>${inline ? '' : '<button type="button" class="btn sm" id="rq-change">Change</button>'}</div>` : ''}
+    <form class="form-grid" id="f" style="margin-top:14px">
+      ${r ? `<fieldset class="rq-scope"><legend>How specific?</legend>
+        <label class="rq-opt"><input type="radio" name="scope" value="any" ${st.scope === 'any' ? 'checked' : ''}><span><strong>Any matching asset</strong><br><span class="small muted">${r.available_count ? `${r.available_count} available right now. ` : 'None are free right now. '}IT will choose a suitable one.</span></span></label>
+        <label class="rq-opt" id="rq-spec-opt"><input type="radio" name="scope" value="specific" ${st.scope === 'specific' ? 'checked' : ''} disabled><span><strong>A specific item</strong><br><span class="small muted" id="rq-spec-hint">Checking what is available…</span></span></label>
+        <div class="picker-list rq-items" id="rq-items" hidden></div>
+        <div class="rq-selected" id="rq-selected" hidden aria-live="polite"></div></fieldset>`
+      : `<label class="field"><span>What do you need?</span><input name="category" required maxlength="120" placeholder="e.g. Second monitor, USB-C hub"></label>`}
+      <label class="field"><span>Details</span><textarea name="message" placeholder="e.g. Second monitor for my desk, USB-C if possible">${esc(st.message)}</textarea></label>
+      <label class="field"><span>Needed by (optional)</span><input type="date" name="needed_by" min="${localToday()}" value="${esc(st.needed_by)}"></label>
+      <label class="check" id="rq-perm" hidden><input type="checkbox" name="permanent"><span>I need this <strong>permanently</strong> (IT approves permanent assignments)</span></label>
+      ${inline ? `<div class="sheet-actions" style="margin-top:4px"><button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary" id="go">${icon('send')} Send to IT</button></div>` : ''}
+    </form>`;
+
+  const paintItems = () => {
+    const box = T('#rq-items'); const hint = T('#rq-spec-hint'); const opt = T('#rq-spec-opt input');
+    if (!box || !hint || !st.items) return; // not rendered (yet), or the panel moved on
+    if (st.items.length) {
+      opt.disabled = false;
+      hint.textContent = `Pick one of ${st.items.length === 60 ? '60+' : st.items.length} available`;
+      // Whole row is the tap target; the right-hand "Select" / "Selected" pill says so out loud.
+      box.innerHTML = st.items.map((a) => { const on = st.assetId === a.id; return `<button type="button" data-id="${a.id}" class="${on ? 'on' : ''}" aria-pressed="${on}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span>${a.condition ? ' · ' + esc(a.condition) : ''}${a.location ? ' · ' + esc(a.location) : ''}</span></span><span class="rq-pick${on ? ' on' : ''}">${on ? `${icon('check')} Selected` : 'Select'}</span></button>`; }).join('');
+    } else { opt.disabled = true; hint.textContent = 'No individual items are available to pick right now.'; }
+    syncScope();
+  };
+  const syncScope = () => {
+    const f = T('#f'); if (!f || !f.scope) return;
+    const specific = f.scope.value === 'specific' && !!st.items && st.items.length > 0;
+    T('#rq-items').hidden = !specific;
+    if (!specific) f.scope.value = 'any'; // (a specific item with nothing to pick can't stay selected)
+    const perm = T('#rq-perm'); if (perm) perm.hidden = !(specific && st.assetId && !forUser);
+    if (!specific) st.assetId = null; // back to "Any matching" forgets the specific choice
+    // Summary of the choice, and no sending a "specific item" request until an item is really chosen.
+    const chosen = specific && st.items.find((a) => a.id === st.assetId);
+    const sum = T('#rq-selected'); sum.hidden = !specific;
+    sum.innerHTML = chosen ? `<span class="rq-sel-ok">${icon('check')}</span><span><span class="small muted">Selected item</span><br><strong>${esc(chosen.name)}</strong> <span class="mono small muted">${esc(chosen.tag)}</span></span>` : '<span class="small muted">Choose an item from the list above.</span>';
+    sum.classList.toggle('ok', !!chosen);
+    const go = T('#go'); if (go) go.disabled = specific && !chosen;
+  };
+  // Available items under the selected level, fetched once per level (a stale answer for a level the person has left is dropped).
+  const loadItems = async (r) => {
+    if (st.itemsFor === r.id && st.items) return paintItems();
+    const mine = ++loadToken; st.items = null; st.itemsFor = r.id;
+    let list;
+    try { list = (await api('GET', `/api/assets?catalog_node=${r.id}${isAdmin() ? '&status=available' : ''}`)).slice(0, 60); } catch { list = []; }
+    if (mine !== loadToken) return;
+    st.items = list; paintItems();
+  };
+  const wirePanel = (onChange) => {
+    const f = T('#f'); const r = st.row;
+    f.addEventListener('input', (e) => { if (e.target.name === 'message') st.message = e.target.value; if (e.target.name === 'needed_by') st.needed_by = e.target.value; });
+    if (r) {
+      f.addEventListener('change', (e) => { if (e.target.name === 'scope') { st.scope = e.target.value; syncScope(); paintItems(); } }); // repaint: leaving "specific" must visibly forget the chosen row
+      T('#rq-items').onclick = (e) => { const b = e.target.closest('button[data-id]'); if (!b) return; st.assetId = Number(b.dataset.id); paintItems(); };
+      loadItems(r);
+    }
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      const fd = Object.fromEntries(new FormData(f));
+      const body = { message: fd.message, needed_by: fd.needed_by };
+      if (r) body.catalog_node_id = r.id; else body.category = fd.category;
+      if (forUser) body.user_id = forUser.id;
+      if (r && fd.scope === 'specific') {
+        if (!st.assetId) return toast('Choose which item you want, or pick “Any matching asset”.', true);
+        body.asset_id = st.assetId;
+      }
+      if (fd.permanent && body.asset_id) {
+        const a = st.items.find((x) => x.id === body.asset_id);
+        return busy(T('#go'), async () => { if (await requestPermanentAssignment(a, body.message, r.id)) { close(); if (to('#/requests') || to('#/home')) route(true); } });
+      }
+      busy(T('#go'), async () => { await api('POST', '/api/requests', body); done(); });
+    };
+  };
+  const onChoose = (id, row) => { st.id = id; st.row = row; st.items = null; st.itemsFor = null; st.scope = 'any'; st.assetId = null; };
+
+  // ---- wide: one screen
+  const splitScreen = () => {
+    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
+    T('#rq-sub').textContent = 'Choose a category and narrow down as far as you like — you can request at any level.';
+    T('#rq-body').innerHTML = '<div class="rq-split"><div class="rq-left" id="cc-mount"></div><aside class="rq-right" id="rq-panel" aria-label="Request details"></aside></div>';
+    T('#rq-foot').remove();
+    const paintPanel = () => {
+      const panel = T('#rq-panel');
+      if (!st.row) { panel.innerHTML = '<div class="rq-hint">Choose a category on the left. The request form appears here.</div>'; return; }
+      panel.innerHTML = panelHtml(st.row, true);
+      wirePanel();
+    };
+    mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { onChoose(id, row); paintPanel(); } });
+    paintPanel();
+  };
+
+  // ---- narrow: two steps
+  const pickStep = () => {
+    T('#rq-title').textContent = forUser ? `Request equipment for ${forUser.name}` : 'Request equipment';
+    T('#rq-sub').textContent = rows.length ? 'Start broad, then narrow down. You can stop at any level.' : '';
+    T('#rq-body').innerHTML = rows.length ? '<div id="cc-mount"></div>' : '<p class="muted">The equipment list is empty. Describe what you need on the next screen.</p>';
+    T('#rq-foot').innerHTML = `<div class="rq-sel" id="rq-sel"></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="rq-next">Continue</button></div>`;
+    const paint = () => {
+      T('#rq-sel').innerHTML = st.row ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(st.row.path))}</strong>` : '<span class="muted small">Choose what you need</span>';
+      T('#rq-next').disabled = rows.length > 0 && !st.row;
+    };
+    if (rows.length) mountCatalogChooser(T('#cc-mount'), rows, { value: st.id, onChange: (id, row) => { onChoose(id, row); paint(); } });
+    paint();
+    T('#rq-next').onclick = detailStep;
+  };
+  const detailStep = () => {
+    T('#rq-title').textContent = 'Request details';
+    T('#rq-sub').textContent = '';
+    T('#rq-body').innerHTML = panelHtml(st.row, false);
+    T('#rq-foot').innerHTML = `<div class="sheet-actions" style="margin-top:0"><button type="button" class="btn" id="rq-back">${rows.length ? 'Back' : 'Cancel'}</button><button type="submit" form="f" class="btn primary" id="go">${icon('send')} Send to IT</button></div>`;
+    T('#rq-back').onclick = rows.length ? pickStep : close;
+    const ch = T('#rq-change'); if (ch) ch.onclick = pickStep;
+    wirePanel();
+  };
+
+  if (split) splitScreen(); else if (rows.length) pickStep(); else detailStep();
+}
+
+async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) {
   const { el, close } = sheet(`<h2>${esc(title)}</h2>
     <div class="row" style="margin:12px 0 0"><div class="search grow">${icon('search')}<input id="ap-q" placeholder="Search available assets" autocomplete="off"></div><button class="btn" id="ap-scan" type="button">${icon('scan')}</button></div>
     <div class="picker-list" id="ap-list"><div class="spinner"></div></div>
     <div class="sheet-actions"><button class="btn" data-close>Cancel</button></div>`);
   const load = async (q = '') => {
-    const u = new URLSearchParams({ status: 'available' }); if (q) u.set('q', q); else if (filterCategory) u.set('category', filterCategory);
-    let rows = await api('GET', '/api/assets?' + u);
-    if (!rows.length && filterCategory && !q) rows = await api('GET', '/api/assets?status=available');
+    const u = new URLSearchParams({ status: 'available' }); if (q) u.set('q', q); else if (catalogNode) u.set('catalog_node', catalogNode); else if (filterCategory) u.set('category', filterCategory);
+    let rows = await api('GET', '/api/assets?' + u).catch(() => []); // the requested catalog entry may have been archived since
+    if (!rows.length && (filterCategory || catalogNode) && !q) rows = await api('GET', '/api/assets?status=available');
     $('#ap-list', el).innerHTML = rows.length ? rows.map((a) => `<button data-id="${a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span> · ${esc(a.category)}${a.license_seats > 1 ? ` · ${a.license_seats - a.seats_used} seats free` : ''}</span></span></button>`).join('') : '<div class="empty small">No available assets match.</div>';
   };
   load();
@@ -932,13 +1271,17 @@ async function viewAssetForm(id) {
   let a = { category: S.settings.categories[0] || 'Other', condition: 'Good', tag: qs().get('tag') || '' };
   if (editing) a = (await api('GET', '/api/assets/' + id)).asset;
   const nextTag = editing ? null : (await api('GET', '/api/next-tag')).tag;
-  const cats = S.settings.categories.includes(a.category) ? S.settings.categories : [...S.settings.categories, a.category];
+  const rootList = await rootNames();
+  const cats = rootList.includes(a.category) ? rootList : [...rootList, a.category];
   const f = (name, label, attrs = '') => `<label class="field"><span>${label}</span><input name="${name}" value="${esc(a[name] ?? '')}" ${attrs}></label>`;
-  main().innerHTML = `${backLink(editing ? '#/asset/' + id : '#/assets', 'Cancel')}
+  main().innerHTML = `${backLink(editing ? '#/asset/' + id + ctxQuery() : '#/assets', 'Cancel')}
     <div class="page-head"><h1>${editing ? 'Edit asset' : 'Add an asset'}</h1></div>
     <form id="f" class="stack" autocomplete="off">
       <div class="card pad"><fieldset class="form-grid cols"><legend>The basics</legend>
         <label class="field full"><span>Name *</span><input name="name" required value="${esc(a.name || '')}" placeholder="e.g. Dell Latitude 7440"></label>
+        <label class="field full"><span>Equipment catalog</span><input type="hidden" name="catalog_node_id" id="cnode" value="${a.catalog_node_id || ''}">
+          <div class="cat-pick"><button type="button" class="btn grow cat-pick-btn" id="cpick">${icon('tag')}<span id="cpath">${a.catalog_path ? esc(crumbText(a.catalog_path)) : 'Not set — choose where this belongs'}</span></button><button type="button" class="btn" id="cclear" ${a.catalog_node_id ? '' : 'hidden'} aria-label="Clear catalog entry">${icon('x')}</button></div>
+          <span class="small muted">Pick the most specific entry that fits, e.g. Camera › Sony › A7 IV. The category follows the top level.</span></label>
         <label class="field"><span>Category</span><select name="category" id="cat">${cats.map((c) => `<option ${c === a.category ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></label>
         ${editing
           ? `<label class="field"><span>Asset tag</span><input value="${esc(a.tag)}" class="mono" disabled title="Asset tags can't be changed once created"></label>`
@@ -965,6 +1308,24 @@ async function viewAssetForm(id) {
   const catSel = $('#cat');
   const toggleLic = () => { const show = catSel.value === 'Software License' || /license|software|subscription/i.test(catSel.value) || a.license_key || a.license_seats; $('#lic').classList.toggle('hidden', !show); };
   catSel.onchange = toggleLic; toggleLic();
+  const setCatalog = (id, pathText) => {
+    $('#cnode').value = id || '';
+    $('#cpath').textContent = id ? crumbText(pathText) : 'Not set — choose where this belongs';
+    $('#cclear').hidden = !id;
+    if (id) { const top = pathText.split(' > ')[0]; if (![...catSel.options].some((o) => o.value === top)) catSel.add(new Option(top, top)); catSel.value = top; }
+    catSel.disabled = !!id; toggleLic();
+  };
+  if (a.catalog_node_id) catSel.disabled = true;
+  $('#cclear').onclick = () => setCatalog(null);
+  $('#cpick').onclick = async () => {
+    let rows; try { rows = await getCatalog(); } catch (e) { return fail(e); }
+    let picked = null;
+    const { el: sh, close } = sheet(`<div class="rq"><div class="rq-head"><h2>Equipment catalog</h2><p class="muted small" style="margin:2px 0 0">Choose the most specific entry for this asset.</p></div><div class="rq-body" id="cc-mount"></div>
+      <div class="rq-foot"><div class="rq-sel" id="rq-sel"><span class="muted small">Choose an entry</span></div><div class="sheet-actions" style="margin-top:10px"><button type="button" class="btn" data-close>Cancel</button><button type="button" class="btn primary" id="cuse" disabled>Use this entry</button></div></div></div>`, { wide: true });
+    sh.classList.add('tall');
+    mountCatalogChooser($('#cc-mount', sh), rows, { value: Number($('#cnode').value) || null, onChange: (id, row) => { picked = row; $('#cuse', sh).disabled = !row; $('#rq-sel', sh).innerHTML = row ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(row.path))}</strong>` : '<span class="muted small">Choose an entry</span>'; } });
+    $('#cuse', sh).onclick = () => { if (picked) setCatalog(picked.id, picked.path); close(); };
+  };
   $$('[data-scan]').forEach((b) => b.onclick = () => openScanner({ title: b.dataset.scan === 'tag' ? 'Scan asset tag' : 'Scan serial number', onResult: (code) => { $(`[name=${b.dataset.scan}]`).value = code; toast('Scanned ' + code); } }));
   const ph = $('#ph'); if (ph) ph.onchange = () => { $('#ph-label').textContent = ph.files.length ? `${ph.files.length} photo${ph.files.length > 1 ? 's' : ''} selected` : 'Take or choose photos'; };
   $('#f').onsubmit = (e) => {
@@ -976,13 +1337,14 @@ async function viewAssetForm(id) {
       if (ph && ph.files.length) await uploadPhotos(saved.id, ph.files);
       toast(editing ? 'Saved' : `Added ${saved.tag}`);
       if (!editing) history.replaceState(null, '', '#/assets');
-      go('#/asset/' + saved.id);
+      go('#/asset/' + saved.id + (editing ? ctxQuery() : ''));
     });
   };
 }
 
 // ============================================================ scan
 function viewScan() {
+  const scanned = (c) => handleScannedCode(c, srcQ('scan'));
   main().innerHTML = `<div class="page-head"><h1>Scan</h1></div>
     <div class="stack">
       <button class="card pad" id="go" style="width:100%;border:0;cursor:pointer;text-align:center;padding:36px 16px;background:var(--brand-ink);color:#fff">
@@ -992,10 +1354,10 @@ function viewScan() {
         <div class="input-group"><input id="code" placeholder="Scan or type a tag / serial" autocomplete="off" autocapitalize="characters" enterkeyhint="go" class="mono"><button class="btn primary">Find</button></div></label></form></div>
       <p class="small muted" style="text-align:center">${isAdmin() ? 'Scanning a barcode that isn’t in the system yet lets you tag a new asset with it.' : 'Scan any tagged item to see it, check it out or request it.'}</p>
     </div>`;
-  $('#go').onclick = () => openScanner({ onResult: handleScannedCode });
-  $('#m').onsubmit = (e) => { e.preventDefault(); const v = $('#code').value.trim(); if (v) handleScannedCode(v); };
+  $('#go').onclick = () => openScanner({ onResult: scanned });
+  $('#m').onsubmit = (e) => { e.preventDefault(); const v = $('#code').value.trim(); if (v) scanned(v); };
   if (window.matchMedia('(min-width: 900px)').matches) $('#code').focus();
-  else if (!S.silent && !$('.scanner')) openScanner({ onResult: handleScannedCode }); // phones: jump straight into the camera
+  else if (!S.silent && !$('.scanner')) openScanner({ onResult: scanned }); // phones: jump straight into the camera
 }
 
 // ============================================================ requests
@@ -1018,12 +1380,15 @@ async function viewRequests() {
     if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
     const find = (id) => rows.find((r) => r.id === Number(id));
     const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
-    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.category || 'Equipment')}${r.asset_name ? ` — ${esc(r.asset_name)}` : ''}`);
+    const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${r.asset_name && !r.catalog_path ? ` — ${esc(r.asset_name)}` : ''}`);
+    // What exactly was asked for: the catalog level as it was when the request was made, and whether any matching asset or
+    // one specific item. (Older requests have only the free-text category.)
+    const scopeOf = (r) => (r.type !== 'equipment' ? '' : r.asset_id ? `Specific asset: ${esc(r.asset_label || [r.asset_tag, r.asset_name].filter(Boolean).join(' — '))}` : r.catalog_path ? 'Any matching asset' : '');
     // The action buttons a request offers; used by both the list card and the detail sheet (wired by wireActions).
     const actionsFor = (r) => {
       const isRet = r.type === 'return'; const isIssue = r.type === 'issue'; const perm = isPermReq(r);
       if (!['open', 'approved', 'dropped_off'].includes(r.status)) return '';
-      if (isAdmin() && isIssue) return `<button class="btn sm primary" data-resolve="${r.id}">${icon('check')} Mark resolved</button>${r.asset_id ? `<a class="btn sm" href="#/asset/${r.asset_id}">View asset</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Dismiss</button>`;
+      if (isAdmin() && isIssue) return `<button class="btn sm primary" data-resolve="${r.id}">${icon('check')} Mark resolved</button>${r.asset_id ? `<a class="btn sm" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">View asset</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Dismiss</button>`;
       // Employees: Cancel is offered only when the server says this exact request is still eligible (can_cancel). A return IT
       // asked for, or one already dropped off, is answered with "I've dropped it off" instead.
       if (!isAdmin()) {
@@ -1033,13 +1398,13 @@ async function viewRequests() {
       }
       if (isAdmin() && perm && r.asset_id) return `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
       if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
-      if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
+      if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
       return '';
     };
     // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
     const wireActions = (root, before) => {
       const on = (sel, attr, fn) => $$(sel, root).forEach((b) => b.onclick = (e) => { before && before(); fn(find(b.dataset[attr]), e.currentTarget); });
-      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, onPick: (assetId) => {
+      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, catalogNode: r.catalog_node_id, onPick: (assetId) => {
         const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
           <form class="form-grid" id="f">${assignTypeFields()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
           <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
@@ -1062,8 +1427,10 @@ async function viewRequests() {
         <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, statusLabel(r))}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
           ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
-          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
-          ${row('Category', esc(r.category || ''))}
+          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
+          ${row('Requested', r.catalog_path ? `<strong>${esc(crumbText(r.catalog_path))}</strong>` : '')}
+          ${row('Scope', r.type === 'equipment' ? scopeOf(r) : '')}
+          ${row('Category', r.catalog_path ? '' : esc(r.category || ''))}
           ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
           ${row('Submitted', esc(fmtStamp(r.created_at)))}
           ${row(r.type === 'issue' ? 'Description' : 'Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
@@ -1081,7 +1448,8 @@ async function viewRequests() {
       return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
         <div class="thumb">${icon(requestIcon(r))}</div>
         <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, statusLabel(r))}</div>
-          <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
+          <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${esc(r.asset_tag)}</a>` : ''}</div>
+          ${scopeOf(r) && r.type === 'equipment' ? `<div class="small" style="margin-top:4px"><span class="scope-tag ${r.asset_id ? 'spec' : ''}">${scopeOf(r)}</span></div>` : ''}
           ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
           <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
@@ -1167,9 +1535,9 @@ async function viewPerson(id) {
         <button type="button" class="btn sm toggle ${u.can_self_checkout ? 'on' : ''}" id="selfco" aria-pressed="${u.can_self_checkout ? 'true' : 'false'}" title="Click to ${u.can_self_checkout ? 'turn off' : 'turn on'}">${icon(u.can_self_checkout ? 'check' : 'x')} Self-checkout ${u.can_self_checkout ? 'enabled' : 'disabled'}</button>
         ${u.id !== S.me.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" id="toggle">${u.active ? 'Deactivate' : 'Reactivate'}</button>` : ''}</div></div>
     <div class="section-title">Has now (${d.current.length})</div>
-    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtStamp(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
+    <div class="card">${d.current.length ? `<ul class="list">${d.current.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('person', { id })}">${thumbHtml(m.thumb, m.category)}<div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)} · since ${fmtStamp(m.checked_out_at)}</div></div>${isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}${icon('chev', 'chev')}</a></li>`).join('')}</ul>` : `<div class="empty"><p>Nothing checked out.</p></div>`}
       ${u.active ? `<div class="card-body" style="border-top:1px solid var(--line)"><button class="btn block" id="give">${icon('out')} Check out something to ${esc(u.name.split(' ')[0])}</button></div>` : ''}</div>
-    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
+    ${d.past.length ? `<div class="section-title">Past equipment</div><div class="card"><ul class="list">${d.past.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('person', { id })}" style="min-height:0"><div class="grow"><div class="title truncate">${esc(m.asset_name)} <span class="mono small muted">${esc(m.tag)}</span></div><div class="sub">${typeText(m)} · ${fmtDate(m.checked_out_at)} → ${fmtDate(m.returned_at)}${m.condition_in ? ` · returned ${esc(m.condition_in)}` : ''}</div></div></a></li>`).join('')}</ul></div>` : ''}`;
   $('#edit').onclick = () => personSheet(u, () => route(true));
   const gl = $('#give-login');
   if (gl) gl.onclick = () => {
@@ -1268,7 +1636,7 @@ function viewImport() {
 // ============================================================ activity
 async function viewActivity() {
   const rows = await api('GET', '/api/activity?limit=300');
-  main().innerHTML = `<div class="page-head"><h1>Activity log</h1></div><div class="card">${activityList(rows, true)}</div>`;
+  main().innerHTML = `<div class="page-head"><h1>Activity log</h1></div><div class="card">${activityList(rows, true, 'activity')}</div>`;
 }
 
 // ============================================================ settings
@@ -1282,7 +1650,7 @@ async function viewSettings() {
         <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label>
         <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
       <div class="card pad"><div class="form-grid cols">
-        <label class="field"><span>Categories (one per line)</span><textarea name="categories" rows="8">${esc(s.categories.join('\n'))}</textarea></label>
+        <div class="field"><span>Categories &amp; equipment types</span><a class="btn" href="#/catalog">${icon('tag')} Manage the equipment catalog</a><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
         <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="8">${esc(s.locations.join('\n'))}</textarea></label></div></div>
       <button class="btn primary lg block" id="save">Save settings</button>
     </form>
@@ -1300,7 +1668,7 @@ async function viewSettings() {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
-      categories: fd.get('categories').split('\n'), locations: fd.get('locations').split('\n') };
+      locations: fd.get('locations').split('\n') };
     busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); });
   };
   $('#test').onclick = (e) => busy(e.currentTarget, async () => {
@@ -1310,15 +1678,157 @@ async function viewSettings() {
   });
 }
 
+// ============================================================ admin: equipment catalog
+// The same card-grid drill-down as Browse. Browsing and managing are separate: cards (and the breadcrumb) only navigate;
+// "Manage" and "+ Add subcategory" act on the category you are inside. Inside a category the first card is the virtual
+// "All in <name>" (browse-only: every non-archived asset in the branch, no management). Without it the page lists what is
+// filed directly in the category.
+async function viewCatalog() {
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0 };
+  // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
+  // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
+  const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact"></span></div>
+    <div class="stack">
+      <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
+      <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
+      <div id="ct"><div class="spinner"></div></div>
+    </div>`;
+  const byId = (id) => st.rows.find((r) => r.id === id);
+  const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
+  const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : 'No assets');
+  const assetRow = (a, node) => {
+    const rel = a.catalog_node_id !== node.id && a.catalog_path ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
+    const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+      <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+  };
+  const render = () => {
+    const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
+    const inAll = !!n && st.all && ch.length > 0; // a category with nothing below it has no wider branch to show
+    const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
+    const cards = [];
+    if (n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
+    for (const c of ch) cards.push(cgCard({ attrs: `data-select="${c.id}"`, name: c.name, meta: `${countText(c.asset_count)}${c.child_count ? ` · ${c.child_count} ${c.child_count === 1 ? 'subcategory' : 'subcategories'}` : ''}`, kind: c.live ? '' : 'off', extra: c.archived_at ? ' <span class="pill plain">Archived</span>' : !c.live ? ' <span class="pill plain">Hidden</span>' : '' }));
+    const list = st.assets;
+    const direct = list && n ? list.filter((a) => a.catalog_node_id === n.id) : [];
+    let below = '';
+    if (n) {
+      const shown = inAll ? list : direct;
+      const title = inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets';
+      below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
+        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
+        : `<p class="muted small ct-empty">${inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
+    }
+    // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
+    const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
+    // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
+    // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
+    $('#pagetitle').textContent = n ? n.name : 'Equipment catalog'; // the title is the real entry being viewed (stored name, no pluralizing)
+    const up = n && !st.all ? byId(n.parent_id) : null;
+    $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : '';
+    $('#headact').innerHTML = n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`;
+    if (!n) $('#addroot').onclick = addRoot;
+    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+      ${below}`;
+  };
+  const loadAssets = async () => {
+    const mine = ++st.token; const id = st.sel;
+    st.assets = null; render();
+    if (!id) return;
+    try {
+      const list = await api('GET', `/api/assets?catalog_node=${id}`);
+      if (mine !== st.token) return;
+      st.assets = list.sort((a, b) => String(a.catalog_path || '').localeCompare(String(b.catalog_path || '')) || a.name.localeCompare(b.name));
+    } catch (e) { if (mine !== st.token) return; st.assets = []; fail(e); }
+    render();
+  };
+  // Read the URL into state; refetch the asset list only when the viewed entry changed.
+  const apply = () => {
+    if (!st.rows.length && !st.loaded) return;
+    const p = qs(); const id = Number(p.get('node')); const prev = st.sel;
+    st.sel = byId(id) ? id : null;
+    st.all = !!st.sel && p.get('all') === '1';
+    if (p.get('node') && !st.sel) history.replaceState(null, '', '#/catalog'); // unknown/stale node in the URL: fall back to the root
+    if (st.sel !== prev || st.assets === null) loadAssets(); else render();
+  };
+  const reload = async () => {
+    const was = byId(st.sel);
+    st.rows = await api('GET', '/api/catalog?include_archived=1'); st.loaded = true;
+    if (st.sel && !byId(st.sel)) { // the entry we were in no longer exists (deleted): step up to where it was
+      st.sel = null; const up = was && byId(was.parent_id) ? was.parent_id : null;
+      history.replaceState(null, '', hashFor(up));
+    }
+    st.assets = null; apply();
+  };
+  const nameSheet = ({ title, text, label, value = '', okLabel, onOk }) => {
+    const { el, close } = sheet(`<h2>${esc(title)}</h2>${text ? `<p class="muted small" style="margin-top:0">${esc(text)}</p>` : ''}
+      <form class="form-grid" id="f"><label class="field"><span>${esc(label)}</span><input name="name" required maxlength="100" value="${esc(value)}" autocomplete="off"></label>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${esc(okLabel)}</button></div></form>`);
+    setTimeout(() => $('input', el).select(), 60);
+    $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await onOk(new FormData(e.target).get('name')); close(); }); };
+  };
+  const addBelow = (r) => nameSheet({ title: `Add below ${r.name}`, text: crumbText(r.path), label: 'Name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name, parent_id: r.id }); await reload(); toast('Added'); } });
+  const manage = (id) => {
+    const r = byId(id); if (!r) return;
+    const inUse = r.child_count > 0 || r.direct_asset_count > 0 || r.request_count > 0;
+    const { el, close } = sheet(`<h2>${esc(r.name)}</h2>
+      <div class="ct-path small"><span class="muted">Full path</span><div><strong>${esc(crumbText(r.path))}</strong></div>${r.live ? '' : '<div class="muted">Not visible to employees.</div>'}</div>
+      <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.direct_asset_count} asset${r.direct_asset_count === 1 ? '' : 's'} filed directly here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
+      <div class="stack">
+        <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add an entry below “${esc(r.name)}”</button>
+        <button type="button" class="btn lg block" data-act="rename">${icon('edit')} Rename</button>
+        <button type="button" class="btn lg block" data-act="move">${icon('out')} Move to a different parent</button>
+        ${r.archived_at ? `<button type="button" class="btn lg block" data-act="restore">${icon('in')} Restore</button>` : `<button type="button" class="btn lg block" data-act="archive">${icon('archive')} Archive</button>`}
+        ${inUse ? `<p class="small muted" style="margin:0">It can't be deleted while it has entries below it, assets, or requests. Archive it instead.</p>` : `<button type="button" class="btn lg block danger" data-act="delete">${icon('trash')} Delete (nothing uses it)</button>`}
+      </div>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+    const act = {
+      add: () => { close(); addBelow(r); },
+      rename: () => { close(); nameSheet({ title: 'Rename', text: 'Past requests keep the wording they were made with.', label: 'Name', value: r.name, okLabel: 'Save', onOk: async (name) => { await api('PUT', `/api/catalog/${r.id}`, { name }); await reload(); toast('Renamed'); } }); },
+      move: () => {
+        close();
+        const bad = new Set([r.id]); let grew = true;
+        while (grew) { grew = false; for (const x of st.rows) if (!bad.has(x.id) && bad.has(x.parent_id)) { bad.add(x.id); grew = true; } }
+        const opts = st.rows.filter((x) => x.live && !bad.has(x.id));
+        const { el: m, close: closeM } = sheet(`<h2>Move “${esc(r.name)}”</h2><p class="muted small" style="margin-top:0">Everything below it moves too. Pick the new parent.</p>
+          <form class="form-grid" id="f"><label class="field"><span>New parent</span><select name="parent_id"><option value="">(top level — a category)</option>${opts.map((x) => `<option value="${x.id}" ${x.id === r.parent_id ? 'selected' : ''}>${esc(crumbText(x.path))}</option>`).join('')}</select></label>
+          <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Move</button></div></form>`);
+        $('#f', m).onsubmit = (e) => { e.preventDefault(); busy($('#go', m), async () => { await api('PUT', `/api/catalog/${r.id}`, { parent_id: new FormData(e.target).get('parent_id') || null }); closeM(); await reload(); toast('Moved'); }); };
+      },
+      archive: async () => { if (await confirmSheet(`Archive “${r.name}”?`, `It and everything below it will stop appearing for employees. Assets and past requests keep their history. You can restore it later.`, 'Archive')) { close(); await api('POST', `/api/catalog/${r.id}/archive`, {}); await reload(); toast('Archived'); } },
+      restore: async () => { await api('POST', `/api/catalog/${r.id}/restore`, {}); close(); await reload(); toast('Restored'); },
+      delete: async () => { if (await confirmSheet(`Delete “${r.name}”?`, 'Nothing uses it, so it can be removed completely. This cannot be undone.', 'Delete', true)) { close(); await api('DELETE', `/api/catalog/${r.id}`); await reload(); toast('Deleted'); } },
+    };
+    el.onclick = (e) => { const b = e.target.closest('[data-act]'); if (b) Promise.resolve(act[b.dataset.act]()).catch(fail); };
+  };
+  const addRoot = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
+  $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
+  // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
+  $('#ct').onclick = (e) => {
+    const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
+    const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
+    const to = (h) => { go(h); window.scrollTo(0, 0); };
+    if (e.target.closest('[data-all]')) return to(hashFor(st.sel, !st.all));
+    const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
+    const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
+  };
+  $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
+  S.soft = { base: '#/catalog', fn: apply };
+  await reload();
+}
+
 // ============================================================ profile / more
 function viewMore() {
   if (window.matchMedia('(min-width: 900px)').matches && !isAdmin()) return go('#/profile');
   const items = isAdmin() ? [
     ['#/people', 'users', 'People', 'Add employees, set admins, see who has what'],
+    ['#/catalog', 'tag', 'Equipment catalog', 'Categories, brands and models people can request'],
     ['#/labels', 'printer', 'Print labels', 'Barcode stickers for your asset tags'],
     ['#/import', 'upload', 'Import / export', 'Bulk add from a spreadsheet, download CSV'],
     ['#/activity', 'history', 'Activity log', 'Every check-out, check-in and change'],
-    ['#/settings', 'settings', 'Settings', 'Check-out rules, categories, email'],
+    ['#/settings', 'settings', 'Settings', 'Check-out rules, locations, email'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ] : [
     ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],
@@ -1341,12 +1851,12 @@ async function viewEquipment() {
   const temp = d.mine.filter((m) => m.assignment_type === 'checkout');
   const flag = (m) => (m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : '');
   const detail = (m) => [m.category, [m.brand, m.model].filter(Boolean).join(' '), m.location].filter((v) => v && v !== m.asset_name).map(esc).join(' · ');
-  const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
+  const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('equipment')}">${thumbHtml(m.thumb, m.category)}
     <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub truncate"><span class="mono">${esc(m.tag)}</span>${detail(m) ? ' · ' + detail(m) : ''}</div>
       <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a>${holdingActions(m)}</li>`;
   const group = (title, rows, empty, iconName) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${rows.length} item${rows.length === 1 ? '' : 's'}</span></div>
     ${rows.length ? `<ul class="list">${rows.join('')}</ul>` : `<div class="empty">${icon(iconName)}<p>${empty}</p></div>`}</div>`;
-  main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine)}
+  main().innerHTML = `<div class="page-head"><h1>My equipment</h1></div><div class="stack">${returnBanners(d.mine, 'equipment')}
     ${group('Permanent assignments', perm.map((m) => row(m, `Assigned since ${esc(fmtStamp(m.checked_out_at))}`, flag(m) || pill('checked_out', 'Assigned'))), 'No equipment is permanently assigned to you.', 'laptop')}
     ${group('Temporary checkouts', temp.map((m) => row(m, `Checked out ${esc(fmtStamp(m.checked_out_at))} · return by ${esc(fmtDate(m.due_date))}${m.due_time ? ' ' + esc(fmtClock(m.due_time)) : ''}`, flag(m))), 'You have nothing checked out temporarily.', 'out')}
     <p class="small muted" style="text-align:center">Looking for something else? <a href="#/assets">Browse equipment</a> · <a href="#/history">History</a></p></div>`;
@@ -1369,7 +1879,7 @@ async function viewHistory() {
         <div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)}</div>
         <div class="sub">Since ${esc(fmtStamp(m.checked_out_at))}${m.now ? '' : ` · Returned ${esc(fmtStamp(m.returned_at))}`}</div></div>
       ${m.now ? (isOverdue(m.due_date) ? pill('overdue', 'Overdue') : pill('checked_out', 'Current')) : ''}${m.now ? icon('chev', 'chev') : ''}`;
-    return m.now ? `<li><a class="item" href="#/asset/${m.asset_id}">${body}</a></li>` : `<li><div class="item">${body}</div></li>`;
+    return m.now ? `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('history')}">${body}</a></li>` : `<li><div class="item">${body}</div></li>`;
   };
   main().innerHTML = `${head}<div class="stack"><div class="card">${rows.length
     ? `<ul class="list">${rows.map(item).join('')}</ul>`

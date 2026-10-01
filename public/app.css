@@ -324,3 +324,97 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 @media (min-width: 900px) { .desk-only { display: inline-flex; } }
 .spinner { width: 22px; height: 22px; border: 3px solid var(--line); border-top-color: var(--brand-accent); border-radius: 50%; animation: spin .7s linear infinite; margin: 40px auto; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- equipment catalog (Phase 2 slice 3) ----------
+   One chooser markup; phone shows only the deepest level (Back + breadcrumb), wide screens show the levels side by side. */
+.sheet.tall { display: flex; flex-direction: column; height: 92vh; height: 92dvh; overflow: hidden; }
+@media (min-width: 700px) { .sheet.tall { height: min(86vh, 700px); } }
+.rq { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.rq-head { flex: none; }
+.rq-body { flex: 1; min-height: 0; overflow-y: auto; margin: 12px -4px 0; padding: 0 4px 12px; -webkit-overflow-scrolling: touch; }
+.rq-foot { flex: none; border-top: 1px solid var(--line); padding-top: 12px; }
+.rq-sel { min-height: 22px; line-height: 1.35; word-break: break-word; }
+.rq-picked { display: flex; align-items: center; gap: 12px; background: var(--brand-accent-soft); border-radius: 12px; padding: 12px 14px; }
+.rq-path { font-weight: 700; word-break: break-word; }
+.rq-scope { display: grid; gap: 8px; }
+.rq-opt { display: flex; gap: 12px; align-items: flex-start; border: 1px solid var(--line); border-radius: 12px; padding: 13px 14px; cursor: pointer; min-height: 56px; }
+.rq-opt:has(input:checked) { border-color: var(--brand-accent); background: var(--brand-accent-soft); }
+.rq-opt:has(input:disabled) { opacity: .65; cursor: default; }
+.rq-opt input { width: 22px; height: 22px; min-height: 0; flex: none; margin-top: 1px; accent-color: var(--brand-accent); }
+.rq-items { max-height: none; margin-top: 0; }
+.rq-items button { min-height: 60px; }
+.cc-top { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; min-height: 40px; }
+.cc-back { display: inline-flex; align-items: center; gap: 4px; flex: none; min-height: 44px; padding: 0 12px 0 6px; border: 1px solid var(--line); background: var(--surface); border-radius: 11px; font: inherit; font-weight: 650; color: var(--text); cursor: pointer; }
+.cc-back[hidden] { display: none; }
+.cc-back svg { width: 20px; height: 20px; }
+.cc-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; min-width: 0; font-size: 14px; color: var(--muted); }
+.cc-crumbs button { border: 0; background: transparent; font: inherit; color: var(--brand-accent); padding: 8px 2px; cursor: pointer; min-height: 36px; }
+.cc-crumbs button.cur { color: var(--text); font-weight: 700; cursor: default; }
+.cc-cols { display: block; }
+.cc-col { border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--surface); }
+.cc-col:not(.cc-last) { display: none; }
+.cc-row { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 62px; padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.cc-row:last-child { border-bottom: 0; }
+.cc-row:active, .cc-row:hover { background: var(--surface-2); }
+.cc-row.on { background: var(--brand-accent-soft); }
+.cc-name { flex: 1; font-weight: 650; font-size: 16px; min-width: 0; overflow-wrap: anywhere; }
+.cc-meta { flex: none; font-size: 12.5px; color: var(--muted); }
+.cc-row .chev { width: 20px; height: 20px; flex: none; color: var(--muted); }
+.cc-row.on .chev { color: var(--brand-accent); }
+@media (min-width: 700px) {
+  .cc-back { display: none; }
+  .cc-cols { display: flex; align-items: stretch; border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; max-height: 420px; width: max-content; max-width: 100%; }
+  .cc-col { display: block !important; flex: 0 0 210px; border: 0; border-right: 1px solid var(--line); border-radius: 0; overflow-y: auto; }
+  .cc-col:last-child { border-right: 0; }
+  .cc-row { min-height: 48px; padding: 9px 12px; }
+  .cc-meta { display: none; }
+  .cc-row:hover .cc-meta { display: inline; }
+}
+.cat-pick { display: flex; gap: 8px; }
+.cat-pick-btn { justify-content: flex-start; text-align: left; min-width: 0; }
+.cat-pick-btn span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-tag { display: inline-block; background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 2px 9px; font-weight: 600; }
+.scope-tag.spec { background: var(--brand-accent-soft); border-color: transparent; color: var(--brand-accent); }
+.rq [hidden], .cat-pick [hidden] { display: none !important; }
+
+/* ---- employee request, wide screens: columns on the left, the request form in the space on the right (one screen) ---- */
+@media (min-width: 900px) {
+  .sheet.tall.split { max-width: 1080px !important; }
+  .rq-split { display: flex; align-items: flex-start; gap: 18px; }
+  .rq-left { flex: 0 1 auto; min-width: 0; max-width: 62%; }
+  .rq-right { flex: 1 1 320px; min-width: 300px; border-left: 1px solid var(--line); padding-left: 18px; }
+  .rq-hint { color: var(--muted); font-size: 14px; padding: 18px 4px; }
+}
+/* ---- catalog card grid (employee Browse + admin catalog): wraps onto as many rows as needed, never scrolls sideways ---- */
+.cg { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 12px; }
+@media (min-width: 700px) { .cg { grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); } }
+@media (min-width: 1100px) { .cg { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); } }
+.cg-card { position: relative; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; min-height: 96px; padding: 14px 40px 14px 14px; text-align: left; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); color: var(--text); font: inherit; cursor: pointer; min-width: 0; }
+.cg-card:hover { border-color: var(--brand-accent); }
+.cg-card:active { background: var(--surface-2); }
+.cg-name { font-weight: 700; font-size: 16px; line-height: 1.25; overflow-wrap: anywhere; }
+.cg-meta { color: var(--muted); font-size: 13px; }
+.cg-chev { position: absolute; right: 10px; top: 14px; width: 20px; height: 20px; color: var(--muted); }
+.cg-card.all { background: var(--brand-accent-soft); border-color: transparent; }
+.cg-card.all .cg-name { color: var(--brand-accent); }
+.cg-card.on { border-color: var(--brand-accent); box-shadow: 0 0 0 2px var(--brand-accent); }
+.cg-card.on .cg-chev { color: var(--brand-accent); }
+.cg-card.off { opacity: .65; }
+.cg-top { margin-bottom: 12px; flex-wrap: wrap; }
+.ct-h { margin: 18px 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.ct-h .muted { font-weight: 500; }
+.ct-empty { margin: 4px 0 10px; }
+.ct-path { background: var(--surface-2); border-radius: 10px; padding: 10px 12px; margin-top: 8px; word-break: break-word; }
+.desk-only-inline { display: none; }
+@media (min-width: 700px) { .desk-only-inline { display: inline; margin-left: 6px; } }
+/* ---- request: specific item rows ---- */
+.rq-items button { align-items: center; }
+.rq-pick { flex: none; display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 6px 12px; font-size: 13px; font-weight: 650; color: var(--text); }
+.rq-pick svg { width: 16px; height: 16px; }
+.rq-pick.on { background: var(--brand-accent); border-color: var(--brand-accent); color: var(--brand-accent-ink); }
+.rq-selected { display: flex; align-items: center; gap: 10px; margin-top: 10px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 12px; }
+.rq-selected[hidden] { display: none; }
+.rq-selected.ok { border-style: solid; border-color: var(--brand-accent); background: var(--brand-accent-soft); }
+.rq-sel-ok { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--brand-accent); color: var(--brand-accent-ink); flex: none; }
+.rq-sel-ok svg { width: 16px; height: 16px; }
+.page-head > span:empty { display: none; }

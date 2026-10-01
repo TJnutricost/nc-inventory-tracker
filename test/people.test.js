@@ -244,7 +244,7 @@ test('pre-1D database: every user becomes one employee + one linked account with
   for (const t of ['employees', 'accounts']) assert.equal(d.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(t).seq, usersSeq, `${t} keeps the legacy id high-water mark`);
   const fks = (t) => d.pragma(`foreign_key_list(${t})`).map((f) => `${f.from}->${f.table}`).sort();
   assert.deepEqual(fks('assignments'), ['asset_id->assets', 'checked_out_by->accounts', 'employee_id->employees', 'returned_to->accounts']);
-  assert.deepEqual(fks('requests'), ['asset_id->assets', 'created_by->accounts', 'resolved_by->accounts', 'user_id->employees']);
+  assert.deepEqual(fks('requests'), ['asset_id->assets', 'catalog_node_id->catalog_nodes', 'created_by->accounts', 'resolved_by->accounts', 'user_id->employees']); // catalog_node_id: migration 11
   assert.deepEqual(fks('activity'), ['actor_id->accounts', 'asset_id->assets', 'subject_user_id->employees']);
   assert.deepEqual(fks('tokens'), ['user_id->accounts']);
   assert.deepEqual(fks('photos'), ['asset_id->assets', 'uploaded_by->accounts']);
