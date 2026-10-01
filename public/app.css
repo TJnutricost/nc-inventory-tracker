@@ -417,8 +417,4 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .rq-selected.ok { border-style: solid; border-color: var(--brand-accent); background: var(--brand-accent-soft); }
 .rq-sel-ok { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--brand-accent); color: var(--brand-accent-ink); flex: none; }
 .rq-sel-ok svg { width: 16px; height: 16px; }
-/* Page-level Back: upper-left, in the title row — navigation, visually separate from the action buttons. */
 .page-head > span:empty { display: none; }
-.page-back { display: inline-flex; align-items: center; gap: 2px; flex: none; min-height: 44px; padding: 0 14px 0 8px; border: 1px solid var(--line); background: var(--surface); border-radius: 11px; font: inherit; font-weight: 650; color: var(--text); cursor: pointer; }
-.page-back svg { width: 20px; height: 20px; }
-.page-back:hover { border-color: var(--brand-accent); }
