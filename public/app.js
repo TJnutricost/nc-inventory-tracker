@@ -629,7 +629,7 @@ async function viewBrowse() {
     st.everything = !st.path.length && p.get('all') === '1';
     if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
   };
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1>Browse equipment</h1></div>
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1></div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
@@ -644,13 +644,15 @@ async function viewBrowse() {
     const bn = $('#bn');
     const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
     $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
+    $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
     if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
     const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
     const chain = st.path.map((id) => byId.get(id));
     const cards = [];
     if (!c) cards.push(cgCard({ attrs: 'data-everything', name: 'All equipment', meta: 'Everything available', kind: `all${st.everything ? ' on' : ''}`, chev: false }));
     else if (!leaf) cards.push(cgCard({ attrs: 'data-all', name: `All in ${c.name}`, meta: availMeta(c.available_count), kind: 'all on', chev: false }));
-    for (const r of (leaf ? kidsOf(c.parent_id ?? null) : kids)) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count), kind: leaf && r.id === c.id ? 'on' : '', chev: !(leaf && r.id === c.id) }));
+    // Only THIS entry's children. Never the top-level (or sibling) cards again: a leaf shows just its assets; going elsewhere is Back / a breadcrumb.
+    for (const r of kids) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count) }));
     bn.innerHTML = `${chain.length ? cgTop(chain, { allLabel: 'All equipment' }) : ''}${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : ''}`;
   };
   const rowHtml = (a) => {
