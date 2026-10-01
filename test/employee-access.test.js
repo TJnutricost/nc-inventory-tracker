@@ -297,7 +297,7 @@ test('front end: employee navigation has My equipment (desktop + mobile Account)
   assert.doesNotMatch(src, /'Mine'/, 'the Mine filter is gone');
   assert.doesNotMatch(src, /employee_id', S\.me\.id/, 'Browse no longer queries by holder');
   const view = src.slice(src.indexOf('async function viewEquipment()'), src.indexOf('// Employee History:'));
-  for (const bit of ['/api/dashboard', 'Permanent assignments', 'Temporary checkouts', 'No equipment is permanently assigned to you.', 'You have nothing checked out temporarily.', "href=\"#/asset/${m.asset_id}\"", 'isOverdue(m.due_date)', 'fmtClock(m.due_time)']) assert.ok(view.includes(bit), bit);
+  for (const bit of ['/api/dashboard', 'Permanent assignments', 'Temporary checkouts', 'No equipment is permanently assigned to you.', 'You have nothing checked out temporarily.', "href=\"#/asset/${m.asset_id}${srcQ('equipment')}\"", 'isOverdue(m.due_date)', 'fmtClock(m.due_time)']) assert.ok(view.includes(bit), bit);
 });
 
 test('scanner lookup: an employee gets an id only for assets they may open; others just report "unavailable"', async () => {

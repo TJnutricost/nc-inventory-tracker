@@ -306,7 +306,37 @@ async function refreshBadge() {
 }
 const main = () => $('#main');
 const loading = () => { main().innerHTML = '<div class="spinner"></div>'; };
-const backLink = (href, label = 'Back') => `<a class="back" href="${href}" onclick="if(history.length>1){history.back();return false}">${icon('back')}${esc(label)}</a>`;
+const backLink = (href, label = 'Back', exact = false) => `<a class="back" href="${href}"${exact ? '' : ' onclick="if(history.length>1){history.back();return false}"'}>${icon('back')}${esc(label)}</a>`;
+
+// ---- where an asset page was opened from ----
+// Every link to an asset page from a list that matters carries its origin in the hash (#/asset/44?src=catalog&node=11), so the
+// page's "‹ Back" can name and return to exactly where the person came from — without relying on browser history, which stays
+// free to do its own thing. Only known source types and numeric node ids are accepted; the label shown is derived from real app
+// data (a catalog node's stored name), never from query text. No source (a scan, a typed URL, an old link) = the old fallback.
+const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home'], employee: ['browse', 'equipment', 'history', 'requests', 'home'] };
+const srcQ = (src, extra = {}) => `?src=${src}${Object.entries(extra).filter(([, v]) => v).map(([k, v]) => `&${k}=${v === true ? 1 : encodeURIComponent(v)}`).join('')}`;
+function assetCtx() {
+  const p = qs(); const src = p.get('src');
+  if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
+  const node = Number(p.get('node'));
+  return { src, node: Number.isInteger(node) && node > 0 ? node : null, all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null };
+}
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, all: c.all, tab: c.tab }) : ''; }; // carried on to the edit form and back
+async function assetBackTarget() {
+  const c = assetCtx();
+  const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
+  if (!c) return fallback;
+  const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'] };
+  if (fixed[c.src]) return { href: fixed[c.src][0], label: fixed[c.src][1], exact: true };
+  if (c.src === 'requests') return { href: `#/requests${c.tab ? '?tab=' + c.tab : ''}`, label: 'Requests', exact: true };
+  // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
+  const root = c.src === 'catalog' ? { href: '#/catalog', label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: 'Browse equipment' };
+  if (!c.node) return { ...root, exact: true };
+  let rows = []; try { rows = await api('GET', '/api/catalog' + (c.src === 'catalog' ? '?include_archived=1' : '')); } catch { /* fall back to the root */ }
+  const n = rows.find((r) => r.id === c.node);
+  if (!n) return { ...root, exact: true };
+  return { href: `${c.src === 'catalog' ? '#/catalog' : '#/assets'}?node=${n.id}${c.src === 'catalog' && c.all ? '&all=1' : ''}`, label: n.name, exact: true };
+}
 
 // ============================================================ router
 const ROUTES = [
@@ -426,7 +456,7 @@ async function viewSetup() {
 // ============================================================ home
 function myEquipmentList(mine) {
   if (!mine.length) return `<div class="empty">${icon('laptop')}<p>No equipment is checked out to you.</p></div>`;
-  return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
+  return `<ul class="list">${mine.map((m) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('home')}">${thumbHtml(m.thumb, m.category)}
     <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub"><span class="mono">${esc(m.tag)}</span> · since ${fmtStamp(m.checked_out_at)} · ${typeText(m)}</div></div>
     ${m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : ''}
     ${icon('chev', 'chev')}</a></li>`).join('')}</ul>`;
@@ -492,10 +522,10 @@ async function viewHome() {
     <div class="grid two">
       <div class="card"><div class="card-head"><h2>Needs attention</h2><a href="#/requests" class="small">Requests</a></div>
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
-          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
+          ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id + srcQ('home') : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
             <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'equipment'))}`}</div>
             <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}</a></li>`).join('')}
-          ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
+          ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}${srcQ('home')}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
         </ul>` : `<div class="empty">${icon('check')}<p>All caught up.</p></div>`}
       </div>
@@ -504,7 +534,7 @@ async function viewHome() {
         ${s.value ? `<div class="card-body small muted" style="border-top:1px solid var(--line)">Total purchase value: <strong style="color:var(--text)">${money(s.value)}</strong></div>` : ''}
       </div>
     </div>
-    ${d.expiring.length ? `<div class="card"><div class="card-head"><h2>Expiring in 60 days</h2></div><ul class="list">${d.expiring.map((a) => `<li><a class="item" href="#/asset/${a.id}"><div class="thumb">${icon(catIcon(a.category))}</div><div class="grow"><div class="title truncate">${esc(a.name)}</div><div class="sub">${a.license_expires ? `License expires ${fmtDate(a.license_expires)}` : ''}${a.license_expires && a.warranty_expires ? ' · ' : ''}${a.warranty_expires ? `Warranty ends ${fmtDate(a.warranty_expires)}` : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>` : ''}
+    ${d.expiring.length ? `<div class="card"><div class="card-head"><h2>Expiring in 60 days</h2></div><ul class="list">${d.expiring.map((a) => `<li><a class="item" href="#/asset/${a.id}${srcQ('home')}"><div class="thumb">${icon(catIcon(a.category))}</div><div class="grow"><div class="title truncate">${esc(a.name)}</div><div class="sub">${a.license_expires ? `License expires ${fmtDate(a.license_expires)}` : ''}${a.license_expires && a.warranty_expires ? ' · ' : ''}${a.warranty_expires ? `Warranty ends ${fmtDate(a.warranty_expires)}` : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>` : ''}
     ${d.mine.length ? `<div class="card"><div class="card-head"><h2>My equipment</h2></div>${myEquipmentList(d.mine)}</div>` : ''}
     <div class="card"><div class="card-head"><h2>Recent activity</h2><a href="#/activity" class="small">See all</a></div>${activityList(d.activity, true)}</div>
     </div>`;
@@ -548,7 +578,7 @@ async function viewAssets() {
       res.innerHTML = rows.length ? `<div class="card-head"><span class="muted small">${rows.length} asset${rows.length === 1 ? '' : 's'}</span>${isAdmin() ? `<a class="small" href="/api/export/assets.csv">${'Export CSV'}</a>` : ''}</div><ul class="list">${rows.map((a) => {
         const st = assetStatus(a);
         const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-        return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}
+        return `<li><a class="item" href="#/asset/${a.id}${srcQ('assets')}">${thumbHtml(a.thumb, a.category)}
           <div class="grow"><div class="title truncate">${esc(a.name)}</div>
           <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${a.holder_names && isAdmin() ? ' · ' + esc(a.holder_names) : ''}${seats}${!a.holder_names && a.location ? ' · ' + esc(a.location) : ''}</div></div>
           ${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
@@ -618,7 +648,7 @@ async function viewBrowse() {
   };
   const rowHtml = (a) => {
     const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-    return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id, all: !cur() && st.everything })}">${thumbHtml(a.thumb, a.category)}
       <div class="grow"><div class="title truncate">${esc(a.name)}</div>
       <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${a.location ? ' · ' + esc(a.location) : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
@@ -662,7 +692,7 @@ async function viewBrowse() {
 
 // ============================================================ asset detail
 async function viewAsset(id) {
-  const d = await api('GET', '/api/assets/' + id);
+  const [d, backTo] = await Promise.all([api('GET', '/api/assets/' + id), assetBackTarget()]);
   const a = d.asset;
   const admin = isAdmin();
   const st = !['retired', 'lost', 'disposed'].includes(a.status) && d.holders.some((h) => isOverdue(h.due_date)) ? 'overdue' : a.status;
@@ -683,7 +713,7 @@ async function viewAsset(id) {
     if (['available', 'checked_out'].includes(a.status) && seatsFree > 0) btns.push(`<button class="btn primary lg" id="act-out">${icon('out')} Check out${multi ? ' a seat' : ''}</button>`);
     if (d.holders.length) btns.push(`<button class="btn ${seatsFree > 0 ? '' : 'primary'} lg" id="act-in">${icon('in')} Check in</button>`);
     if (d.holders.length) btns.push(`<button class="btn lg" id="act-ret">${icon('send')} Request return</button>`);
-    btns.push(`<a class="btn lg" href="#/asset/${a.id}/edit">${icon('edit')} Edit</a>`);
+    btns.push(`<a class="btn lg" href="#/asset/${a.id}/edit${ctxQuery()}">${icon('edit')} Edit</a>`);
     btns.push(`<a class="btn lg" href="#/labels?ids=${a.id}">${icon('printer')} Print label</a>`);
     if (btns.length % 2) btns[btns.length - 1] = btns[btns.length - 1].replace('class="btn', 'class="full btn');
     actions = `<div class="actions">${btns.join('')}</div>`;
@@ -716,7 +746,7 @@ async function viewAsset(id) {
     ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
-  main().innerHTML = `<div class="asset-bar">${backLink('#/assets', 'Assets')}
+  main().innerHTML = `<div class="asset-bar">${backLink(backTo.href, backTo.label, backTo.exact)}
       <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${st === 'overdue' ? pill('overdue') : statusPill(a)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
@@ -891,7 +921,7 @@ async function checkoutSheet(asset, done, presetUser) {
 // "Scan barcode" reuses the app's one scanner (openScanner) and the same tag/serial lookup as everywhere else; a scan
 // swaps the sheet to the scanned asset, so the return-date rules and the server's permission check stay the same.
 function selfCheckoutSheet(a) {
-  const back = () => (location.hash === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id));
+  const back = () => (location.hash.split('?')[0] === `#/asset/${a.id}` ? route(true) : go('#/asset/' + a.id + ctxQuery()));
   const { el, close } = sheet(`<h2>Check this out to you?</h2><p class="muted small" style="margin-top:0">${esc(a.name)} (${esc(a.tag)}). IT will be notified.</p>
     <button type="button" class="btn sm" id="self-scan" style="margin-bottom:12px">${icon('scan')} Scan barcode</button>
     <form class="form-grid" id="f">
@@ -1235,7 +1265,7 @@ async function viewAssetForm(id) {
   const rootList = await rootNames();
   const cats = rootList.includes(a.category) ? rootList : [...rootList, a.category];
   const f = (name, label, attrs = '') => `<label class="field"><span>${label}</span><input name="${name}" value="${esc(a[name] ?? '')}" ${attrs}></label>`;
-  main().innerHTML = `${backLink(editing ? '#/asset/' + id : '#/assets', 'Cancel')}
+  main().innerHTML = `${backLink(editing ? '#/asset/' + id + ctxQuery() : '#/assets', 'Cancel')}
     <div class="page-head"><h1>${editing ? 'Edit asset' : 'Add an asset'}</h1></div>
     <form id="f" class="stack" autocomplete="off">
       <div class="card pad"><fieldset class="form-grid cols"><legend>The basics</legend>
@@ -1298,7 +1328,7 @@ async function viewAssetForm(id) {
       if (ph && ph.files.length) await uploadPhotos(saved.id, ph.files);
       toast(editing ? 'Saved' : `Added ${saved.tag}`);
       if (!editing) history.replaceState(null, '', '#/assets');
-      go('#/asset/' + saved.id);
+      go('#/asset/' + saved.id + (editing ? ctxQuery() : ''));
     });
   };
 }
@@ -1348,7 +1378,7 @@ async function viewRequests() {
     const actionsFor = (r) => {
       const isRet = r.type === 'return'; const isIssue = r.type === 'issue'; const perm = isPermReq(r);
       if (!['open', 'approved', 'dropped_off'].includes(r.status)) return '';
-      if (isAdmin() && isIssue) return `<button class="btn sm primary" data-resolve="${r.id}">${icon('check')} Mark resolved</button>${r.asset_id ? `<a class="btn sm" href="#/asset/${r.asset_id}">View asset</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Dismiss</button>`;
+      if (isAdmin() && isIssue) return `<button class="btn sm primary" data-resolve="${r.id}">${icon('check')} Mark resolved</button>${r.asset_id ? `<a class="btn sm" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">View asset</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Dismiss</button>`;
       // Employees: Cancel is offered only when the server says this exact request is still eligible (can_cancel). A return IT
       // asked for, or one already dropped off, is answered with "I've dropped it off" instead.
       if (!isAdmin()) {
@@ -1358,7 +1388,7 @@ async function viewRequests() {
       }
       if (isAdmin() && perm && r.asset_id) return `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
       if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
-      if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
+      if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
       return '';
     };
     // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
@@ -1387,7 +1417,7 @@ async function viewRequests() {
         <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, statusLabel(r))}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
           ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
-          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
+          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
           ${row('Requested', r.catalog_path ? `<strong>${esc(crumbText(r.catalog_path))}</strong>` : '')}
           ${row('Scope', r.type === 'equipment' ? scopeOf(r) : '')}
           ${row('Category', r.catalog_path ? '' : esc(r.category || ''))}
@@ -1408,7 +1438,7 @@ async function viewRequests() {
       return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
         <div class="thumb">${icon(requestIcon(r))}</div>
         <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, statusLabel(r))}</div>
-          <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}">${esc(r.asset_tag)}</a>` : ''}</div>
+          <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${esc(r.asset_tag)}</a>` : ''}</div>
           ${scopeOf(r) && r.type === 'equipment' ? `<div class="small" style="margin-top:4px"><span class="scope-tag ${r.asset_id ? 'spec' : ''}">${scopeOf(r)}</span></div>` : ''}
           ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
@@ -1648,7 +1678,7 @@ async function viewCatalog() {
   // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
   // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
   const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1>Equipment catalog</h1><span id="headact"></span></div>
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
@@ -1660,7 +1690,7 @@ async function viewCatalog() {
   const assetRow = (a, node) => {
     const rel = a.catalog_node_id !== node.id && a.catalog_path ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
     const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
-    return `<li><a class="item" href="#/asset/${a.id}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
   const render = () => {
@@ -1684,6 +1714,7 @@ async function viewCatalog() {
     const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
     // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
+    $('#pagetitle').textContent = n ? n.name : 'Equipment catalog'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n && !st.all ? byId(n.parent_id) : null;
     $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : '';
     $('#headact').innerHTML = n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`;
@@ -1810,7 +1841,7 @@ async function viewEquipment() {
   const temp = d.mine.filter((m) => m.assignment_type === 'checkout');
   const flag = (m) => (m.return_status === 'open' ? pill('open', 'Return requested') : m.return_status === 'dropped_off' ? pill('dropped_off', 'Dropped off') : isOverdue(m.due_date) ? pill('overdue', 'Overdue') : '');
   const detail = (m) => [m.category, [m.brand, m.model].filter(Boolean).join(' '), m.location].filter((v) => v && v !== m.asset_name).map(esc).join(' · ');
-  const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}">${thumbHtml(m.thumb, m.category)}
+  const row = (m, sub, tail) => `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('equipment')}">${thumbHtml(m.thumb, m.category)}
     <div class="grow"><div class="title truncate">${esc(m.asset_name)}</div><div class="sub truncate"><span class="mono">${esc(m.tag)}</span>${detail(m) ? ' · ' + detail(m) : ''}</div>
       <div class="sub">${sub}</div></div>${tail}${icon('chev', 'chev')}</a>${holdingActions(m)}</li>`;
   const group = (title, rows, empty, iconName) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${rows.length} item${rows.length === 1 ? '' : 's'}</span></div>
@@ -1838,7 +1869,7 @@ async function viewHistory() {
         <div class="sub"><span class="mono">${esc(m.tag)}</span> · ${typeText(m)}</div>
         <div class="sub">Since ${esc(fmtStamp(m.checked_out_at))}${m.now ? '' : ` · Returned ${esc(fmtStamp(m.returned_at))}`}</div></div>
       ${m.now ? (isOverdue(m.due_date) ? pill('overdue', 'Overdue') : pill('checked_out', 'Current')) : ''}${m.now ? icon('chev', 'chev') : ''}`;
-    return m.now ? `<li><a class="item" href="#/asset/${m.asset_id}">${body}</a></li>` : `<li><div class="item">${body}</div></li>`;
+    return m.now ? `<li><a class="item" href="#/asset/${m.asset_id}${srcQ('history')}">${body}</a></li>` : `<li><div class="item">${body}</div></li>`;
   };
   main().innerHTML = `${head}<div class="stack"><div class="card">${rows.length
     ? `<ul class="list">${rows.map(item).join('')}</ul>`
