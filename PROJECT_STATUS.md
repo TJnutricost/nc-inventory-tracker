@@ -831,7 +831,7 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 **Approved future requirements recorded during Phase 1E (2026-09-30) — NOT implemented:**
 
 - **Max temporary-checkout duration (policy):** some assets will have an admin-controlled maximum temporary checkout duration (e.g. hours, days, weeks, or unlimited/no maximum). Exact field, policy semantics and admin UI are **not decided**. Phase 1E only requires a return date; it enforces no maximum.
-- **Equipment reservation (approved future requirement, 2026-09-30 — NOT implemented; no tables, fields, APIs or UI exist for it):** employees should eventually be able to reserve equipment for future use. Desired UX: a **Reserve for future** checkbox/action on checkout; when selected, a required **Pickup date** appears **above** Return date, and Return date stays required. The future reservation design must decide: overlapping reservation conflicts; interaction with current checkouts; what happens if an asset is not returned before a reservation starts; admin override/cancel; when a reservation becomes an active checkout; no-show / pickup-expiration behavior; and notifications/reminders.
+- **Equipment reservation (approved future requirement, 2026-09-30 — NOT implemented; expanded 2026-10-02 with the availability calendar, waitlist and release-request rules in Section 11a; no tables, fields, APIs or UI exist for it):** employees should eventually be able to reserve equipment for future use. Desired UX: a **Reserve for future** checkbox/action on checkout; when selected, a required **Pickup date** appears **above** Return date, and Return date stays required. The future reservation design must decide: overlapping reservation conflicts; interaction with current checkouts; what happens if an asset is not returned before a reservation starts; admin override/cancel; when a reservation becomes an active checkout; no-show / pickup-expiration behavior; and notifications/reminders.
 - **Future request-lifecycle states (deferred, not implemented; today: open/approved/denied/dropped_off/completed/cancelled, with `open` displayed as "Pending"):** Submitted → In Review → Approved → Denied → Fulfilled, plus Rescinded / Cancelled as already planned. Exact state implementation belongs to Phase 1G.
 - **Email delivery (future infrastructure):** real email delivery/provider configuration is still future work. The development Outbox behavior (messages logged when SMTP is not configured) is acceptable for now; no provider was configured.
 - **Permanent-assignment request:** a minimal version is now implemented in 1E on the existing request model (see "Employee permanent-assignment request" above). The full request lifecycle (states, richer approval, employee-facing tracking) remains Phase 1G.
@@ -906,6 +906,42 @@ Tests: baseline 211 → **227 passing / 0 failing**. No schema change, no new mi
 **Tests:** `test/employee-access.test.js` (own vs other profile/history/requests, directory, admin-only endpoints, available/own/unavailable/archived asset detail, list sanitization, lookup, photo files, action leakage, Building and read-only profile, front-end wiring); one assertion in `test/self-checkout.test.js` updated (the minimal employee directory it pinned is gone). Seed unchanged.
 
 **Technical debt / follow-ups (not blockers):** `held_by_other` and "not available" branches in the asset page are now rarely reachable for employees (kept, harmless); an employee's open request for equipment that later becomes unavailable shows the name but can't open the asset; asset photos are still served from local disk (object storage is later); History has no filters/pagination beyond the 200-row window; Employee Actions (slice 2) will decide what, if anything, employees may edit.
+
+---
+
+### Future requirements recorded 2026-10-02 (approved direction — **NOT implemented**, not part of Slice 1 or any current slice)
+
+These extend the existing reservation note in Section 11 (Phase 1E "Equipment reservation") and belong to later Employee Portal V1 work (after slice 2, Employee Actions). No tables, fields, APIs or UI exist for any of them.
+
+#### Future — Asset Availability Calendar + Reservations
+
+Employees should eventually be able to view **future availability** for reservable/shared equipment — cameras, lenses, audio gear and other production equipment.
+
+- **Employee-facing privacy rule:** employees see **availability windows, not the identity** of whoever holds or has reserved the asset — e.g. *Available*, *Unavailable*, *Reserved*. Admin/IT may see the actual holder / reservation owner.
+- **Planned capabilities:** asset-level availability calendar; **Reserve for future**; required pickup date/time window as appropriate; required return date/time; overlapping-reservation prevention; current-checkout vs future-reservation conflict handling; admin override/cancel; late-return conflict handling; no-show / pickup expiration; reminders/notifications (later).
+- **Waitlist:** if the requested period is unavailable, an employee may join a waitlist / availability queue and may be notified if the requested slot opens.
+- **Release request / conflict resolution:** because marketing schedules change dynamically, an unavailable window may optionally let an employee ask the current holder (or a future reservation holder) to **release the asset earlier**.
+  - The requester's identity need not be exposed to the holder.
+  - The holder receives a simple request such as: *"This equipment is needed during part of your current checkout/reservation. Can you release it by [date]?"*
+  - The holder may explicitly **accept or decline**; **silence changes nothing**.
+  - The system must **never automatically shorten or cancel** an existing checkout or reservation.
+  - If accepted, availability is updated and the waitlisted/requesting employee may be notified.
+  - Admin retains visibility and override authority.
+- **Dependencies/open design points:** a reservation concept distinct from an assignment; per-asset "reservable" flag; interaction with max checkout duration (also future) and the existing temporary-checkout return date; notification/email infrastructure (also future). The earlier Phase 1E open questions (overlap conflicts, late returns, when a reservation becomes a checkout, no-show expiry, admin override) still apply.
+
+#### Future — Detailed Equipment Catalog + Specific Asset Requests
+
+Today's Request Equipment flow uses broad categories (computer, laptop, keyboard, …). Long term, employees should be able to request at three levels:
+
+1. **Category** — Camera, Lens, Laptop, Audio, …
+2. **Model / equipment type** — e.g. Sony A7 IV, Canon RF 24-70mm, MacBook Pro 16"
+3. **Specific physical asset** — e.g. CAM-004, "Sony A7 IV — Body 2"
+
+- **Request modes:** *"Any matching asset is fine"* and *"I need this specific asset"*.
+- **Catalog direction:** admin-managed categories; admin-managed model/equipment groupings; **avoid a permanently hardcoded category list** (categories are currently free text plus a settings list); use inventory/catalog data where practical; product/model photos and useful details/specs.
+- **Integration:** a specific-asset request integrates with the future availability calendar / reservation system.
+- **Long-term flow:** Equipment Catalog → Model / Equipment Type → Specific Asset → Availability Calendar → Reserve / Request → Waitlist if unavailable → Optional release request.
+- Relationship to existing work: builds on, and does not replace, the current permanent-assignment request and request-integrity rules (Phase 1); the full request-lifecycle redesign remains separate future work.
 
 ---
 
