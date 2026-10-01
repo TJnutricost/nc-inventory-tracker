@@ -421,3 +421,12 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
   .ct-detail { position: sticky; top: calc(var(--topbar-h, 56px) + 16px); max-height: calc(100vh - var(--topbar-h, 56px) - 40px); overflow: auto; }
   .ct-dhead .ct-up { display: none; }
 }
+
+/* ---- "All <name>" (virtual branch view) ---- */
+.chip.all { font-weight: 700; }
+.chip .chip-n { opacity: .65; font-weight: 600; margin-left: 2px; }
+.bn { display: grid; gap: 6px; }
+.bn-crumbs { margin-top: -2px; }
+.bn-chips { padding-bottom: 6px; }
+.ct-all { background: var(--brand-accent-soft); }
+.ct-all .title { color: var(--brand-accent); }

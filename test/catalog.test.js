@@ -322,6 +322,56 @@ test('Manage operations still work after the explorer change: add, rename, move,
   assert.equal((await admin.del(`/api/catalog/${child.id}`)).status, 200);
 });
 
+// ---------------------------------------------------------------- virtual "All <name>" (browse a whole branch)
+// "All" is not a catalog entry: it is the existing subtree filter. These pin its employee rules and that nothing was stored.
+test('"All" for an employee: every available asset anywhere in the branch, never held/archived/repair/lost/retired; counts match', async () => {
+  const before = count('SELECT COUNT(*) c FROM catalog_nodes');
+  const t = await cameraTree('all');
+  const ok1 = await newAsset('All A7 ok', { catalog_node_id: t.a7.id });
+  const ok2 = await newAsset('All R5 ok', { catalog_node_id: t.r5.id });
+  const direct = await newAsset('All Loose Camera', { catalog_node_id: t.camera.id });
+  const held = await newAsset('All Held', { catalog_node_id: t.a7.id });
+  const repair = await newAsset('All Repair', { catalog_node_id: t.a7.id });
+  const lost = await newAsset('All Lost', { catalog_node_id: t.r5.id });
+  const retired = await newAsset('All Retired', { catalog_node_id: t.r5.id });
+  const archived = await newAsset('All Archived', { catalog_node_id: t.sony.id });
+  const other = await makeLogin('All Holder'); const emp = await makeLogin('All Browser');
+  await admin.post(`/api/assets/${held.id}/checkout`, { employee_id: other.id, assignment_type: 'permanent' });
+  await admin.put(`/api/assets/${repair.id}`, { status: 'maintenance' });
+  await admin.put(`/api/assets/${lost.id}`, { status: 'lost' });
+  await admin.put(`/api/assets/${retired.id}`, { status: 'retired' });
+  await admin.post(`/api/assets/${archived.id}/archive`, {});
+
+  const ids = async (node) => (await emp.client.get(`/api/assets?catalog_node=${node}`)).body.map((a) => a.id).sort((x, y) => x - y);
+  const sorted = (...a) => a.map((x) => x.id).sort((x, y) => x - y);
+  assert.deepEqual(await ids(t.camera.id), sorted(ok1, ok2, direct), 'All cameras = Camera + every descendant, available only');
+  assert.deepEqual(await ids(t.sony.id), sorted(ok1), 'All Sony');
+  assert.deepEqual(await ids(t.canon.id), sorted(ok2), 'All Canon');
+  // the number shown next to "All …" is the number listed, for every node an employee can see
+  const nodes = (await emp.client.get('/api/catalog')).body;
+  for (const n of nodes) {
+    const listed = (await emp.client.get(`/api/assets?catalog_node=${n.id}`)).body.length;
+    assert.equal(n.available_count, listed, `available_count for "${n.path}" must equal what "All" lists`);
+  }
+  for (const a of [held, repair, lost, retired, archived]) assert.ok(!(await ids(t.camera.id)).includes(a.id), `${a.name} must stay out`);
+  assert.equal(count('SELECT COUNT(*) c FROM catalog_nodes WHERE lower(name) LIKE \'all %\' OR lower(name) = \'all\''), 0, '"All" is never stored as a catalog entry');
+  assert.equal(count('SELECT COUNT(*) c FROM catalog_nodes'), before + 5, 'only the five real entries of this test were created');
+});
+
+test('"All" for an admin: every non-archived asset in the subtree, any status, with the sub-path to tell them apart', async () => {
+  const t = await cameraTree('all2');
+  const a = await newAsset('Adm A7', { catalog_node_id: t.a7.id });
+  const r = await newAsset('Adm R5 repair', { catalog_node_id: t.r5.id });
+  await admin.put(`/api/assets/${r.id}`, { status: 'maintenance' });
+  const gone = await newAsset('Adm gone', { catalog_node_id: t.r5.id });
+  await admin.post(`/api/assets/${gone.id}/archive`, {});
+  const rows = (await admin.get(`/api/assets?catalog_node=${t.camera.id}`)).body;
+  assert.deepEqual(rows.map((x) => x.id).sort((x, y) => x - y), [a.id, r.id].sort((x, y) => x - y), 'repair included, archived excluded');
+  assert.ok(rows.every((x) => x.catalog_path && x.catalog_node_id), 'rows say where they are filed');
+  assert.equal((await admin.get('/api/catalog')).body.find((n) => n.id === t.camera.id).asset_count, 2);
+  assert.equal((await makeClient(server).get(`/api/assets?catalog_node=${t.camera.id}`)).status, 401);
+});
+
 // ---------------------------------------------------------------- employee requests against the catalog
 test('an employee requests a broad node: "any matching", with a path snapshot and the root as the category', async () => {
   const t = await cameraTree('rq1');
