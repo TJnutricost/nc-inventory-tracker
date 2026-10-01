@@ -95,12 +95,12 @@ test('the transition table only ever uses statuses the database accepts for that
     for (const [status, targets] of Object.entries(from)) {
       for (const s of [status, ...targets]) {
         const resolving = !['open', 'dropped_off'].includes(s);
-        const id = rawInsert({ type, status: s, ...(resolving ? { resolved_at: '2999-01-01 00:00:00', created_at: '2998-01-01 00:00:00' } : {}), ...(type === 'return' ? { asset_id: db.prepare("INSERT INTO assets (tag, name) VALUES (?, 'x')").run(`RQ-T${++seq}`).lastInsertRowid } : {}) }).lastInsertRowid;
+        const id = rawInsert({ type, status: s, ...(resolving ? { resolved_at: '2999-01-01 00:00:00', created_at: '2998-01-01 00:00:00' } : {}), ...(type !== 'equipment' ? { asset_id: db.prepare("INSERT INTO assets (tag, name) VALUES (?, 'x')").run(`RQ-T${++seq}`).lastInsertRowid } : {}) }).lastInsertRowid;
         assert.equal(asRow(id).status, s);
       }
     }
   }
-  for (const type of ['equipment', 'return']) for (const t of rules.TERMINAL) {
+  for (const type of ['equipment', 'return', 'issue']) for (const t of rules.TERMINAL) {
     if (rules.TRANSITIONS[type][t]) assert.deepEqual(rules.TRANSITIONS[type][t], [], `${type}/${t} is terminal`);
   }
 });

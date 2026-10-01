@@ -459,7 +459,8 @@ app.get('/api/assets/:id', auth, (req, res) => {
   const isAdmin = req.user.role === 'admin';
   const photos = db.prepare('SELECT * FROM photos WHERE asset_id = ? ORDER BY id').all(a.id);
   const requests = db.prepare(`
-    SELECT r.*, u.name AS user_name FROM requests r JOIN employees u ON u.id = r.user_id
+    SELECT r.*, u.name AS user_name, COALESCE(ca.employee_id = r.user_id, 0) AS self_initiated FROM requests r JOIN employees u ON u.id = r.user_id
+    LEFT JOIN accounts ca ON ca.id = r.created_by
     WHERE r.asset_id = ? AND r.status IN ('open','dropped_off') ORDER BY r.created_at DESC`).all(a.id)
     .filter((r) => isAdmin || r.user_id === req.user.employee_id);
   const activity = isAdmin ? db.prepare(`
@@ -694,18 +695,22 @@ app.get('/api/requests', auth, (req, res) => {
   const where = []; const params = [];
   if (req.user.role !== 'admin') { where.push('r.user_id = ?'); params.push(req.user.employee_id); }
   if (req.query.status !== undefined && !['open', 'closed'].includes(req.query.status)) throw httpError(400, 'Status must be open or closed');
-  if (req.query.type !== undefined && !['equipment', 'return'].includes(req.query.type)) throw httpError(400, 'Type must be equipment or return');
+  if (req.query.type !== undefined && !['equipment', 'return', 'issue'].includes(req.query.type)) throw httpError(400, 'Type must be equipment, return or issue');
   if (req.query.status === 'open') where.push("r.status IN ('open','approved','dropped_off')");
   else if (req.query.status === 'closed') where.push("r.status IN ('denied','completed','cancelled')");
   if (req.query.type) { where.push('r.type = ?'); params.push(req.query.type); }
-  res.json(db.prepare(`
-    SELECT r.*, u.name AS user_name, u.department AS user_department, a.name AS asset_name, a.tag AS asset_tag, COALESCE(c.name, ca.login_email) AS created_by_name, COALESCE(rv.name, ra.login_email) AS resolved_by_name
+  // `self_initiated`: the employee started this themselves (vs. IT asking). `can_cancel`: the server's own answer to
+  // "may this viewer cancel it right now", so the UI never has to guess the rule.
+  const rows = db.prepare(`
+    SELECT r.*, u.name AS user_name, u.department AS user_department, a.name AS asset_name, a.tag AS asset_tag, COALESCE(c.name, ca.login_email) AS created_by_name, COALESCE(rv.name, ra.login_email) AS resolved_by_name,
+      COALESCE(ca.employee_id = r.user_id, 0) AS self_initiated
     FROM requests r JOIN employees u ON u.id = r.user_id
     LEFT JOIN assets a ON a.id = r.asset_id
     LEFT JOIN accounts ca ON ca.id = r.created_by LEFT JOIN employees c ON c.id = ca.employee_id
     LEFT JOIN accounts ra ON ra.id = r.resolved_by LEFT JOIN employees rv ON rv.id = ra.employee_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY CASE WHEN r.status IN ('open','dropped_off','approved') THEN 0 ELSE 1 END, r.created_at DESC LIMIT 500`).all(...params));
+    ORDER BY CASE WHEN r.status IN ('open','dropped_off','approved') THEN 0 ELSE 1 END, r.created_at DESC LIMIT 500`).all(...params);
+  res.json(rows.map((r) => ({ ...r, can_cancel: requestRules.LIVE.includes(r.status) && !cancelBlock(r, req.user) })));
 });
 app.post('/api/requests', auth, (req, res) => {
   const category = clean(req.body.category);
@@ -783,19 +788,49 @@ app.post('/api/requests/:id/deny', admin, (req, res) => {
   notify.requestResolved(getPerson(r.user_id), { ...r, status: 'denied', resolution_note: note });
   res.json({ ok: true });
 });
-// Rescind/cancel: the person who made an equipment request may cancel their own while it is still live; IT may cancel any
-// live request. A cancelled request stays in history — nothing is deleted.
-app.post('/api/requests/:id/cancel', auth, (req, res) => {
+// Resolves an issue report. Issues have no approve/deny: IT either resolves one (here) or dismisses it (cancel).
+app.post('/api/requests/:id/resolve', admin, (req, res) => {
   const r = loadRequest(req.params.id);
-  if (req.user.role !== 'admin' && (r.user_id !== req.user.employee_id || r.type !== 'equipment')) throw httpError(403, 'Not allowed');
+  if (r.type !== 'issue') throw httpError(400, 'Only issue reports can be marked resolved');
+  requestRules.transition(db, r.id, 'completed', { actorAccountId: req.user.account_id, note: clean(req.body.note), setNote: true });
+  log(r.asset_id, req.user.account_id, 'issue_resolved', clean(req.body.note) || 'Marked resolved', r.user_id);
+  res.json({ ok: true });
+});
+const isSelfInitiated = (r) => !!db.prepare('SELECT 1 FROM accounts WHERE id = ? AND employee_id = ?').get(r.created_by, r.user_id);
+// Rescind/cancel policy, one place for the route and for the `can_cancel` flag on the list. Returns null when `user` may
+// cancel `r` in its current state, otherwise { status, msg }. (Status transitions themselves are guarded by requests.js.)
+//
+//   admin     any live request (IT's authority is unchanged)
+//   employee  only their OWN request, and only while it is live and nothing has happened to it yet:
+//               equipment  open | approved (a permanent request that IT already approved/assigned is final)
+//               return     only one the employee started themselves, and only while 'open' — once they say they dropped
+//                          it off, or when IT is the one who asked, they answer with "I've dropped it off", not a cancel
+//               issue      open
+//             The data model has no "IT has opened this" marker (opened_at / in_review are future lifecycle work, see
+//             PROJECT_STATUS.md), so "not yet processed" is expressed by the statuses that do exist.
+function cancelBlock(r, user) {
+  const isAdmin = user.role === 'admin';
+  if (!isAdmin && r.user_id !== user.employee_id) return { status: 403, msg: 'Not allowed' };
   // Once IT's approval of a PERMANENT-assignment request has been acted on, it can't be rescinded (and history can never
   // read "cancelled" for a request whose approval made the assignment). Approval completes the request in the same
   // transaction as the assignment, so this only bites on an approved row (e.g. legacy data) — an employee may rescind a
   // permanent request only while it is still open; and nobody may cancel one that already produced its assignment.
   if (r.type === 'equipment' && r.requested_assignment_type === 'permanent' && ['approved', 'completed'].includes(r.status)) {
     const assigned = r.asset_id && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND notes = ?').get(r.asset_id, r.user_id, `Request #${r.id}`);
-    if (assigned || req.user.role !== 'admin') throw httpError(400, 'IT has already approved this permanent assignment request, so it can no longer be cancelled. Ask IT if the equipment should come back.');
+    if (assigned || !isAdmin) return { status: 400, msg: 'IT has already approved this permanent assignment request, so it can no longer be cancelled. Ask IT if the equipment should come back.' };
   }
+  if (!isAdmin && r.type === 'return') {
+    if (!(r.self_initiated ?? isSelfInitiated(r))) return { status: 403, msg: 'Not allowed' };
+    if (r.status !== 'open') return { status: 400, msg: "You've already told IT you dropped this off, so this can't be cancelled. Ask IT if that was a mistake." };
+  }
+  return null;
+}
+// Rescind/cancel: the person who made a request may cancel their own while it is still eligible (see cancelBlock); IT may
+// cancel any live request. A cancelled request stays in history — nothing is deleted.
+app.post('/api/requests/:id/cancel', auth, (req, res) => {
+  const r = loadRequest(req.params.id);
+  const block = cancelBlock(r, req.user);
+  if (block) throw httpError(block.status, block.msg);
   requestRules.transition(db, r.id, 'cancelled', { actorAccountId: req.user.account_id });
   res.json({ ok: true });
 });
@@ -810,6 +845,46 @@ app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
     notify.droppedOff(getPerson(r.user_id), asset);
   }
   res.json({ ok: true });
+});
+// ---- employee actions on equipment they currently hold (Phase 2, Slice 2) ----
+// The asset must be visible to the caller AND checked out to the caller right now. Anything else is refused on the server;
+// a hidden button is never the authorization. (A visible-but-not-held asset is a 400, an invisible one a 404.)
+function heldAsset(req) {
+  const asset = visibleAsset(req, req.params.id);
+  const me = req.user.employee_id;
+  if (!me || !db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, me)) {
+    throw httpError(400, "This isn't checked out to you");
+  }
+  return asset;
+}
+// "Request return": the employee asks to give a held asset back. Creates the same live 'return' request IT can create
+// (status 'open', shown as "Return requested"); the assignment is NOT ended — it ends only when IT checks the asset in.
+// The employee later taps "I've dropped it off" (existing). One live return request per asset + employee, so a second
+// tap — or one while IT has already asked — is refused instead of creating a conflicting row.
+app.post('/api/assets/:id/my-return-request', auth, (req, res) => {
+  const asset = heldAsset(req);
+  const me = req.user.employee_id;
+  const live = db.prepare("SELECT status FROM requests WHERE type = 'return' AND asset_id = ? AND user_id = ? AND status IN ('open','dropped_off')").get(asset.id, me);
+  if (live) throw httpError(400, live.status === 'dropped_off' ? "You've already told IT you dropped this off." : 'A return has already been requested for this item.');
+  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, message, created_by) VALUES ('return', ?, ?, ?, ?)").run(me, asset.id, clean(req.body.message), req.user.account_id);
+  log(asset.id, req.user.account_id, 'return_requested', `${req.user.name} asked to return it${clean(req.body.message) ? ` · ${clean(req.body.message)}` : ''}`, me);
+  res.json(db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid));
+});
+// "Report issue": a short description tied to one held asset. It is a request of type 'issue' in the same queue IT already
+// works from (open -> resolved by IT, or withdrawn by the employee). No comments, attachments, priorities or SLAs.
+const ISSUE_MAX = 1000;
+app.post('/api/assets/:id/report-issue', auth, (req, res) => {
+  const asset = heldAsset(req);
+  const me = req.user.employee_id;
+  const message = clean(req.body.message);
+  if (!message) throw httpError(400, 'Describe the issue so IT knows what is wrong');
+  if (message.length > ISSUE_MAX) throw httpError(400, `Please keep the description under ${ISSUE_MAX} characters`);
+  if (db.prepare("SELECT 1 FROM requests WHERE type = 'issue' AND status = 'open' AND asset_id = ? AND user_id = ? AND message = ?").get(asset.id, me, message)) {
+    throw httpError(400, "You've already reported this issue and it's still open.");
+  }
+  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, created_by) VALUES ('issue', ?, ?, ?, ?, ?)").run(me, asset.id, asset.category, message, req.user.account_id);
+  log(asset.id, req.user.account_id, 'issue_reported', message.length > 160 ? `${message.slice(0, 157)}…` : message, me);
+  res.json(db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid));
 });
 // A user can proactively say "I'm returning this" without being asked
 app.post('/api/assets/:id/return-notice', auth, (req, res) => {
@@ -834,7 +909,10 @@ app.get('/api/dashboard', auth, (req, res) => {
       (SELECT r.id FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_request_id,
       (SELECT r.status FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_status,
       (SELECT r.needed_by FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_by,
-      (SELECT r.message FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_message
+      (SELECT r.message FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_message,
+      (SELECT COALESCE(ca.employee_id = r.user_id, 0) FROM requests r LEFT JOIN accounts ca ON ca.id = r.created_by WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_self,
+      (SELECT r.id FROM requests r WHERE r.type='issue' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status = 'open' ORDER BY r.id DESC LIMIT 1) AS issue_request_id,
+      (SELECT COUNT(*) FROM requests r WHERE r.type='issue' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status = 'open') AS open_issues
     FROM assignments s JOIN assets a ON a.id = s.asset_id
     WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(req.user.employee_id);
   const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.employee_id);
