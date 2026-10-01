@@ -86,7 +86,7 @@ function currentUser(req) {
   if (!req.session.uid) return null;
   return db.prepare(`
     SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
-      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
+      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
     FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(req.session.uid) || null;
 }
@@ -100,7 +100,7 @@ function admin(req, res, next) {
   auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
 }
 // The signed-in user as the UI sees it: `id` is the EMPLOYEE (person) id, null for an account with no employee record.
-const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
+const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, building: u.building || null, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email).
 const PERSON_SQL = `
@@ -177,10 +177,28 @@ function allocateTag() { // call only inside a transaction
 function sanitizeAsset(a, user) {
   if (!a) return a;
   if (user.role === 'admin') return a;
-  const mine = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
-  const { purchase_cost, vendor, notes, ...rest } = a;
+  const mine = db.prepare('SELECT due_date FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
+  const { purchase_cost, vendor, notes, holder_names, ...rest } = a; // never other people's names
   if (!mine) delete rest.license_key;
+  if ('due_date' in rest) rest.due_date = mine ? mine.due_date : null; // the list's MIN(due_date) spans every holder; show only the viewer's own
   return rest;
+}
+
+// Employee asset-visibility contract, enforced on the server (hiding navigation is not access control). An admin sees
+// everything. An employee may see an asset only if they currently hold it, or it is available to them: not archived and
+// status 'available' (a multi-seat license with a free seat stays 'available'; a full one is 'checked_out'). Anything else
+// — archived, in repair, lost, retired, held by someone else — is indistinguishable from "not found".
+function canViewAsset(user, a) {
+  if (!a) return false;
+  if (user.role === 'admin') return true;
+  if (!a.archived_at && a.status === 'available') return true;
+  return !!user.employee_id && !!db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
+}
+// The asset for this route, or a 404 when it doesn't exist OR this user may not see it.
+function visibleAsset(req, id) {
+  const a = getAsset(Number(id));
+  if (!a || !canViewAsset(req.user, a)) throw httpError(404, 'Asset not found');
+  return a;
 }
 
 // `user` = the employee receiving the asset; `actor` = the signed-in account performing it.
@@ -244,7 +262,9 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), req.user.account_id);
   res.json({ ok: true });
 }));
+// Employee profile details are read-only (IT maintains them in People); only admins can edit their own. Passwords are separate.
 app.put('/api/me', auth, (req, res) => {
+  if (req.user.role !== 'admin') throw httpError(403, 'Your profile details are managed by IT. Ask IT to change them.');
   const { name, phone, department, title } = req.body;
   if (req.user.employee_id) {
     db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
@@ -274,12 +294,13 @@ app.post('/api/reset', wrap(async (req, res) => {
 // /api/users is kept as the compatibility surface for the People screen; ids in it are EMPLOYEE ids.
 // Future rule (not implemented — no external auth yet): a verified external login may link to a pre-provisioned
 // employee by normalized (trim + lowercase) work email only; unknown logins never create an employee and are blocked.
-app.get('/api/users', auth, (req, res) => {
-  // Everyone can see a minimal directory (names) — admins get details + counts
+// Admin only. Employees get no directory: no employee screen needs other people's names (self-checkout and requests always
+// act as the signed-in employee), so exposing one would only leak who works here. Employees read their own record via
+// GET /api/users/:id (which already refuses anyone else's).
+app.get('/api/users', admin, (req, res) => {
   const rows = db.prepare(`
     SELECT p.*, (SELECT COUNT(*) FROM assignments s WHERE s.employee_id = p.id AND s.returned_at IS NULL) AS asset_count
     FROM (${PERSON_SQL}) p ORDER BY (p.status = 'active') DESC, p.name COLLATE NOCASE`).all();
-  if (req.user.role !== 'admin') return res.json(rows.filter((r) => r.status === 'active').map((r) => ({ id: r.id, name: r.name })));
   res.json(rows.map((r) => ({ ...publicPerson(r), asset_count: r.asset_count })));
 });
 
@@ -321,6 +342,7 @@ app.post('/api/users/:id/account', admin, (req, res) => {
   if (req.body.invite !== false) notify.welcome({ name: q.name, email: q.login_email }, `${APP_URL}/#/reset/${makeToken(q.account_id, 'reset', 24 * 7)}`);
   res.json(publicPerson(q));
 });
+const HISTORY_LIMIT = 200; // most recent returned assignments in a person's record (the employee History screen and the admin person page)
 app.get('/api/users/:id', auth, (req, res) => {
   const id = Number(req.params.id);
   if (req.user.role !== 'admin' && id !== req.user.employee_id) throw httpError(403, 'Not allowed');
@@ -333,8 +355,8 @@ app.get('/api/users/:id', auth, (req, res) => {
     WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(id);
   const past = db.prepare(`
     SELECT s.*, a.name AS asset_name, a.tag FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.employee_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT 50`).all(id);
-  res.json({ user: publicPerson(u), current, past });
+    WHERE s.employee_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT ${HISTORY_LIMIT}`).all(id);
+  res.json({ user: publicPerson(u), current, past, history_limit: HISTORY_LIMIT });
 });
 // Updates the person and, when they have one, their account (role, login email, login enabled). Nothing here deletes a person.
 app.put('/api/users/:id', admin, (req, res) => {
@@ -390,12 +412,17 @@ const ASSET_LIST_SQL = `
 
 app.get('/api/assets', auth, (req, res) => {
   const where = []; const params = [];
-  const { q, category, status } = req.query;
-  const employeeFilter = req.query.employee_id || req.query.user_id; // user_id kept as a compatibility alias
+  const isAdmin = req.user.role === 'admin';
+  // Employees get ONE meaning for this list — "equipment I can get": available, not archived, and not something I already
+  // hold (that is My Equipment). So the status / holder filters below are admin tools and are ignored for employees; they
+  // would otherwise be a way to probe other people's assignments (e.g. searching a multi-seat license by holder name).
+  const { q, category } = req.query;
+  const status = isAdmin ? req.query.status : undefined;
+  const employeeFilter = isAdmin ? (req.query.employee_id || req.query.user_id) : undefined; // user_id kept as a compatibility alias
   if (q) {
-    where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?
-      OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?))`);
-    const like = `%${q}%`; params.push(like, like, like, like, like, like, like);
+    where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?${isAdmin
+      ? ' OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?)' : ''})`);
+    const like = `%${q}%`; params.push(like, like, like, like, like, like); if (isAdmin) params.push(like);
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
   if (status === 'overdue') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < date('now'))`); }
@@ -403,9 +430,8 @@ app.get('/api/assets', auth, (req, res) => {
   else if (status) { where.push('a.status = ?'); params.push(status); }
   if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
   if (employeeFilter) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)'); params.push(Number(employeeFilter)); }
-  if (req.user.role !== 'admin') {
-    // Users see what they hold and what's available to borrow
-    where.push(`(a.status = 'available' OR EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL))`);
+  if (!isAdmin) {
+    where.push(`a.status = 'available' AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)`);
     params.push(req.user.employee_id);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
@@ -417,6 +443,9 @@ app.get('/api/assets/lookup/:code', auth, (req, res) => {
   // Archived assets are still found (their tags stay reserved); the flag lets clients say so.
   const a = db.prepare('SELECT id, archived_at FROM assets WHERE tag = ? COLLATE NOCASE').get(code)
     || (serialKey(code) && db.prepare('SELECT id, archived_at FROM assets WHERE serial_normalized = ?').get(serialKey(code)));
+  // An employee only gets an id for assets they may open; for any other existing asset they learn just that it isn't
+  // available (no id, no details), so the scanner can say so without exposing the record.
+  if (a && !canViewAsset(req.user, getAsset(a.id))) return res.json({ found: false, unavailable: true, code });
   res.json(a ? { found: true, id: a.id, archived: !!a.archived_at } : { found: false, code });
 });
 
@@ -424,8 +453,7 @@ app.get('/api/assets/lookup/:code', auth, (req, res) => {
 app.get('/api/next-tag', admin, (req, res) => res.json({ tag: peekTag() }));
 
 app.get('/api/assets/:id', auth, (req, res) => {
-  const a = getAsset(Number(req.params.id));
-  if (!a) throw httpError(404, 'Asset not found');
+  const a = visibleAsset(req, req.params.id);
   const holders = openAssignments(a.id);
   const isMine = holders.some((h) => h.employee_id === req.user.employee_id);
   const isAdmin = req.user.role === 'admin';
@@ -534,8 +562,7 @@ app.post('/api/assets/:id/archive', admin, archiveAsset);
 app.delete('/api/assets/:id', admin, archiveAsset);
 
 app.post('/api/assets/:id/checkout', auth, (req, res) => {
-  const asset = getAsset(Number(req.params.id));
-  if (!asset) throw httpError(404, 'Asset not found');
+  const asset = visibleAsset(req, req.params.id);
   let target;
   if (req.user.role === 'admin') {
     target = getPerson(Number(req.body.employee_id || req.body.user_id)); // user_id kept as a compatibility alias
@@ -607,7 +634,7 @@ const upload = multer({
 app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async (req, res) => {
   const asset = getAsset(Number(req.params.id));
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
-  if (!asset) { cleanup(); throw httpError(404, 'Asset not found'); }
+  if (!asset || !canViewAsset(req.user, asset)) { cleanup(); throw httpError(404, 'Asset not found'); }
   const holder = db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }
   if (!req.files?.length) throw httpError(400, 'No image received');
@@ -651,8 +678,16 @@ app.put('/api/assets/:id/cover', admin, (req, res) => {
   db.prepare('UPDATE assets SET cover_photo_id = ? WHERE id = ?').run(photoId, asset.id);
   res.json({ ok: true });
 });
-app.use('/uploads', (req, res, next) => (currentUser(req) ? next() : res.status(401).end()),
-  express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
+// Photo files follow the asset's visibility: an employee can fetch a photo only if its asset is one they may see.
+app.use('/uploads', (req, res, next) => {
+  const u = currentUser(req);
+  if (!u) return res.status(401).end();
+  if (u.role === 'admin') return next();
+  let file; try { file = path.basename(decodeURIComponent(req.path)); } catch { return res.status(404).end(); }
+  const photo = db.prepare('SELECT asset_id FROM photos WHERE filename = ? OR thumb = ?').get(file, file);
+  if (!photo || !canViewAsset(u, getAsset(photo.asset_id))) return res.status(404).end();
+  next();
+}, express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
 
 // ---------- requests ----------
 app.get('/api/requests', auth, (req, res) => {
@@ -688,7 +723,7 @@ app.post('/api/requests', auth, (req, res) => {
   if (!forPerson) throw httpError(404, 'User not found');
   if (forPerson.status !== 'active') throw httpError(400, 'That person is inactive, so a request can\'t be made for them');
   const wanted = assetId === null ? null : getAsset(assetId);
-  if (assetId !== null && !wanted) throw httpError(404, 'Asset not found');
+  if (assetId !== null && (!wanted || !canViewAsset(req.user, wanted))) throw httpError(404, 'Asset not found'); // an employee can only ask for equipment they can see
   if (wanted && wanted.archived_at) throw httpError(400, 'This asset is archived and can\'t be requested.');
   // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
   const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?)")
@@ -778,8 +813,7 @@ app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
 });
 // A user can proactively say "I'm returning this" without being asked
 app.post('/api/assets/:id/return-notice', auth, (req, res) => {
-  const asset = getAsset(Number(req.params.id));
-  if (!asset) throw httpError(404, 'Asset not found');
+  const asset = visibleAsset(req, req.params.id);
   const me = req.user.employee_id;
   const mine = me && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, me);
   if (!mine) throw httpError(400, "This isn't checked out to you");
@@ -795,7 +829,7 @@ app.post('/api/assets/:id/return-notice', auth, (req, res) => {
 // ---------- dashboard ----------
 app.get('/api/dashboard', auth, (req, res) => {
   const mine = db.prepare(`
-    SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial, a.id AS asset_id,
+    SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial, a.location, a.brand, a.model, a.id AS asset_id,
       (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb,
       (SELECT r.id FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_request_id,
       (SELECT r.status FROM requests r WHERE r.type='return' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status IN ('open','dropped_off')) AS return_status,

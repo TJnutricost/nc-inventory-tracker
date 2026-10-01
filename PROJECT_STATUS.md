@@ -1,8 +1,8 @@
 # NC IT Inventory Tracker — Project Status
 
-**Last Updated:** 2026-10-01<br>
+**Last Updated:** 2026-10-02<br>
 **Project Status:** Early MVP / Prototype  
-**Current Phase:** Phase 1 (Data Model Hardening) — **COMPLETE** (Foundation Closeout, 2026-10-01); next: Phase 2 (PostgreSQL) and the future-phase items listed in Section 11  
+**Current Phase:** Phase 2 — **Employee Portal V1**, building on the existing employee interface (Phase 1 Data Model Hardening is **COMPLETE**, 2026-10-01). Slice 1 (Employee Access Contract + Read Experience) implemented 2026-10-02 on `feature/employee-access-read-experience`; see Section 11a. PostgreSQL/Railway/auth remain later infrastructure work (Section 12 onward)  
 **Canonical Branch:** `stage` (shared integration / GitHub default branch); `main` is the stable/release branch — see Section 3a  
 **Production Status:** Not deployed
 
@@ -503,9 +503,7 @@ This should be treated as a separate feature milestone after the core asset-mana
 
 # 8a. Future Architecture: Employee Portal V1
 
-**Status:** Newly agreed direction, 2026-09-28. Not implemented. No employee UI, auth, schema, or directory changes have been made — this section is planning/documentation only.
-
-To be scheduled as planned future work **after** the shared database/auth/backend foundation (Phases 2–4) is established — not the next phase after Phase 0/1. (Note 2026-09-28: that foundation is now Railway-first and provider-neutral, not assumed to be Supabase — see Section 19 Decisions Log.)
+**Status (revised 2026-10-02):** Employee Portal V1 is now the **active Phase 2**, built incrementally on the employee interface that already exists inside the app (the employee and admin roles already see different navigation and screens; server-side authorization already exists for admin operations). It is **not** a separate app and the portal architecture is not being rebuilt. Progress and the slice sequence are in Section 11a. The original 2026-09-28 note below (planned *after* the PostgreSQL/auth foundation) is superseded; the shared infrastructure work (PostgreSQL, object storage, auth provider, Railway) is still planned, but later, and is no longer a prerequisite for Employee Portal V1.
 
 ## Domain / Application Split
 
@@ -631,7 +629,7 @@ Preferred future behavior:
 
 ## Roadmap Placement
 
-Employee Portal V1 is planned future work, sequenced **after** the shared database/auth/backend foundation is established (i.e., after Phase 2 — Managed PostgreSQL Migration, Phase 3 — Object Storage Migration, and Phase 4 — Authentication in Section 10's roadmap). It is not scheduled ahead of, or in place of, any current Phase 0 work.
+*Superseded 2026-10-02:* Employee Portal V1 is the active Phase 2 and proceeds on the existing SQLite-backed app (Section 11a). The managed-PostgreSQL, object-storage and authentication work (Sections 12–14) stays on the roadmap as later infrastructure phases.
 
 ---
 
@@ -833,7 +831,7 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 **Approved future requirements recorded during Phase 1E (2026-09-30) — NOT implemented:**
 
 - **Max temporary-checkout duration (policy):** some assets will have an admin-controlled maximum temporary checkout duration (e.g. hours, days, weeks, or unlimited/no maximum). Exact field, policy semantics and admin UI are **not decided**. Phase 1E only requires a return date; it enforces no maximum.
-- **Equipment reservation (approved future requirement, 2026-09-30 — NOT implemented; no tables, fields, APIs or UI exist for it):** employees should eventually be able to reserve equipment for future use. Desired UX: a **Reserve for future** checkbox/action on checkout; when selected, a required **Pickup date** appears **above** Return date, and Return date stays required. The future reservation design must decide: overlapping reservation conflicts; interaction with current checkouts; what happens if an asset is not returned before a reservation starts; admin override/cancel; when a reservation becomes an active checkout; no-show / pickup-expiration behavior; and notifications/reminders.
+- **Equipment reservation (approved future requirement, 2026-09-30 — NOT implemented; expanded 2026-10-02 with the availability calendar, waitlist and release-request rules in Section 11a; no tables, fields, APIs or UI exist for it):** employees should eventually be able to reserve equipment for future use. Desired UX: a **Reserve for future** checkbox/action on checkout; when selected, a required **Pickup date** appears **above** Return date, and Return date stays required. The future reservation design must decide: overlapping reservation conflicts; interaction with current checkouts; what happens if an asset is not returned before a reservation starts; admin override/cancel; when a reservation becomes an active checkout; no-show / pickup-expiration behavior; and notifications/reminders.
 - **Future request-lifecycle states (deferred, not implemented; today: open/approved/denied/dropped_off/completed/cancelled, with `open` displayed as "Pending"):** Submitted → In Review → Approved → Denied → Fulfilled, plus Rescinded / Cancelled as already planned. Exact state implementation belongs to Phase 1G.
 - **Email delivery (future infrastructure):** real email delivery/provider configuration is still future work. The development Outbox behavior (messages logged when SMTP is not configured) is acceptable for now; no provider was configured.
 - **Permanent-assignment request:** a minimal version is now implemented in 1E on the existing request model (see "Employee permanent-assignment request" above). The full request lifecycle (states, richer approval, employee-facing tracking) remains Phase 1G.
@@ -884,11 +882,74 @@ Smaller known debt carried forward (not blockers): tag-correction workflow; cate
 
 ---
 
-# 12. Phase 2 — Managed PostgreSQL Migration
+# 11a. Phase 2 — Employee Portal V1 (active)
+
+**Direction (2026-10-02):** Phase 2 is **Employee Portal V1**, building on the existing employee interface — not the PostgreSQL migration. Sequence: **(1) Employee Access Contract + Read Experience → (2) Employee Actions → (3) Later workflow expansion.** The infrastructure items below are *future work, not part of this phase*: issue reporting, full request-lifecycle redesign, admin roster/CSV, reservations, max checkout duration, paired mobile scanner, production auth provider, Google/magic-link sign-in, Railway/PostgreSQL/object storage, production email, notifications/reminders.
+
+### Slice 1 — Employee Access Contract + Read Experience (implemented 2026-10-02, `feature/employee-access-read-experience`)
+
+Tests: baseline 211 → **230 passing / 0 failing**. No schema change, no new migration. What exists today (reconciled): employees already had their own navigation (Home with a *My equipment* card and *My requests*, Browse, Scan, Requests, Account/My profile), self-checkout (per-employee permission), permanent-assignment requests, return/drop-off, and password change; admins have the full tool set. This slice formalizes and tests what an employee may read, and adds a dedicated **My equipment** destination, History and Building.
+
+**Employee visibility policy (enforced on the server, not by hidden navigation):**
+- *May see:* their own profile (`GET /api/users/:id` for their own employee id), their own current assignments and assignment history, their own requests, and **assets that are theirs or available** — an employee can open an asset (`GET /api/assets/:id`), see it in lists, scan it, request it or self-check it out only if they currently hold it, **or** it is not archived and has status `available` (a multi-seat license with a free seat stays `available`). Asset details are sanitized for employees (no purchase cost, vendor, notes, audit trail; license key only for equipment they hold; never another holder's name).
+- *Must not see:* another employee's profile, assignments, history or requests (403); the admin tools/settings/import/export/outbox/activity (403, already true and now covered by tests); any other asset — archived, in repair, lost, retired, disposed, or held by someone else — which is indistinguishable from "not found" (404), including the photo files for such assets (`/uploads/*` now follows the asset's visibility) and including through actions (self-checkout, return notice, photo upload, creating a request for it). Scanner lookup returns an id only for assets they may open; for any other existing asset it returns `{found:false, unavailable:true}` (no id, no details) so the scanner can say "isn't available right now". The "already checked out to <name>" message is shown to IT only; employees just see "isn't available".
+- *Admin behavior is unchanged.*
+
+**Employee directory — restricted.** `GET /api/users` was returning every active employee's name to any signed-in user. The audit found **no employee workflow uses it**: self-checkout and requests always act as the signed-in employee, and the only callers (assign-to picker, "log a request for someone", People) are admin screens. It is now **admin-only** (employees get 403); employees read only their own record. No new directory feature was created.
+
+**History (new employee screen, `#/history`).** Read-only list of the employee's own assignments, newest first: equipment name, asset tag, type (*Permanent* / *Temporary checkout*, with "return by" date/time), since (check-out timestamp), returned timestamp, and a *Current* / *Overdue* marker for open ones. It uses the existing record (`GET /api/users/:id`, own id only) — no second history model, no duplicated assignment logic. Reachable from the desktop sidebar, the mobile Account page and a link on Home. Past rows aren't links (a returned asset may no longer be available to open); current rows link to the asset. The returned-history window is now the most recent **200** (was 50; also applies to the admin person page); the screen says so if it is reached.
+
+**Profile.** `/api/me` now includes `building`. The employee **My profile** shows name, email, department, job title, phone and **Building** read-only, with a note that IT manages them; password change, avatar menu and sign-out are unchanged. **Behavior change to note:** employees previously could edit their own name/department/title/phone through the profile form (`PUT /api/me`); per the "profile is read-only for this slice" requirement that is now **admin-only** (employees get 403; IT edits people on the People screen). Admins keep their editable profile form.
+
+**Employee navigation & My equipment (dedicated destination).** Manual QA found that an employee's current equipment lived behind a "Mine" filter inside Browse. Now: desktop sidebar **Home · My equipment · Browse equipment · Scan · Requests · History — separator — My profile**; on mobile the tab bar is unchanged and **My equipment** (then History, My profile) is on the Account page (More tab), plus a "See all" link on Home's My-equipment card. **My equipment** (`#/equipment`, employees only; an admin is redirected to Home, their own equipment stays there) shows only the signed-in employee's *active* assignments from the existing dashboard data (no new model/endpoint logic), in two groups: **Permanent assignments** (name, tag, category/model/location, "Assigned since", *Assigned* status) and **Temporary checkouts** (name, tag, details, checked-out time, **return by** date/time, *Overdue*), each with its own empty state; return-request banners / "Return requested" / "Dropped off" markers behave as before; every row opens the normal employee-authorized asset page. **Browse equipment** now means "equipment I can get": for employees the list is always *available, not archived, and not already held by me* (their own equipment, other people's, repair/lost/retired/disposed and archived assets never appear); the "Mine" and "All"/status chips are gone for employees (they would only duplicate this rule), and the status / holder / `employee_id` / `include_archived` query filters are ignored server-side for employees; searching can no longer match a holder's name (it could previously reveal who holds a multi-seat license). Search, category filter, scanner, self-checkout permissions, requests and asset-detail authorization are unchanged. Admin navigation, Assets list and filters are unchanged. Related small fixes: an employee's request detail no longer links to an asset page they may not be allowed to open; the scanner shows a friendly "isn't available right now" message for unavailable equipment.
+
+**Tests:** `test/employee-access.test.js` (own vs other profile/history/requests, My equipment data and nav/Browse wiring, directory, admin-only endpoints, available/own/unavailable/archived asset detail, list sanitization, lookup, photo files, action leakage, Building and read-only profile, front-end wiring); one assertion in `test/self-checkout.test.js` updated (the minimal employee directory it pinned is gone). Seed unchanged.
+
+**Technical debt / follow-ups (not blockers):** `held_by_other` and "not available" branches in the asset page are now rarely reachable for employees (kept, harmless); an employee's open request for equipment that later becomes unavailable shows the name but can't open the asset; asset photos are still served from local disk (object storage is later); History has no filters/pagination beyond the 200-row window; Employee Actions (slice 2) will decide what, if anything, employees may edit.
+
+---
+
+### Future requirements recorded 2026-10-02 (approved direction — **NOT implemented**, not part of Slice 1 or any current slice)
+
+These extend the existing reservation note in Section 11 (Phase 1E "Equipment reservation") and belong to later Employee Portal V1 work (after slice 2, Employee Actions). No tables, fields, APIs or UI exist for any of them.
+
+#### Future — Asset Availability Calendar + Reservations
+
+Employees should eventually be able to view **future availability** for reservable/shared equipment — cameras, lenses, audio gear and other production equipment.
+
+- **Employee-facing privacy rule:** employees see **availability windows, not the identity** of whoever holds or has reserved the asset — e.g. *Available*, *Unavailable*, *Reserved*. Admin/IT may see the actual holder / reservation owner.
+- **Planned capabilities:** asset-level availability calendar; **Reserve for future**; required pickup date/time window as appropriate; required return date/time; overlapping-reservation prevention; current-checkout vs future-reservation conflict handling; admin override/cancel; late-return conflict handling; no-show / pickup expiration; reminders/notifications (later).
+- **Waitlist:** if the requested period is unavailable, an employee may join a waitlist / availability queue and may be notified if the requested slot opens.
+- **Release request / conflict resolution:** because marketing schedules change dynamically, an unavailable window may optionally let an employee ask the current holder (or a future reservation holder) to **release the asset earlier**.
+  - The requester's identity need not be exposed to the holder.
+  - The holder receives a simple request such as: *"This equipment is needed during part of your current checkout/reservation. Can you release it by [date]?"*
+  - The holder may explicitly **accept or decline**; **silence changes nothing**.
+  - The system must **never automatically shorten or cancel** an existing checkout or reservation.
+  - If accepted, availability is updated and the waitlisted/requesting employee may be notified.
+  - Admin retains visibility and override authority.
+- **Dependencies/open design points:** a reservation concept distinct from an assignment; per-asset "reservable" flag; interaction with max checkout duration (also future) and the existing temporary-checkout return date; notification/email infrastructure (also future). The earlier Phase 1E open questions (overlap conflicts, late returns, when a reservation becomes a checkout, no-show expiry, admin override) still apply.
+
+#### Future — Detailed Equipment Catalog + Specific Asset Requests
+
+Today's Request Equipment flow uses broad categories (computer, laptop, keyboard, …). Long term, employees should be able to request at three levels:
+
+1. **Category** — Camera, Lens, Laptop, Audio, …
+2. **Model / equipment type** — e.g. Sony A7 IV, Canon RF 24-70mm, MacBook Pro 16"
+3. **Specific physical asset** — e.g. CAM-004, "Sony A7 IV — Body 2"
+
+- **Request modes:** *"Any matching asset is fine"* and *"I need this specific asset"*.
+- **Catalog direction:** admin-managed categories; admin-managed model/equipment groupings; **avoid a permanently hardcoded category list** (categories are currently free text plus a settings list); use inventory/catalog data where practical; product/model photos and useful details/specs.
+- **Integration:** a specific-asset request integrates with the future availability calendar / reservation system.
+- **Long-term flow:** Equipment Catalog → Model / Equipment Type → Specific Asset → Availability Calendar → Reserve / Request → Waitlist if unavailable → Optional release request.
+- Relationship to existing work: builds on, and does not replace, the current permanent-assignment request and request-integrity rules (Phase 1); the full request-lifecycle redesign remains separate future work.
+
+---
+
+# 12. Future Infrastructure — Managed PostgreSQL Migration (formerly "Phase 2")
 
 *(Renamed 2026-09-28, was "Phase 2 — Supabase PostgreSQL" — see Section 19 Decisions Log. Railway PostgreSQL is the current preferred host; tasks below are written provider-neutrally so they hold regardless of final host.)*
 
-**Status:** Not Started
+**Status:** Not Started — **no longer the active Phase 2** (see Section 11a); remains planned as later infrastructure work.
 
 - [ ] Create a DEV PostgreSQL instance (Railway PostgreSQL preferred)
 - [ ] Establish migration workflow
@@ -1054,6 +1115,8 @@ Test using actual hardware.
 ---
 
 # 18. Current Priority
+
+**Update 2026-10-02:** the active priority is **Phase 2 — Employee Portal V1** (Section 11a), starting with slice 1 (Employee Access Contract + Read Experience, implemented), then slice 2 (Employee Actions). The Phase 0 detail below is historical.
 
 ## Next Development Slice
 
@@ -1331,6 +1394,12 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ---
 
+## 2026-10-02 — Phase 2 Is Employee Portal V1, Not the PostgreSQL Migration
+
+Decision: after Phase 1 closed, the next phase builds **Employee Portal V1 on the existing employee interface** (sequence: Employee Access Contract + Read Experience → Employee Actions → later workflow expansion). The managed-PostgreSQL, object-storage, auth-provider and Railway work is deferred to later infrastructure phases and is not a prerequisite. Employee access is enforced on the server (own data + available/own equipment only), the employee directory endpoint is admin-only, and employee profile details are read-only. See Section 11a.
+
+---
+
 # 20. Open Decisions
 
 - [x] Repository branching strategy — *resolved 2026-09-28: `stage` (integration/default) → `main` (release), see Section 3a.*
@@ -1357,6 +1426,7 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ### Completed
 
+- **Phase 2 slice 1 — Employee Access Contract + Read Experience (2026-10-02, Section 11a):** server-enforced employee visibility, admin-only directory, employee History screen, Building on `/api/me`, read-only employee profile
 - **Phase 1 — Data Model Hardening: COMPLETE (2026-10-01)** — 1A–1E plus the Foundation Closeout (serial normalization/uniqueness, request integrity, historical-safety verification); migrations 1–9, 211 automated tests; see Section 11
 - Existing source received
 - Initial architecture audit completed

@@ -202,8 +202,8 @@ test('the People data carries self-checkout state for login holders, and no-logi
   assert.deepEqual([row(off.id).has_account, row(off.id).can_self_checkout], [true, false]);
   assert.deepEqual([row(none.id).has_account, row(none.id).login_enabled, row(none.id).role], [false, false, null]);
   assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', none.id), 0, 'still no account for a no-login person');
-  // the employee directory (non-admin) stays minimal
-  assert.deepEqual(Object.keys((await withLogin.client.get('/api/users')).body[0]).sort(), ['id', 'name']);
+  // there is no employee directory for non-admins any more (see test/employee-access.test.js)
+  assert.equal((await withLogin.client.get('/api/users')).status, 403);
 });
 
 // ---------------------------------------------------------------- stale-UI guard
