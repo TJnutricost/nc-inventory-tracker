@@ -1,8 +1,8 @@
 # NC IT Inventory Tracker — Project Status
 
-**Last Updated:** 2026-09-30<br>
+**Last Updated:** 2026-10-01<br>
 **Project Status:** Early MVP / Prototype  
-**Current Phase:** Baseline & Test Harness  
+**Current Phase:** Phase 1 (Data Model Hardening) — **COMPLETE** (Foundation Closeout, 2026-10-01); next: Phase 2 (PostgreSQL) and the future-phase items listed in Section 11  
 **Canonical Branch:** `stage` (shared integration / GitHub default branch); `main` is the stable/release branch — see Section 3a  
 **Production Status:** Not deployed
 
@@ -337,9 +337,9 @@ These were identified during the initial source audit.
 
 ## Asset Deletion
 
-**Status:** Needs correction before production data.
+**Status:** Resolved in Phase 1C/1E (the text below is the original finding, kept for context). Assets are archived, never deleted; history foreign keys are RESTRICT.
 
-Current hard deletion may cascade-delete historical information such as assignments/activity.
+Original finding: hard deletion could cascade-delete historical information such as assignments/activity.
 
 ### Desired behavior
 
@@ -356,13 +356,11 @@ Historical assignment/activity records should remain available.
 
 ## Serial Number Uniqueness
 
-**Status:** Needs design decision.
+**Status:** Resolved in the Phase 1 Foundation Closeout (migration 8): serials are unique across the whole inventory, archived assets included, ignoring surrounding whitespace and letter case. This **supersedes the Phase 1A "warn + admin override" design** (see Section 11). The text below is the original finding, kept for context.
 
-Serial numbers can currently be used by scanner lookup, but database uniqueness is not strongly enforced.
+Original finding: serial numbers can be used by scanner lookup, but database uniqueness was not enforced, so duplicates could make scanner lookup ambiguous.
 
-Duplicate serial numbers could make scanner lookup ambiguous.
-
-The final design must also account for:
+The final design had to also account for:
 
 - Missing serials
 - Generic manufacturer serials
@@ -443,7 +441,7 @@ Current rate limiting uses application/server memory and will not behave reliabl
 
 ## Historical Integrity
 
-**Status:** High priority.
+**Status:** Addressed for Phase 1 (assignments/activity/requests RESTRICT, archive-first, request integrity checks — Phase 1E + Foundation Closeout). Remains a standing principle for every future schema change.
 
 Assignment history, check-in/out history, lifecycle events, and audit records should be treated as durable historical data.
 
@@ -736,7 +734,7 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 
 # 11. Phase 1 — Data Model Hardening
 
-**Status:** Phase 1A (audit + target design) complete and **approved** — 2026-09-28. Phase 1B–1G implementation **not started**; nothing below is implemented. Full detail: [`docs/DATA_MODEL_PHASE_1.md`](docs/DATA_MODEL_PHASE_1.md).
+**Status: Phase 1 is COMPLETE (2026-10-01)** — Phases 1A–1E plus the **Foundation Closeout** (below). There is no Phase 1F/1G: serial normalization and the *current-workflow* request hardening were done in the closeout; the full request-lifecycle redesign is explicitly future work (see "Moved to future phases"). The Phase 1A section below is the original audit/design as approved on 2026-09-28; where it says "Planned", the sections after it record what was actually built (and the Foundation Closeout supersedes its serial and request decisions). Full design detail: [`docs/DATA_MODEL_PHASE_1.md`](docs/DATA_MODEL_PHASE_1.md).
 
 ### Phase 1A — Audit & Design (2026-09-28, `feature/phase-1a-data-model-design`)
 
@@ -804,7 +802,7 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 - **Deferred:** People screen polish (no dedicated employee-vs-account views, no bulk tools); an employee lifecycle beyond active/inactive (no archive/offboarding workflow); separate employee-email vs login-email editing in the UI (editing email updates both); renaming legacy `user_id` columns and history-safe/RESTRICT FKs (Phase 1E); external-auth linking and the "access not provisioned" page (auth phase).
 - **Newly approved future requirements (2026-09-30, documentation only — 1D code/schema unchanged):** assignment mode (permanent vs temporary checkout, an assignment-level field preserved in history) is recorded as input to **Phase 1E**; an admin employee/equipment roster with CSV export is recorded as later admin reporting work that depends on it. See "Assignment Mode + Admin Equipment Roster" (next to "Historical Integrity") and `docs/DATA_MODEL_PHASE_1.md` §3.4/§4a. Neither is implemented; 1D assignments remain undifferentiated.
 
-### Phase 1E — Assignment + Historical Integrity (implemented, 2026-09-30, `feature/phase-1e-assignment-integrity`; not yet committed/merged)
+### Phase 1E — Assignment + Historical Integrity (implemented, 2026-09-30, `feature/phase-1e-assignment-integrity`; merged into `stage` via PR #10)
 
 - **Assignment type:** `assignments.assignment_type TEXT NOT NULL DEFAULT 'permanent' CHECK IN ('permanent','checkout')` (`checkout` = "Temporary checkout" in the UI). It belongs to the **assignment** — never to the asset or category (a camera in category `Other` can be permanent; a laptop can be a checkout). History keeps the value it was created with; check-in never rewrites it. API: `assignment_type` on `POST /api/assets/:id/checkout` and `POST /api/requests/:id/approve` (omitted = `permanent` for an admin; an unknown value = 400). **Permanent assignments are admin-only, enforced on the server** (route + `createAssignment`, not just the UI): a non-admin who asks for `permanent` gets **403** and nothing is created; a non-admin self check-out with no type is always a `checkout`, and non-admins can only check out to themselves. Employees may never directly permanently assign equipment to themselves. CSV-import assignments are `permanent` (admin route).
 - **Legacy rule (migration 6, exact):** a legacy assignment **with a non-null `due_date` → `checkout`**; **without → `permanent`**. Decided by `due_date` alone — never by asset category. Legacy `due_date` values are preserved; legacy rows have no `due_time`. (Reasoning: a due date is the one reliable sign the old system recorded a loan.) A table CHECK now guarantees the invariant for every row: `permanent ⇒ due_date and due_time NULL`; `checkout ⇒ due_date NOT NULL`.
@@ -840,20 +838,49 @@ Phase 0 is complete when the current SQLite version has a repeatable development
 - **Email delivery (future infrastructure):** real email delivery/provider configuration is still future work. The development Outbox behavior (messages logged when SMTP is not configured) is acceptable for now; no provider was configured.
 - **Permanent-assignment request:** a minimal version is now implemented in 1E on the existing request model (see "Employee permanent-assignment request" above). The full request lifecycle (states, richer approval, employee-facing tracking) remains Phase 1G.
 
-**Phase 1 sequence (1B–1D merged; 1E implemented on its branch, uncommitted; rest Planned):** 1B Migration Foundation + Immediate Integrity Fixes → 1C Asset Lifecycle + Durable Tag Issuance → 1D Employee/Account Split → 1E Assignment + Historical Integrity → 1F Serial Normalization + Lookup Ambiguity → 1G Request Lifecycle.
+### Phase 1 Foundation Closeout — serial integrity, request integrity, historical safety (implemented 2026-10-01, `fix/phase-1-foundation-closeout`, from `stage` after PR #10)
 
-- [ ] Define employee/person model — *must be independent of login account; see Section 8a*
-- [ ] Define login/profile model — *a user of the eventual shared auth provider (TBD) optionally links to an employee record; see Section 8a*
-- [ ] Define asset identifier model
-- [ ] Resolve serial duplicate behavior
-- [ ] Replace destructive asset deletion
-- [ ] Preserve historical records
-- [ ] Make asset-tag generation concurrency safe
-- [ ] Fix cover-photo ownership validation
-- [ ] Confirm lifecycle statuses
-- [ ] Confirm location model
-- [ ] Confirm category model
-- [ ] Confirm self-checkout policy
+**Migrations 8 and 9** (1–7 untouched). Suite: **203 passing / 0 failing** (baseline 154; +18 `test/serial.test.js`, +31 `test/request-integrity.test.js`; two existing tests made migration-count-agnostic / given valid legacy fixtures). `npm run seed:dev` unchanged: 10 people, 48 assets, 12 current + 4 historical assignments, 5 requests.
+
+- **Serial normalization + uniqueness (migration 8).** `assets.serial` keeps what the user typed — only **surrounding whitespace is trimmed** and a blank/whitespace-only value is stored as **NULL** (no serial). New column `assets.serial_normalized` (= trimmed + lower-cased) with a plain **`UNIQUE` index** (NULLs never collide). Uniqueness covers the **whole inventory including archived assets**. Nothing else is stripped: `ABC-123`, `ABC123`, `ABC 123` and `ABC/123` are different serials; `ABC123`, `abc123` and `  ABC123  ` conflict. The rule lives in one place (`src/serial.js`) and is applied by every write path: create, edit, CSV import (a conflicting row is skipped with a message, the rest import; an update with a blank serial keeps the stored one) and scanner lookup (matches `serial_normalized`, so case/space-insensitive and index-backed). Conflicts return 400 naming the asset that owns the serial (and "(archived)"). A rejected create rolls back its generated tag number. A serial must be text or a number. **Existing data:** migration 8 trims stored serials, blanks → NULL, backfills the key, and **refuses to run if any assets already collide** — it lists them (tag, asset id, raw serial), changes nothing and never merges, deletes or renames an asset. *Decisions:* (1) this **supersedes the 1A "duplicates warn + admin override" and "placeholder list (N/A, NONE, …) treated as missing" design** — the closeout brief asked for hard uniqueness and *only* blank = no serial, so a placeholder like `N/A` is a real value and a second `N/A` is rejected (admins should leave unknown serials blank); (2) the key is computed in the app and stored, **not** a DB expression/collation (`lower()` / `COLLATE NOCASE` are ASCII-only in SQLite but Unicode/locale-aware in PostgreSQL, so a DB-side rule would change meaning after the migration); (3) a serial equal to another asset's *tag* is still allowed — lookup deterministically prefers the tag; (4) no duplicate-serial *report* was needed on real data: the local `data/` database has no assets, and the migration itself is the collision report for any database it runs on.
+- **Request integrity (current workflow only; no new statuses, screens or UX).** `src/requests.js` holds the allowed transitions and is the **only** code that changes a request's status: *equipment* `open → approved | completed | denied | cancelled`, `approved → completed | denied | cancelled`; *return* `open → dropped_off | completed | cancelled`, `dropped_off → completed | cancelled`; `denied` / `completed` / `cancelled` are **terminal** (no endpoint edits or deletes a request, and nothing moves out of a terminal state — API tests verify a closed request is byte-for-byte unchanged by every action). Each change is a conditional `UPDATE … WHERE id = ? AND status = <validated status>`, so a simultaneous IT-approve and employee-rescind produce exactly one winner (tested). **Migration 9** rebuilds `requests` (ids/sequence kept) with table CHECKs: status valid for the type (a return request can't be `approved`/`denied`, an equipment request can't be `dropped_off`); `open`/`dropped_off` ⇒ no `resolved_at`/`resolved_by`; `approved`/`denied`/`completed`/`cancelled` ⇒ `resolved_at` set; `resolved_at` never before `created_at`; `requested_assignment_type` only on equipment requests and `permanent` requires an asset; explicit `ON DELETE RESTRICT` on all four references (`user_id`, `asset_id`, `created_by`, `resolved_by`); a partial unique index allowing at most one **live** (open/dropped_off) return request per asset + employee; and two plain indexes. Like migrations 6–8 it validates existing rows first and **refuses with the offending request ids** (nothing repaired or deleted) if any already contradict the rules. Server behavior fixed: a client can't choose a status/type on create; request creation refuses an inactive person or an archived asset; list filters accept only `open|closed` and `equipment|return` (else 400); `deny` is equipment-only; re-approving an already-approved request is refused; approving for an inactive person is refused.
+- **Permanent-assignment request behavior.** Approving a request for a *permanent* assignment now always makes exactly that assignment: for the requested asset (a different `asset_id` → 400), as `permanent` (a `checkout` override → 400), and it can no longer end as "approved" with nothing assigned (omitting `asset_id` uses the requested one). The assignment and the request's completion are one transaction (a failed assignment leaves the request open and nothing behind); emails go out after commit. A direct **temporary** checkout no longer silently completes an open *permanent* request (a permanent checkout does; an unspecified request is completed by either); a direct checkout still only affects the receiving employee's requests. The UI already sent the right values, so it is unchanged.
+- **Rescind rule as supported today (unchanged).** An employee may cancel only their **own equipment** request while it is live (`open` or `approved`); IT may cancel any live request, including return requests; cancelling records who/when and keeps the row. The stricter product rule — *rescind only until IT has "opened" it* (`submitted`/`in_review`/`opened_at`) — needs the new states and is part of the **future request-lifecycle UX**, not this slice.
+- **Historical / FK safety audit.** Verified (tests) that no application path deletes an asset, employee, account, assignment or request (asset "delete" archives; people are deactivated; no request/assignment endpoint deletes or edits history), and that raw `DELETE`s are blocked by RESTRICT/NO ACTION foreign keys: `assignments.asset_id/employee_id`, `activity.asset_id`, `requests.asset_id/user_id/created_by/resolved_by` (explicit RESTRICT), plus the accounts/employees references (default NO ACTION, which also rejects the delete). Archiving keeps requests/assignments/activity and requests still resolve to the archived asset; deactivating an employee keeps their requests readable. **Left as is, deliberately:** `photos.asset_id` ON DELETE CASCADE (photos are attachments; unreachable because every asset has activity rows), `tokens.user_id` CASCADE (disposable credentials), no FK on `assets.cover_photo_id` (validated in the application), and open equipment requests for an asset that is later archived stay open (they can't be approved against the archived asset; IT can decline or assign different equipment).
+- **PostgreSQL follow-ups (nothing PostgreSQL-specific was built).** The new schema avoids SQLite-only features: plain `UNIQUE` index on an app-computed column, partial unique index (supported by PostgreSQL), ordinary CHECKs (no `IS NOT`/SQLite quirks), explicit RESTRICT. For Phase 2: the TEXT timestamps (`datetime('now')`, compared as strings in the `resolved_at >= created_at` CHECK) become `timestamptz` defaults — re-express that CHECK on real timestamps; `AUTOINCREMENT` becomes identity/sequences; the transition rules could additionally get a PostgreSQL trigger for defence in depth (the application layer is the portable guard today); migrations 8–9's pre-checks should be run (read-only) against the exported production data before cutover.
+
+**Phase 1 summary (1A–1E + Closeout):**
+
+- **1A** audit + approved target design. **1B** migration runner (`schema_migrations`, transactional, FK-safe rebuilds) + immediate fixes (cover-photo ownership, request reference validation, category/location text checks). **1C** archive instead of delete, `disposed` status, immutable tags, durable monotonic tag counter. **1D** `users` split into `employees` (people/assignees, may have no login) and `accounts` (login/authorization). **1E** assignment type (permanent vs temporary checkout, admin-only permanent), return date/time, one active assignment per employee+asset, transactional seat capacity, RESTRICT history FKs, employee permanent-assignment request, per-employee self-checkout, building field. **Foundation Closeout** serial normalization + uniqueness, request-state integrity, permanent-request approval correctness, historical-safety verification.
+- Schema is now migrations 1–9; 203 automated tests; deterministic dev seed.
+
+**Moved to future phases (NOT Phase 1 blockers):**
+
+- Admin employee/equipment roster + CSV export (the data model supports it: Section 7)
+- Future reservations (pickup date / reserve-for-future; see the 1E future-requirements notes)
+- Max checkout duration (per-asset policy)
+- Paired mobile scanner (Section 19)
+- Phone-camera HTTPS QA (needs the HTTPS staging environment — Phase 5/6)
+- Railway hosting, managed PostgreSQL, object storage (Phases 2, 3, 5)
+- Production email delivery (Outbox logging is acceptable until then)
+- Final auth provider (Phase 4)
+- Full request lifecycle UX (submitted / in review / fulfilled / rescinded states, "opened by IT" rescind cutoff, employee-facing tracking)
+- Notifications / reminders (e.g. checkout overdue notices beyond the existing date-based sweep)
+
+Smaller known debt carried forward (not blockers): tag-correction workflow; category/location length limits; renaming `requests.user_id` / `activity.subject_user_id` / `tokens.user_id`; a tag-vs-serial collision check; no Archived-assets UI / unarchive endpoint; no foreign key on `assets.cover_photo_id`.
+
+- [x] Define employee/person model — *Phase 1D*
+- [x] Define login/profile model — *Phase 1D (external-auth linking is Phase 4)*
+- [x] Define asset identifier model — *tag is canonical; serial unique & normalized; no identifier table (Closeout, 1A decision)*
+- [x] Resolve serial duplicate behavior — *hard uniqueness, case/whitespace-insensitive (Closeout)*
+- [x] Replace destructive asset deletion — *Phase 1C*
+- [x] Preserve historical records — *Phase 1E + Closeout*
+- [x] Make asset-tag generation concurrency safe — *Phase 1C (durable counter, one transaction)*
+- [x] Fix cover-photo ownership validation — *Phase 1B*
+- [x] Confirm lifecycle statuses — *Phase 1C*
+- [ ] Confirm location model — *free text; deferred past Phase 1*
+- [ ] Confirm category model — *free text; deferred past Phase 1*
+- [x] Confirm self-checkout policy — *per-employee permission (1E QA follow-up)*
 
 ---
 
@@ -1311,12 +1338,12 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 - [ ] Final object storage provider — *Railway/S3-compatible currently preferred; see Section 19.*
 - [ ] Final authentication provider — *TBD, revised 2026-09-28 (was assumed to be Supabase Auth); see Section 14 and Section 19.*
 - [x] Employee vs login-account schema — *resolved (approved) 2026-09-28; implementation Planned in Phase 1D. See `docs/DATA_MODEL_PHASE_1.md` §3.1.*
-- [x] Asset identifier / serial policy — *resolved 2026-09-28: no identifier table or barcode column; normalized-serial warning + ambiguity handling, Phase 1F.*
+- [x] Asset identifier / serial policy — *resolved: no identifier table or barcode column; hard uniqueness on the normalized serial (trim + case-insensitive), Phase 1 Foundation Closeout 2026-10-01 (supersedes the 2026-09-28 warn-and-override plan).*
 - [ ] Concrete production asset-tag prefix/width — *numbering rules approved (monotonic, never reused, prefix change doesn't reset); the production prefix value is a setting. **Caveat:** prefixes containing digits (e.g. `NC2-`) make legacy-tag high-water inference ambiguous, because counter seeding parses trailing digits from existing tags (Phase 1C migration 4 ignores tags with digits in the prefix). Resolve the final production prefix/format before any future migration or reseeding logic depends on parsing historical tags. The allocator is intentionally not redesigned for this.*
 - [x] Asset lifecycle statuses — *resolved 2026-09-28: `disposed` + `archived_at`, Archive replaces Delete, Phase 1C.*
-- [x] Request status set / rescind rule — *resolved 2026-09-28, Phase 1G.*
+- [x] Request status set / rescind rule — *current statuses kept and guarded by a transition table + DB CHECKs (Foundation Closeout 2026-10-01); the new states and the "opened by IT" rescind cutoff are part of the future request-lifecycle UX.*
 - [x] Self-checkout behavior — *resolved 2026-09-28: default OFF for new databases (Phase 1B); existing settings untouched.*
-- [ ] Duplicate-serial report against real data (before Phase 1F)
+- [x] Duplicate-serial report against real data — *superseded: migration 8 refuses and lists any existing collisions on whichever database it runs against (local `data/` has no assets).*
 - [ ] Email provider
 - [ ] Production domain — *revised 2026-09-28: parent domain, admin subdomain, and employee subdomain are each individually TBD; expected to be subdomains of an existing hosted parent domain rather than a new domain; DNS/CNAME/proxy/hosting details also TBD; see Section 8a.*
 - [ ] Barcode label dimensions/printer
@@ -1330,6 +1357,7 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ### Completed
 
+- **Phase 1 — Data Model Hardening: COMPLETE (2026-10-01)** — 1A–1E plus the Foundation Closeout (serial normalization/uniqueness, request integrity, historical-safety verification); migrations 1–9, 203 automated tests; see Section 11
 - Existing source received
 - Initial architecture audit completed
 - Existing feature inventory completed
@@ -1347,7 +1375,6 @@ The earlier `<domain>` assumption implied a dedicated root domain for this proje
 
 ### In Progress
 
-- Phase 1A — Data Model Audit & Target Design: audit complete and target decisions approved on `feature/phase-1a-data-model-design` (documentation only); implementation not started; see Section 11 and `docs/DATA_MODEL_PHASE_1.md`
 - Phase 0 golden path — business-logic/API leg fully proven (Phase 0C); software/desktop scanner behavior verified (Phase 0D); the literal physical-hardware scan (USB, Bluetooth, camera) is what remains
 
 ### Next

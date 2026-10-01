@@ -157,7 +157,7 @@ const flags = (d) => d.prepare('SELECT can_self_checkout c FROM employees ORDER 
 
 test('migration 7: legacy global OFF disables every existing employee, once', () => {
   const old = legacyDb('0');
-  assert.deepEqual(runMigrations(old, migrations), [7]);
+  assert.deepEqual(runMigrations(old, migrations), migrations.filter((m) => m.id > 6).map((m) => m.id));
   assert.deepEqual(flags(old), [0, 0]);
   old.prepare("INSERT INTO employees (name) VALUES ('Hired Later')").run();
   assert.deepEqual(flags(old), [0, 0, 1], 'employees added afterwards default to enabled');
@@ -167,13 +167,13 @@ test('migration 7: legacy global OFF disables every existing employee, once', ()
 
 test('migration 7: legacy global ON enables every existing employee', () => {
   const old = legacyDb('1');
-  assert.deepEqual(runMigrations(old, migrations), [7]);
+  assert.deepEqual(runMigrations(old, migrations), migrations.filter((m) => m.id > 6).map((m) => m.id));
   assert.deepEqual(flags(old), [1, 1]);
 });
 
 test('migration 7: no legacy setting means existing employees are enabled; the flag is validated', () => {
   const old = legacyDb(undefined);
-  assert.deepEqual(runMigrations(old, migrations), [7]);
+  assert.deepEqual(runMigrations(old, migrations), migrations.filter((m) => m.id > 6).map((m) => m.id));
   assert.deepEqual(flags(old), [1, 1]);
   assert.throws(() => old.prepare('UPDATE employees SET can_self_checkout = 2').run(), /CHECK/);
   assert.ok(old.pragma('table_info(employees)').some((c) => c.name === 'building' && c.notnull === 0), 'building is nullable');
