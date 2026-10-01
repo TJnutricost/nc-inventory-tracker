@@ -68,6 +68,14 @@ Then open http://localhost:3000 and log in as the seeded admin:
 
 Every seeded account (admin and regular users) shares that same development-only password. `./data-dev` is gitignored — it's disposable scratch data, safe to delete or reseed at any time, and is **never** used by `npm start` unless you set `DATA_DIR` yourself as shown above.
 
+**Don't run `npm run seed:dev` while `npm run dev` is using `./data-dev`** — it deletes and recreates that database underneath the running server, which can leave the watcher on a stale file and crash it. To check that the seed still works (agents, CI, a quick manual check) use the isolated variant instead:
+
+```bash
+npm run seed:verify
+```
+
+It seeds the same dataset into a temporary directory, confirms setup is complete and the admin login above works, deletes the temporary directory, and exits non-zero on failure. It never touches `./data-dev`, so it is safe to run while your dev server is up.
+
 ---
 
 ## Deploying for the company

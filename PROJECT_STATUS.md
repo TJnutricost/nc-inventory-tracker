@@ -927,6 +927,8 @@ Tests: baseline 230 → **251 passing / 0 failing** (`test/employee-actions.test
 
 **Remains FUTURE (explicitly not in Slice 2):** detailed Equipment Catalog (category → model/type → specific-asset requests); Asset Availability Calendar and future reservations; waitlist / availability queue; optional release requests; notifications/reminders; full request-lifecycle expansion (`submitted`/`in_review`/`opened_at`/`opened_by`, the stricter "rescind until IT opens it" rule); admin roster/CSV; max checkout duration; paired mobile scanner; production auth; Railway/PostgreSQL/object storage; production email. The recorded designs for the calendar/reservation/waitlist/release/catalog items are in the "Future requirements" section below.
 
+**Dev tooling note — isolated seed verification (`chore/isolated-seed-verification`).** `npm run seed:dev` rebuilds `./data-dev`, which breaks a `npm run dev` watcher that has that database open. `npm run seed:verify` (`scripts/seed-verify.js`) reuses `seedDatabase` from `seed-dev.js` against a temp directory under the OS temp dir, re-opens it as a fresh app, checks `/setup` is not offered and the documented admin login works, removes the directory, and exits non-zero on failure. `seed:dev` is unchanged. Use `seed:verify` for automated/agent verification; reserve `seed:dev` for an intentional local rebuild with the dev server stopped. Suite: 251 → 254 (`test/seed-verify.test.js`).
+
 ---
 
 ### Future requirements recorded 2026-10-02 (approved direction — **NOT implemented**, not part of Slice 1 or any current slice)
