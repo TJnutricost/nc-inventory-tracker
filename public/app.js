@@ -568,7 +568,8 @@ async function viewAssets() {
 // tree. Same drill-down model everywhere: pick a card to go one level deeper; breadcrumbs jump back up; Back on narrow screens.
 // A level with child categories starts with the VIRTUAL "All in <name>" card: not a catalog entry, just "the whole branch".
 const cgCard = ({ attrs, name, meta, kind = '', chev = true, extra = '' }) => `<button type="button" class="cg-card ${kind}" ${attrs}><span class="cg-name">${esc(name)}${extra}</span><span class="cg-meta">${meta}</span>${chev ? icon('chev', 'cg-chev') : kind.includes('on') ? icon('check', 'cg-chev') : ''}</button>`;
-const cgTop = (chain, { allLabel, curAll, trailing = '' }) => `<div class="cc-top cg-top"><button type="button" class="cc-back" data-back aria-label="Back">${icon('back')}<span>Back</span></button>
+const pageBack = `<button type="button" class="page-back" data-back aria-label="Back">${icon('back')}<span>Back</span></button>`; // page navigation, top-left beside the title — never grouped with the action buttons
+const cgTop = (chain, { allLabel, curAll, trailing = '' }) => `<div class="cc-top cg-top">
   <nav class="cc-crumbs" aria-label="Where you are"><button type="button" data-crumb="-1" class="${chain.length ? '' : 'cur'}">${esc(allLabel)}</button>${chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 && !curAll ? 'cur' : ''}">${esc(c.name)}</button>`).join('')}${curAll ? `<span aria-hidden="true">›</span><button type="button" class="cur" aria-current="true">All in ${esc(chain[chain.length - 1].name)}</button>` : ''}</nav>${trailing}</div>`;
 
 // ============================================================ employee Browse equipment
@@ -589,7 +590,7 @@ async function viewBrowse() {
     st.everything = !st.path.length && p.get('all') === '1';
     if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
   };
-  main().innerHTML = `<div class="page-head"><h1>Browse equipment</h1></div>
+  main().innerHTML = `<div class="page-head"><span id="headback"></span><h1>Browse equipment</h1></div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
@@ -602,6 +603,7 @@ async function viewBrowse() {
   const availMeta = (n) => (n ? `${n} available` : 'None available');
   const renderNav = () => {
     const bn = $('#bn');
+    $('#headback').innerHTML = st.path.length && !st.q ? pageBack : ''; // Back lives top-left beside the title, only below the top level
     if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
     const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
     const chain = st.path.map((id) => byId.get(id));
@@ -638,17 +640,16 @@ async function viewBrowse() {
   const go2 = () => { renderNav(); load(); };
   // Every move is a navigation to a URL; the hashchange handler (S.soft) then re-reads it and repaints in place.
   $('#bn').onclick = (e) => {
-    const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]'); const back = e.target.closest('[data-back]');
-    const parentOf = (id) => (byId.get(id) || {}).parent_id ?? null;
+    const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]');
     let target;
     if (e.target.closest('[data-everything]')) target = hashFor(null, !st.everything);
     else if (e.target.closest('[data-all]')) return; // already showing the whole branch
     else if (card) target = hashFor(Number(card.dataset.id));
     else if (crumb) target = hashFor(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
-    else if (back) target = hashFor(parentOf(st.path[st.path.length - 1]));
     else return;
     go(target); window.scrollTo(0, 0);
   };
+  $('#headback').onclick = () => { go(hashFor((byId.get(st.path[st.path.length - 1]) || {}).parent_id ?? null)); window.scrollTo(0, 0); }; // one step up
   S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
   $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
@@ -1644,7 +1645,7 @@ async function viewCatalog() {
   // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
   // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
   const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
-  main().innerHTML = `<div class="page-head"><h1>Equipment catalog</h1><span id="headact"></span></div>
+  main().innerHTML = `<div class="page-head"><span id="headback"></span><h1>Equipment catalog</h1><span id="headact"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
@@ -1679,6 +1680,7 @@ async function viewCatalog() {
     // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
     const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
     // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
+    $('#headback').innerHTML = n ? pageBack : ''; // page navigation: top-left beside the title, apart from Manage / Add subcategory
     $('#headact').innerHTML = n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`;
     if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
@@ -1764,10 +1766,10 @@ async function viewCatalog() {
     const to = (h) => { go(h); window.scrollTo(0, 0); };
     if (e.target.closest('[data-all]')) return to(hashFor(st.sel, !st.all));
     const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
-    // Back = one step up: out of "All in <name>" to the entry itself, otherwise to the parent entry (or the root).
-    if (e.target.closest('[data-back]')) return to(st.all ? hashFor(st.sel) : hashFor((byId(st.sel) || {}).parent_id ?? null));
     const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
+  // Back = one step up: out of "All in <name>" to the entry itself, otherwise to the parent entry (or the root).
+  $('#headback').onclick = () => { go(st.all ? hashFor(st.sel) : hashFor((byId(st.sel) || {}).parent_id ?? null)); window.scrollTo(0, 0); };
   S.soft = { base: '#/catalog', fn: apply };
   await reload();
 }
