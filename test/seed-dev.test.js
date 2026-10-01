@@ -106,3 +106,31 @@ test('a seeded admin can actually log in and see the known dataset over HTTP', a
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Regression: the seeded admin must satisfy the REAL setup contract (POST /api/setup needs a password of 8+ characters)
+// and must be exactly the documented login. These use literals on purpose — comparing the seed to its own constant
+// can't notice the constant being edited to something the app rejects (a 7-character password made the seed fail with
+// "POST /api/setup -> 400" and left a data-dev that redirected to /setup).
+test('the documented seeded admin (dana.ito@example.com / DevPass!2026) is created, can log in, and /setup is not offered', async () => {
+  assert.equal(DEV_PASSWORD, 'DevPass!2026');
+  assert.ok(DEV_PASSWORD.length >= 8, 'must satisfy the setup endpoint\'s minimum password length');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-seed-test-'));
+  const dataDir = path.join(dir, 'data-dev');
+  try {
+    const summary = await seedDatabase({ dataDir, quiet: true });
+    assert.equal(summary.adminEmail, 'dana.ito@example.com');
+    const server = await startServer(bootApp(dataDir).app);
+    try {
+      const client = makeClient(server);
+      assert.equal((await client.get('/api/setup-needed')).needed, false, 'the seeded database must not send the browser to /setup');
+      await client.post('/api/login', { email: 'dana.ito@example.com', password: 'DevPass!2026' });
+      const me = await client.get('/api/me');
+      assert.equal(me.user.role, 'admin');
+      assert.equal(me.user.email, 'dana.ito@example.com');
+    } finally {
+      await stopServer(server);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
