@@ -125,7 +125,7 @@ test('the History screen is wired for employees: route, nav entry, own-record AP
   assert.match(view, /'\/api\/users\/' \+ S\.me\.employee_id/, 'reads only the signed-in employee\'s own record');
   for (const field of ['asset_name', 'tag', 'checked_out_at', 'returned_at', 'typeText']) assert.ok(view.includes(field), field);
   assert.match(src, /\.\.\.\(isAdmin\(\) \? \[\] : \[\{ key: 'history', href: '#\/history'/, 'desktop nav entry for employees only');
-  assert.match(src, /\['#\/history', 'history', 'History'/, 'mobile Account page entry');
+  assert.match(src, /\['#\/history', 'history', 'History'/, 'mobile Profile tab entry');
 });
 
 // ---------------------------------------------------------------- requests
@@ -284,7 +284,7 @@ test('My equipment data: an employee\'s dashboard lists only their own active as
   assert.deepEqual((await other.client.get('/api/dashboard')).body.mine.map((m) => m.asset_name), ['Eq theirs']);
 });
 
-test('front end: employee navigation has My equipment (desktop + mobile Account), Browse has no "Mine" filter, admin nav is unchanged', () => {
+test('front end: employee navigation has My equipment (desktop + mobile Profile tab), Browse has no "Mine" filter, admin nav is unchanged', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const nav = src.slice(src.indexOf('function navItems()'), src.indexOf('function mountShell()'));
   const side = nav.slice(nav.indexOf('const side = ['));
@@ -293,11 +293,50 @@ test('front end: employee navigation has My equipment (desktop + mobile Account)
   assert.match(nav, /\.\.\.\(isAdmin\(\) \? \[\] : \[\{ key: 'equipment', href: '#\/equipment', label: 'My equipment'/, 'employees only');
   assert.match(nav, /key: 'people'[\s\S]*key: 'settings'/, 'admin sidebar items still there');
   assert.match(src, /\[\/\^#\\\/equipment\$\/, viewEquipment, \{ key: 'equipment', employee: true \}\]/);
-  assert.match(src, /\['#\/equipment', 'laptop', 'My equipment'/, 'mobile Account page entry');
+  assert.match(src, /\['#\/equipment', 'laptop', 'My equipment'/, 'mobile Profile tab entry');
   assert.doesNotMatch(src, /'Mine'/, 'the Mine filter is gone');
   assert.doesNotMatch(src, /employee_id', S\.me\.id/, 'Browse no longer queries by holder');
   const view = src.slice(src.indexOf('async function viewEquipment()'), src.indexOf('// Employee History:'));
   for (const bit of ['/api/dashboard', 'Permanent assignments', 'Temporary checkouts', 'No equipment is permanently assigned to you.', 'You have nothing checked out temporarily.', "href=\"#/asset/${m.asset_id}${srcQ('equipment')}\"", 'isOverdue(m.due_date)', 'fmtClock(m.due_time)']) assert.ok(view.includes(bit), bit);
+});
+
+test('front end: mobile nav — five tabs incl. Profile for everyone; hamburger is admin-only and holds administration only', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const keys = (t) => [...t.matchAll(/key: '(\w+)'/g)].map((m) => m[1]);
+  const labels = (t) => [...t.matchAll(/label: '([^']+)'/g)].map((m) => m[1]);
+  // bottom tab bar: the same five for both roles (Browse/Assets naming is the existing role switch)
+  const tabs = src.slice(src.indexOf('const common = ['), src.indexOf('const side = ['));
+  assert.deepEqual(keys(tabs), ['home', 'assets', 'scan', 'requests', 'account']);
+  assert.match(tabs, /label: isAdmin\(\) \? 'Assets' : 'Browse'/);
+  assert.match(tabs, /key: 'account', href: '#\/account', label: 'Profile', icon: 'user'/);
+  assert.match(tabs, /key: 'scan'[^\n]*scan: true/, 'raised Scan treatment kept');
+  assert.doesNotMatch(src, /viewMore|label: 'More'/, 'the More page/tab is gone');
+  // admin hamburger: exactly the administration destinations — nothing personal, no Sign out
+  const menu = src.slice(src.indexOf('const adminMenuItems = () => ['), src.indexOf('// The drawer lives in #sheet-root'));
+  assert.deepEqual(labels(menu), ['People', 'Equipment catalog', 'Print labels', 'Import / export', 'Activity log', 'Settings']);
+  const drawer = src.slice(src.indexOf('function openDrawer()'), src.indexOf('function mountShell()'));
+  assert.doesNotMatch(drawer, /My profile|Sign out|logout/, 'no personal/account actions in the admin hamburger');
+  assert.match(drawer, /if \(!isAdmin\(\)/, 'the drawer refuses to open for a non-admin');
+  // the hamburger button and its handler exist only for admins
+  assert.match(src, /\$\{isAdmin\(\) \? `<button type="button" class="iconbtn nav-toggle" id="nav-toggle"/);
+  assert.match(src, /if \(isAdmin\(\)\) \$\('#nav-toggle'\)\.onclick = openDrawer;/);
+  // Profile page: personal destinations only, per role; administration is never listed there
+  const account = src.slice(src.indexOf('function viewAccount()'), src.indexOf('async function logout()'));
+  const [adminItems, employeeItems] = account.slice(account.indexOf('const items = isAdmin() ? ['), account.indexOf('main().innerHTML')).split('] : [');
+  const hrefs = (t) => [...t.matchAll(/\['(#\/\w+)'/g)].map((m) => m[1]);
+  assert.deepEqual(hrefs(adminItems), ['#/profile']);
+  assert.deepEqual(hrefs(employeeItems), ['#/equipment', '#/history', '#/profile']);
+  assert.match(account, /id="out"[\s\S]*\$\('#out'\)\.onclick = logout/, 'Sign out lives on the Profile page');
+  assert.doesNotMatch(account, /#\/(people|catalog|labels|import|activity|settings)/, 'no administration in Profile');
+  // routing: Profile route, old More bookmarks redirect there, and the role guards on admin/employee routes are unchanged
+  assert.match(src, /\[\/\^#\\\/account\$\/, viewAccount, \{ key: 'account' \}\]/);
+  assert.match(src, /\[\/\^#\\\/more\$\/, \(\) => go\('#\/account'\)/);
+  assert.match(src, /\[\/\^#\\\/people\$\/, viewPeople, \{ key: 'people', admin: true \}\]/);
+  assert.match(src, /\[\/\^#\\\/equipment\$\/, viewEquipment, \{ key: 'equipment', employee: true \}\]/);
+  assert.match(src, /if \(opt\.admin && !isAdmin\(\)\) return go\('#\/home'\)/);
+  // desktop: the sidebar is untouched (it still lists People…Settings for admins) and the hamburger/tab bar are hidden by CSS
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.css'), 'utf8');
+  assert.match(css, /min-width: 900px\) \{\n  \.shell[\s\S]*?\.topbar \.nav-toggle \{ display: none; \}\n  \.tabbar \{ display: none; \}/);
 });
 
 test('scanner lookup: an employee gets an id only for assets they may open; others just report "unavailable"', async () => {

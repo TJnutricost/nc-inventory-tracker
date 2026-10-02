@@ -66,7 +66,7 @@ const P = {
   scan: '<path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2"/><path d="M7 8v8M10 8v8M13 8v8M17 8v8"/>',
   inbox: '<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5h13L22 12v6a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-6z"/>',
   users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18 14c2.2.8 3.5 3 3.5 6"/>',
-  more: '<circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/>',
+  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
   chev: '<path d="m9 6 6 6-6 6"/>',
   back: '<path d="m15 6-6 6 6 6"/>',
@@ -237,7 +237,7 @@ function navItems() {
     { key: 'assets', href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse', icon: 'box' },
     { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan', scan: true },
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
-    { key: 'more', href: '#/more', label: 'More', icon: isAdmin() ? 'more' : 'user' },
+    { key: 'account', href: '#/account', label: 'Profile', icon: 'user' }, // the signed-in person (My equipment / History / My profile / Sign out)
   ];
   const side = [
     { key: 'home', href: '#/home', label: 'Home', icon: 'home' },
@@ -257,10 +257,36 @@ function navItems() {
   side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' });
   return { tabs: common, side };
 }
+// Mobile hamburger (admins only) = administering the system. The signed-in person's own destinations live under the Profile tab.
+const adminMenuItems = () => [
+  { key: 'people', href: '#/people', label: 'People', icon: 'users' },
+  { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
+  { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
+  { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
+  { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
+  { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
+];
+// The drawer lives in #sheet-root like every other overlay, so the router's existing "clear overlays on navigation" also closes it.
+function closeDrawer() {
+  $('#sheet-root .drawer-backdrop')?.remove(); document.body.style.overflow = '';
+}
+function openDrawer() {
+  if (!isAdmin() || $('#sheet-root .drawer-backdrop')) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'sheet-backdrop drawer-backdrop';
+  wrap.innerHTML = `<nav class="drawer" role="dialog" aria-modal="true" aria-label="Administration" tabindex="-1">
+    <div class="drawer-head"><strong class="grow">Administration</strong><button type="button" class="iconbtn" id="drawer-close" aria-label="Close menu">${icon('x')}</button></div>
+    <div class="drawer-links">${adminMenuItems().map((i) => `<a href="${i.href}" data-key="${i.key}" class="${i.key === S.activeKey ? 'active' : ''}">${icon(i.icon)}<span>${i.label}</span></a>`).join('')}</div></nav>`;
+  $('#sheet-root').appendChild(wrap);
+  document.body.style.overflow = 'hidden';
+  wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('#drawer-close') || e.target.closest('a')) closeDrawer(); }); // a link to the page you're already on fires no route change, so close explicitly
+  $('.drawer', wrap).focus();
+}
 function mountShell() {
   const { tabs, side } = navItems();
   $('#app').innerHTML = `
     <header class="topbar">
+      ${isAdmin() ? `<button type="button" class="iconbtn nav-toggle" id="nav-toggle" aria-label="Open administration menu" aria-haspopup="dialog">${icon('menu')}</button>` : ''}
       <a href="#/home" class="row" style="gap:10px"><img src="/logo-white.svg" alt="Nutricost" class="logo"><span class="app-name">IT Assets</span></a>
       <span class="spacer"></span>
       <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
@@ -275,6 +301,7 @@ function mountShell() {
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
   const setTopbarH = () => document.documentElement.style.setProperty('--topbar-h', $('.topbar').offsetHeight + 'px');
   setTopbarH(); window.addEventListener('resize', setTopbarH);
+  if (isAdmin()) $('#nav-toggle').onclick = openDrawer;
   const menu = $('#avatar-menu'); const btn = $('#avatar-btn');
   const setMenu = (open) => { menu.hidden = !open; btn.setAttribute('aria-expanded', String(open)); };
   btn.onclick = (e) => { e.stopPropagation(); setMenu(menu.hidden); };
@@ -284,13 +311,18 @@ function mountShell() {
     const live = () => ({ m: $('#avatar-menu'), b: $('#avatar-btn') });
     const closeLive = () => { const { m, b } = live(); if (m && !m.hidden) { m.hidden = true; b.setAttribute('aria-expanded', 'false'); } };
     document.addEventListener('click', (e) => { if (!e.target.closest('.menu-wrap')) closeLive(); });
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeLive(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { closeLive(); closeDrawer(); } });
+    window.matchMedia('(min-width: 900px)').addEventListener('change', (e) => { if (e.matches) closeDrawer(); }); // the sidebar takes over on wide screens
   }
   $('#signout').onclick = () => { setMenu(false); logout(); };
   S.shell = true;
 }
+const ACCOUNT_KEYS = ['account', 'profile', 'equipment', 'history'];
 function setActive(key) {
-  $$('.tabbar a, .sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key || (key && a.dataset.key === 'more' && ['people', 'labels', 'catalog', 'import', 'activity', 'settings', 'profile', 'history', 'equipment'].includes(key) && a.closest('.tabbar'))));
+  S.activeKey = key;
+  const tabKey = ACCOUNT_KEYS.includes(key) ? 'account' : key; // the Profile tab covers the person's own pages
+  $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.key === tabKey));
+  $$('.sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key));
 }
 async function refreshBadge() {
   try {
@@ -368,7 +400,8 @@ const ROUTES = [
   [/^#\/equipment$/, viewEquipment, { key: 'equipment', employee: true }],
   [/^#\/history$/, viewHistory, { key: 'history' }],
   [/^#\/profile$/, viewProfile, { key: 'profile' }],
-  [/^#\/more$/, viewMore, { key: 'more' }],
+  [/^#\/account$/, viewAccount, { key: 'account' }],
+  [/^#\/more$/, () => go('#/account'), { key: 'account' }], // the old bottom-nav "More" page: bookmarks land on the Profile tab, which replaced its personal half
 ];
 async function route(silent) {
   S.soft = null; // a route-backed screen registers itself again below
@@ -1819,26 +1852,20 @@ async function viewCatalog() {
   await reload();
 }
 
-// ============================================================ profile / more
-function viewMore() {
-  if (window.matchMedia('(min-width: 900px)').matches && !isAdmin()) return go('#/profile');
+// ============================================================ profile
+// The Profile tab: the signed-in person's own destinations (the personal half of the old "More"). Administration lives in the admin hamburger.
+function viewAccount() {
+  if (window.matchMedia('(min-width: 900px)').matches) return go('#/profile'); // the desktop sidebar already lists these
   const items = isAdmin() ? [
-    ['#/people', 'users', 'People', 'Add employees, set admins, see who has what'],
-    ['#/catalog', 'tag', 'Equipment catalog', 'Categories, brands and models people can request'],
-    ['#/labels', 'printer', 'Print labels', 'Barcode stickers for your asset tags'],
-    ['#/import', 'upload', 'Import / export', 'Bulk add from a spreadsheet, download CSV'],
-    ['#/activity', 'history', 'Activity log', 'Every check-out, check-in and change'],
-    ['#/settings', 'settings', 'Settings', 'Check-out rules, locations, email'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ] : [
     ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],
     ['#/history', 'history', 'History', 'Equipment you have had before'],
     ['#/profile', 'user', 'My profile', 'Your details and password'],
   ];
-  main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'More' : 'Account'}</h1></div>
-    <div class="card"><ul class="list">${items.map(([h, i, t, s]) => `<li><a class="item" href="${h}"><div class="thumb">${icon(i)}</div><div class="grow"><div class="title">${t}</div><div class="sub">${s}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>
-    <button class="btn block lg" style="margin-top:16px" id="out">${icon('logout')} Sign out</button>
-    <p class="small muted" style="text-align:center;margin-top:16px">Tip: add this app to your home screen for one-tap scanning.</p>`;
+  main().innerHTML = `<div class="page-head"><h1>Profile</h1></div>
+    <div class="card"><ul class="list">${items.map(([h, i, t, sub]) => `<li><a class="item" href="${h}"><div class="thumb">${icon(i)}</div><div class="grow"><div class="title">${t}</div><div class="sub">${sub}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>
+    <button class="btn block lg" style="margin-top:16px" id="out">${icon('logout')} Sign out</button>`;
   $('#out').onclick = logout;
 }
 async function logout() { await api('POST', '/api/logout', {}).catch(() => {}); S.me = null; S.shell = false; usersCache = null; go('#/login'); }
