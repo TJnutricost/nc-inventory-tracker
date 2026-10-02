@@ -104,6 +104,7 @@ const P = {
   tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
   send: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/>',
   wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L22 14l-8 8-2.3-2.3a4 4 0 0 0-5-5L2 10l8-8z"/>',
+  calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
 };
 const icon = (n, cls = '') => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="${cls}" aria-hidden="true">${P[n] || P.box}</svg>`;
@@ -265,6 +266,7 @@ function navItems() {
   if (isAdmin()) side.push({ sep: true },
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
     { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
+    { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
     { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
@@ -276,6 +278,7 @@ function navItems() {
 const adminMenuItems = () => [
   { key: 'people', href: '#/people', label: 'People', icon: 'users' },
   { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
+  { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
   { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
   { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
   { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
@@ -291,7 +294,7 @@ function openDrawer() {
   wrap.className = 'sheet-backdrop drawer-backdrop';
   wrap.innerHTML = `<nav class="drawer" role="dialog" aria-modal="true" aria-label="Administration" tabindex="-1">
     <div class="drawer-head"><strong class="grow">Administration</strong><button type="button" class="iconbtn" id="drawer-close" aria-label="Close menu">${icon('x')}</button></div>
-    <div class="drawer-links">${adminMenuItems().map((i) => `<a href="${i.href}" data-key="${i.key}" class="${i.key === S.activeKey ? 'active' : ''}">${icon(i.icon)}<span>${i.label}</span></a>`).join('')}</div></nav>`;
+    <div class="drawer-links">${adminMenuItems().map((i) => `<a href="${i.href}" data-key="${i.key}"${i.key === 'calendar' ? ' data-cal' : ''} class="${i.key === S.activeKey ? 'active' : ''}">${icon(i.icon)}<span>${i.label}</span></a>`).join('')}</div></nav>`;
   $('#sheet-root').appendChild(wrap);
   document.body.style.overflow = 'hidden';
   wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('#drawer-close') || e.target.closest('a')) closeDrawer(); }); // a link to the page you're already on fires no route change, so close explicitly
@@ -310,7 +313,7 @@ function mountShell() {
           <a href="#/profile" role="menuitem">${icon('user')} My profile</a><button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
-      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}">${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
+      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
       <main id="main"></main>
     </div>
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
@@ -360,7 +363,7 @@ const backLink = (href, label = 'Back', exact = false) => `<a class="back" href=
 // page's "‹ Back" can name and return to exactly where the person came from — without relying on browser history, which stays
 // free to do its own thing. Only known source types and numeric node ids are accepted; the label shown is derived from real app
 // data (a catalog node's stored name), never from query text. No source (a scan, a typed URL, an old link) = the old fallback.
-const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity'], employee: ['browse', 'equipment', 'history', 'requests', 'home', 'scan'] };
+const SRC_BY_ROLE = { admin: ['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity', 'calendar'], employee: ['browse', 'equipment', 'history', 'requests', 'home', 'scan', 'calendar'] };
 const srcQ = (src, extra = {}) => `?src=${src}${Object.entries(extra).filter(([, v]) => v).map(([k, v]) => `&${k}=${v === true ? 1 : encodeURIComponent(v)}`).join('')}`;
 function assetCtx() {
   const p = qs(); const src = p.get('src');
@@ -373,6 +376,8 @@ async function assetBackTarget() {
   const c = assetCtx();
   const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
   if (!c) return fallback;
+  // From the availability calendar: back to the same calendar (non-exact = browser Back, which also restores its month and day).
+  if (c.src === 'calendar') return { href: `#/calendar${c.node ? '?node=' + c.node : ''}`, label: 'Calendar', exact: false };
   const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'], scan: ['#/scan', 'Scan'], activity: ['#/activity', 'Activity log'] };
   if (fixed[c.src]) return { href: fixed[c.src][0], label: fixed[c.src][1], exact: true };
   if (c.src === 'requests') return { href: `#/requests${c.tab ? '?tab=' + c.tab : ''}`, label: 'Requests', exact: true };
@@ -405,6 +410,7 @@ const ROUTES = [
   [/^#\/new$/, viewAssetForm, { key: 'assets', admin: true }],
   [/^#\/scan$/, viewScan, { key: 'scan' }],
   [/^#\/requests$/, viewRequests, { key: 'requests' }],
+  [/^#\/calendar$/, viewCalendar, { key: 'calendar' }],
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
@@ -611,7 +617,7 @@ async function viewAssets() {
   const statuses = isAdmin()
     ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
     : null; // employees have no status filters: Browse is simply the equipment they can get (their own is under My equipment)
-  main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>` : ''}</div>
+  main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${calendarLink()}` : ''}</div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
@@ -677,7 +683,7 @@ async function viewBrowse() {
     st.everything = !st.path.length && p.get('all') === '1';
     if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
   };
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1></div>
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1><span id="headact"></span></div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
@@ -693,6 +699,7 @@ async function viewBrowse() {
     const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
     $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
     $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
+    $('#headact').innerHTML = calendarLink({ node: st.q ? null : (cur() || {}).id }); // availability for exactly what is on screen
     if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
     const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
     const chain = st.path.map((id) => byId.get(id));
@@ -790,7 +797,7 @@ async function viewAsset(id) {
           : `<div class="actions"><button class="btn lg" id="act-ask-return">${icon('send')} Request return</button><button class="btn lg" id="act-return">${icon('in')} I'm returning this</button></div>`) + issueNote + reportBtn;
     } else if (a.status === 'available' && seatsFree > 0) {
       actions = S.me.can_self_checkout
-        ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out to me</button>`
+        ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out now</button>`
         : `<button class="btn primary lg block" id="act-request">${icon('box')} Request this</button>`;
     } else if (d.held_by_other || a.status !== 'available') {
       actions = `<div class="banner info">${icon('box')}<div class="grow">This item isn't available right now. <a href="#" id="act-similar">Request something similar</a></div></div>`;
@@ -803,7 +810,7 @@ async function viewAsset(id) {
     ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
-  main().innerHTML = `<div class="asset-bar">${backLink(backTo.href, backTo.label, backTo.exact)}
+  main().innerHTML = `<div class="asset-bar"><div class="asset-bar-top">${backLink(backTo.href, backTo.label, backTo.exact)}${calendarLink({ asset: a.id })}</div>
       <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${st === 'overdue' ? pill('overdue') : statusPill(a)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
@@ -985,7 +992,7 @@ function selfCheckoutSheet(a) {
     <div class="field"><span>How long do you need it?</span><div class="chips" data-self-type><button type="button" class="chip on" data-t="checkout">Temporary checkout</button><button type="button" class="chip" data-t="permanent">Permanent</button></div>
       <div class="small muted" data-self-hint style="margin-top:6px">Borrow it and bring it back by the return date.</div></div>
     <div data-self-due class="form-grid">${returnFields()}</div>
-    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out to me</button></div></form>`);
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out now</button></div></form>`);
   wireReturnFields(el);
   $('#self-scan', el).onclick = () => openScanner({ title: 'Scan the item to check out', onResult: async (code) => {
     try {
@@ -1008,7 +1015,7 @@ function selfCheckoutSheet(a) {
     dueWrap.style.display = mode === 'checkout' ? '' : 'none';
     $$('input', dueWrap).forEach((i) => { i.disabled = mode !== 'checkout'; });
     $('[data-self-hint]', el).textContent = mode === 'checkout' ? 'Borrow it and bring it back by the return date.' : 'Permanent assignments must be approved by IT. You can send a request.';
-    $('#go', el).textContent = mode === 'checkout' ? 'Check out to me' : 'Request permanent assignment';
+    $('#go', el).textContent = mode === 'checkout' ? 'Check out now' : 'Request permanent assignment';
   };
   $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
     busy($('#go', el), async () => {
@@ -1543,6 +1550,186 @@ function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
   $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await onOk(e.target.note.value.trim()); close(); }); };
 }
 
+// ============================================================ availability calendar (read-only)
+// ONE screen for everyone: #/calendar (everything) · #/calendar?node=<catalog id> (that entry and everything below it) ·
+// #/calendar?asset=<id> (one asset), plus &month=YYYY-MM and &day=YYYY-MM-DD. The URL is the whole state, so refresh and deep links
+// land on the same calendar. Like every non-root screen it has the app's "‹ <where it goes>" link above the title, and WHERE IT GOES
+// is in the URL too: `from=<the hash route the person opened it from>` (e.g. from=#/catalog?node=3). Whatever opens a calendar —
+// a header icon, the admin sidebar, the hamburger — fills `from` with the page being left (see the click handler below), so Back
+// never depends on browser history or on JS state. A calendar opened without `from` (a typed or shared link) falls back to the
+// role's list: Browse equipment / All assets. All availability rules live on the server (src/availability.js, GET /api/availability).
+const calUrl = ({ node, asset, month, day, from } = {}) => {
+  const p = new URLSearchParams();
+  if (asset) p.set('asset', asset); else if (node) p.set('node', node);
+  if (month) p.set('month', month);
+  if (day) p.set('day', day);
+  if (from) p.set('from', from);
+  return '#/calendar' + (p.toString() ? '?' + p.toString() : '');
+};
+// Only an in-app hash route may be a Back target (never a calendar, a login screen, or anything that is not "#/…").
+const safeFrom = (v) => (typeof v === 'string' && v.length <= 300 && /^#\/[\w/.-]*(\?[\w=&%.,-]*)?$/.test(v) && !/^#\/(calendar|login|forgot|reset|setup|more)\b/.test(v) ? v : '');
+// The calendar link on a screen. `href` is the plain scoped URL (it works if opened in a new tab); a click also stamps `from`
+// with the page it is clicked on, at click time, so filters/drill-down state in that page's URL come back exactly.
+const calendarLink = ({ node, asset } = {}) => `<a class="iconbtn cal-btn" href="${calUrl({ node, asset })}" data-cal data-node="${node || ''}" data-asset="${asset || ''}" aria-label="Availability calendar for this view" title="Availability calendar">${icon('calendar')}</a>`;
+const calendarSource = () => (location.hash.startsWith('#/calendar') ? safeFrom(qs().get('from')) : safeFrom(location.hash)); // (from a calendar: keep its own source)
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('a[data-cal]');
+  if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
+  e.preventDefault();
+  go(calUrl({ node: a.dataset.node, asset: a.dataset.asset, from: calendarSource() }));
+});
+// What the Back link says and where it goes, from the `from` route. Names come from real data (a catalog entry's name, an asset's
+// or person's name), never from the URL text. Unknown routes still get a plain, working "Back".
+async function calBackTarget(from, sc) {
+  const admin = isAdmin();
+  const fixed = { '#/home': 'Home', '#/assets': admin ? 'All assets' : 'Browse equipment', '#/catalog': 'Equipment catalog', '#/requests': 'Requests', '#/people': 'People', '#/labels': 'Print labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile', '#/equipment': 'My equipment', '#/history': 'History', '#/scan': 'Scan', '#/account': 'Profile', '#/new': 'Add an asset' };
+  if (!from) return { href: '#/assets', label: admin ? 'All assets' : 'Browse equipment' }; // a typed / shared link: the role's list
+  const [path, query = ''] = from.split('?'); const q = new URLSearchParams(query);
+  const node = Number(q.get('node'));
+  try {
+    if ((path === '#/catalog' || path === '#/assets') && Number.isInteger(node) && node > 0) {
+      if (sc && sc.type === 'node' && sc.id === node) return { href: from, label: sc.title };
+      const row = (await api('GET', '/api/catalog' + (admin ? '?include_archived=1' : ''))).find((n) => n.id === node);
+      if (row) return { href: from, label: row.name };
+    }
+    let m;
+    if ((m = path.match(/^#\/asset\/(\d+)(\/edit)?$/))) {
+      if (sc && sc.type === 'asset' && sc.id === Number(m[1])) return { href: from, label: sc.title };
+      return { href: from, label: (await api('GET', '/api/assets/' + m[1])).asset.name };
+    }
+    if ((m = path.match(/^#\/person\/(\d+)$/))) return { href: from, label: (await api('GET', '/api/users/' + m[1])).user.name };
+  } catch { /* fall through to the generic label */ }
+  return { href: from, label: fixed[path] || 'Back' };
+}
+async function viewCalendar() {
+  if (!isAdmin()) setActive('assets'); // employees reach it from Browse, so Browse stays highlighted
+  const p = qs();
+  const today0 = localToday();
+  const want = { node: p.get('node') || '', asset: p.get('asset') || '', month: /^\d{4}-(0[1-9]|1[0-2])$/.test(p.get('month') || '') ? p.get('month') : '', day: /^\d{4}-\d{2}-\d{2}$/.test(p.get('day') || '') ? p.get('day') : '', from: safeFrom(p.get('from')) };
+  const st = { month: want.month || today0.slice(0, 7), day: want.day, data: null };
+  const q = () => new URLSearchParams({ ...(want.asset ? { asset: want.asset } : want.node ? { node: want.node } : {}), month: st.month }).toString();
+  const keepUrl = () => history.replaceState(null, '', calUrl({ node: want.node, asset: want.asset, month: st.month === today0.slice(0, 7) ? '' : st.month, day: st.day === defaultDay() ? '' : st.day, from: want.from })); // (the default month/day are left out of the URL)
+  const monthShift = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(Date.UTC(y, mo - 1 + n, 1)); return d.toISOString().slice(0, 7); };
+  const monthTitle = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+  const MAX_AHEAD = 12; // months the arrows allow (the data only knows what is checked out today)
+
+  let data; let A = []; let monthDays = 0;
+  try { data = await api('GET', '/api/availability?' + q()); } catch (e) {
+    const eb = await calBackTarget(want.from, null);
+    main().innerHTML = `<div id="backslot">${backLink(eb.href, eb.label, true)}</div><div class="page-head"><h1>Calendar</h1></div><div class="card"><div class="empty">${icon('calendar')}<p>${esc(e.message)}</p><a class="btn" href="${isAdmin() ? '#/calendar' : '#/assets'}">${isAdmin() ? 'Open the full calendar' : 'Back to Browse'}</a></div></div>`;
+    return;
+  }
+  st.data = data; st.month = data.month;
+  const sc = data.scope;
+  monthDays = Number(data.last.slice(8));
+  const defaultDay = () => (st.month === data.today.slice(0, 7) ? data.today : data.first);
+  if (!st.day || st.day.slice(0, 7) !== st.month) st.day = defaultDay();
+
+  const back = await calBackTarget(want.from, sc); // always present: from the URL, else the role's list
+
+  A = data.assets;
+  const free = (a, i) => a.days[i] === 'available';
+  const cellInfo = (i) => {
+    const day = data.first.slice(0, 8) + String(i + 1).padStart(2, '0');
+    if (day < data.today) return { day, cls: 'past', text: '', label: `${fmtDate(day)}: past` };
+    if (A.length === 1) {
+      const s = A[0].days[i];
+      const cls = { available: 'free', expected: 'expected', occupied: 'busy' }[s] || 'off';
+      return { day, cls, text: '', label: `${fmtDate(day)}: ${DAY_WORD[s]}` };
+    }
+    const n = A.filter((a) => free(a, i)).length; const e = A.filter((a) => a.days[i] === 'expected').length;
+    const cls = !A.length ? 'off' : n === A.length ? 'free' : n > 0 ? 'mixed' : e > 0 ? 'expected' : 'busy';
+    // "36" = available that day; "+2" = two more are expected back by then (a due date, not a guarantee)
+    return { day, cls, text: A.length ? `${n}${e ? `<em>+${e}</em>` : ''}` : '', label: `${fmtDate(day)}: ${n} of ${A.length} available${e ? `, ${e} more expected back` : ''}` };
+  };
+  const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
+
+  const periodsOn = (a, day, kind) => a.periods.filter((x) => x.kind === kind && x.start <= day && (!x.end || day <= x.end));
+  const clock = (t) => (t ? ` ${fmtClock(t)}` : '');
+  const detail = (a, day, i) => {
+    const s = a.days[i]; const adminV = isAdmin();
+    // (plain text: the whole row is already a link to the asset, and links must not nest)
+    const who = (x) => (adminV && x.holder ? `${esc(x.holder.name)}${x.holder.department ? ' · ' + esc(x.holder.department) : ''}` : '');
+    const parts = [];
+    if (s === 'available') { if (a.seats) parts.push(`${a.seats.total - a.seats.used} of ${a.seats.total} seats free`); }
+    else if (s === 'occupied') {
+      for (const x of periodsOn(a, day, 'occupied')) {
+        const when = x.overdue ? `past its return date — still out, return date unknown` : x.open_ended ? `no return date` : `until ${fmtDate(x.end)}${clock(x.due_time)}`;
+        parts.push(`${a.mine && !adminV ? 'With you' : 'Out'} · ${when}${adminV ? ` · since ${fmtDate(x.start)}${x.assignment_type === 'permanent' ? ' · permanent' : ''}` : ''}${who(x) ? ' · ' + who(x) : ''}`);
+      }
+    } else if (s === 'expected') {
+      const ends = periodsOn(a, day, 'expected').map((x) => addDaysStr(x.start, -1));
+      parts.push(`Due back ${ends.length ? 'by ' + fmtDate(ends.sort()[0]) : 'before then'} — not guaranteed`);
+      if (adminV) parts.push(...periodsOn(a, day, 'expected').map(who).filter(Boolean));
+    } else parts.push(DAY_WORD[s].replace(/^./, (c) => c.toUpperCase()));
+    return parts;
+  };
+  const addDaysStr = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+
+  const GROUPS = [['available', 'Available'], ['expected', 'Expected back'], ['occupied', 'Unavailable'], ['repair', 'In repair'], ['ineligible', 'Not lendable'], ['archived', 'Archived']];
+  const panelHtml = () => {
+    const day = st.day; const i = Number(day.slice(8)) - 1;
+    if (day < data.today) return `<div class="card pad"><strong>${esc(fmtDate(day))}</strong><p class="muted small" style="margin:6px 0 0">This day has passed. The calendar only looks forward from today.</p></div>`;
+    const n = A.filter((a) => free(a, i)).length;
+    const groups = GROUPS.map(([k, label]) => [k, label, A.filter((a) => a.days[i] === k)]).filter(([, , l]) => l.length);
+    const link = (a) => (a.can_open && !(sc.type === 'asset') ? `href="#/asset/${a.id}${srcQ('calendar', { node: sc.type === 'node' ? sc.id : null })}"` : '');
+    return `<div class="card"><div class="card-head"><h2>${esc(new Date(Date.parse(day + 'T12:00:00Z')).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }))}</h2><span class="muted small">${n} of ${A.length} available</span></div>
+      ${groups.length ? groups.map(([k, label, list]) => `<h3 class="ct-h" style="margin:14px 16px 4px">${label} <span class="muted">${list.length}</span></h3><ul class="list">${list.map((a) => {
+        const sub = detail(a, day, i);
+        return `<li><${link(a) ? 'a class="item" ' + link(a) : 'div class="item"'}><span class="cal-dot ${k}"></span><div class="grow"><div class="title truncate">${esc(a.name)}${a.mine ? ' <span class="pill plain available">Yours</span>' : ''}</div>
+          <div class="sub">${[a.tag ? `<span class="mono">${esc(a.tag)}</span>` : '', ...sub].filter(Boolean).join(' · ')}</div></div>${link(a) ? icon('chev', 'chev') : ''}</${link(a) ? 'a' : 'div'}></li>`;
+      }).join('')}</ul>`).join('') : `<div class="empty"><p>Nothing to show for this scope.</p></div>`}</div>`;
+  };
+
+  const gridHtml = () => {
+    const [y, mo] = st.month.split('-').map(Number);
+    const lead = new Date(Date.UTC(y, mo - 1, 1)).getUTCDay();
+    const cells = Array.from({ length: lead }, () => '<span class="cal-day blank" aria-hidden="true"></span>');
+    for (let i = 0; i < monthDays; i++) {
+      const c = cellInfo(i);
+      cells.push(`<button type="button" class="cal-day ${c.cls}${c.day === st.day ? ' sel' : ''}${c.day === data.today ? ' today' : ''}" data-day="${c.day}" aria-label="${esc(c.label)}" aria-pressed="${c.day === st.day}"><span class="d">${i + 1}</span><span class="c">${c.text}</span></button>`);
+    }
+    return cells.join('');
+  };
+  const nowMonth = data.today.slice(0, 7);
+  const paint = () => {
+    $('#calgrid').innerHTML = gridHtml();
+    $('#calpanel').innerHTML = panelHtml();
+    $('#calmonth').textContent = monthTitle(st.month);
+    $('#calprev').disabled = st.month <= nowMonth;
+    $('#calnext').disabled = st.month >= monthShift(nowMonth, MAX_AHEAD);
+  };
+  const subtitle = sc.type === 'asset' ? `${A[0] ? esc(A[0].tag || '') : ''}${A[0] && A[0].catalog_path ? ' · ' + esc(crumbText(A[0].catalog_path)) : ''}` : `${sc.type === 'node' ? esc(crumbText(sc.path)) + ' · ' : ''}${A.length}${sc.truncated ? '+' : ''} asset${A.length === 1 ? '' : 's'}`;
+  main().innerHTML = `<div id="backslot">${backLink(back.href, back.label, true)}</div><div class="page-head"><h1>${esc(sc.title)}</h1></div>
+    <div class="cal-wrap stack">
+      <p class="muted small" style="margin:0">Availability calendar${subtitle ? ' · ' + subtitle : ''}</p>
+      <div class="card cal-card">
+        <div class="cal-nav"><button type="button" class="iconbtn" id="calprev" aria-label="Previous month">${icon('back')}</button><h2 id="calmonth" aria-live="polite"></h2><button type="button" class="iconbtn" id="calnext" aria-label="Next month">${icon('chev')}</button></div>
+        <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
+        <div class="cal-grid" id="calgrid"></div>
+        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${A.length > 1 ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
+      </div>
+      <div id="calpanel"></div>
+      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${A.length > 1 ? ' (a “+2” on a day means two more are expected back by then)' : ''}. Reservations are not available yet.</p>
+    </div>`;
+  const go2 = async (month) => {
+    st.month = month; st.day = '';
+    try { data = await api('GET', '/api/availability?' + q()); } catch (e) { return fail(e); }
+    st.data = data; st.month = data.month; st.day = defaultDay();
+    A = data.assets; monthDays = Number(data.last.slice(8));
+    keepUrl(); paint();
+  };
+  paint();
+  $('#calprev').onclick = () => go2(monthShift(st.month, -1));
+  $('#calnext').onclick = () => go2(monthShift(st.month, 1));
+  $('#calgrid').onclick = (e) => {
+    const b = e.target.closest('[data-day]'); if (!b) return;
+    st.day = b.dataset.day; keepUrl(); paint();
+    const panel = $('#calpanel'); if (panel && panel.getBoundingClientRect().top > window.innerHeight - 120) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  keepUrl();
+}
+
 // ============================================================ people
 async function viewPeople() {
   const users = await api('GET', '/api/users');
@@ -1759,7 +1946,7 @@ async function viewCatalog() {
   // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
   // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
   const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact"></span></div>
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
@@ -1798,7 +1985,7 @@ async function viewCatalog() {
     $('#pagetitle').textContent = n ? n.name : 'Equipment catalog'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n && !st.all ? byId(n.parent_id) : null;
     $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : '';
-    $('#headact').innerHTML = n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`;
+    $('#headact').innerHTML = `${n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
       ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
@@ -1980,6 +2167,12 @@ function viewProfile() {
 
 // ============================================================ boot
 window.addEventListener('unhandledrejection', (e) => { if (/play\(\) request was interrupted/.test(e.reason && e.reason.message)) e.preventDefault(); });
-if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('/sw.js').catch(() => {});
+// The service worker (installability + offline shell) is for deployed use. On a developer machine it is never registered, and one that
+// an earlier build installed is removed together with its caches, so the page can only ever show the code the server is serving now.
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) {
+    navigator.serviceWorker.getRegistrations().then((rs) => Promise.all(rs.map((r) => r.unregister()))).then(() => window.caches && caches.keys().then((ks) => Promise.all(ks.map((k) => caches.delete(k))))).catch(() => {});
+  } else navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 setInterval(() => { if (S.me && document.visibilityState === 'visible') refreshBadge(); }, 60e3);
 route();

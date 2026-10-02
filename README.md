@@ -58,7 +58,7 @@ For local development you don't have to add data by hand. `npm run seed:dev` wip
 
 ```bash
 npm run seed:dev
-DATA_DIR=./data-dev PORT=3000 npm start
+DATA_DIR=./data-dev PORT=3000 npm run dev
 ```
 
 Then open http://localhost:3000 and log in as the seeded admin:
@@ -67,6 +67,8 @@ Then open http://localhost:3000 and log in as the seeded admin:
 - **Password:** `DevPass!2026`
 
 Every seeded account (admin and regular users) shares that same development-only password. `./data-dev` is gitignored — it's disposable scratch data, safe to delete or reseed at any time, and is **never** used by `npm start` unless you set `DATA_DIR` yourself as shown above.
+
+`npm run dev` is the way to run the app while developing: it restarts the server itself when backend files change, and the browser is told to cache nothing (and no service worker is kept), so a normal page refresh always shows the current code. `npm start` does **not** restart on changes, so a backend edit would need a manual restart. If the port is already taken the server now says so instead of silently leaving the old process in charge.
 
 **Don't run `npm run seed:dev` while `npm run dev` is using `./data-dev`** — it deletes and recreates that database underneath the running server, which can leave the watcher on a stale file and crash it. To check that the seed still works (agents, CI, a quick manual check) use the isolated variant instead:
 
