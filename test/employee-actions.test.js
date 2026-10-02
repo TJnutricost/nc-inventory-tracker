@@ -268,7 +268,7 @@ test('an issue survives the asset being checked in: it stays on the queue until 
 });
 
 // ---------------------------------------------------------------- rescind / cancel
-test('rescind: an employee can cancel their own open or approved equipment request', async () => {
+test('rescind: an employee can cancel their own untouched equipment request, but not one IT has approved (it was opened)', async () => {
   const me = await makeLogin('Rescinder');
   const open = (await me.client.post('/api/requests', { category: 'Headset' })).body;
   assert.equal((await me.client.post(`/api/requests/${open.id}/cancel`, {})).status, 200);
@@ -280,8 +280,11 @@ test('rescind: an employee can cancel their own open or approved equipment reque
   const approved = (await me.client.post('/api/requests', { category: 'Webcam' })).body;
   assert.equal((await admin.post(`/api/requests/${approved.id}/approve`, { note: 'ordering' })).status, 200);
   assert.equal(row(approved.id).status, 'approved');
-  assert.equal((await myRequests(me)).find((r) => r.id === approved.id).can_cancel, true);
-  assert.equal((await me.client.post(`/api/requests/${approved.id}/cancel`, {})).status, 200);
+  assert.equal((await myRequests(me)).find((r) => r.id === approved.id).can_cancel, false, 'approving opened it');
+  const late = await me.client.post(`/api/requests/${approved.id}/cancel`, {});
+  assert.equal(late.status, 400);
+  assert.match(late.body.error, /already opened/);
+  assert.equal(row(approved.id).status, 'approved');
 });
 
 test('rescind: completed, declined and already-cancelled requests can never be cancelled, and the assignment they produced stays', async () => {

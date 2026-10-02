@@ -677,5 +677,24 @@ module.exports = [
       }
     },
   },
+  {
+    // Phase 2 Slice 5 (Admin Request Workflow V1): requests.opened_at — the moment IT first opened a LIVE request. NULL = nobody
+    // in IT has looked at it ("Submitted"); set = IT has taken it up ("In review"). While it is NULL the employee may rescind;
+    // once it is set they may not (enforced in src/requests.js + src/server.js, atomically). It is NOT a new status: the
+    // user-facing lifecycle (Submitted / In review / Approved / Declined / Fulfilled / Rescinded) is derived from status +
+    // opened_at in src/requests.js, so no CHECK or transition table had to change and no table rebuild is needed.
+    // Backfill: a request that has already moved past 'open' was necessarily handled by IT (or by the employee's own
+    // drop-off), so it counts as opened at its resolution time (else creation time) — it can't suddenly become rescindable.
+    // Plain 'open' rows stay NULL (genuinely untouched). Returns an employee dropped off keep NULL: IT hasn't opened them.
+    id: 12,
+    name: 'requests: opened_at (IT has opened the request; ends employee rescind)',
+    up: (db) => {
+      db.exec('ALTER TABLE requests ADD COLUMN opened_at TEXT');
+      // (a request the employee cancelled themselves was rescinded, not opened — it stays NULL)
+      db.exec(`UPDATE requests SET opened_at = COALESCE(resolved_at, created_at)
+        WHERE status IN ('approved','denied','completed')
+           OR (status = 'cancelled' AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.id = requests.resolved_by AND a.employee_id = requests.user_id))`);
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

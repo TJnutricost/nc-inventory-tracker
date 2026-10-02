@@ -483,6 +483,7 @@ app.get('/api/assets/:id', auth, (req, res) => {
     LEFT JOIN accounts ca ON ca.id = r.created_by
     WHERE r.asset_id = ? AND r.status IN ('open','dropped_off') ORDER BY r.created_at DESC`).all(a.id)
     .filter((r) => isAdmin || r.user_id === req.user.employee_id);
+  const requestsOut = requestRules.withLifecycle(db, requests);
   const activity = isAdmin ? db.prepare(`
     SELECT ac.*, ${ACTOR_NAME} FROM activity ac ${ACTOR_JOIN}
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
@@ -494,7 +495,7 @@ app.get('/api/assets/:id', auth, (req, res) => {
     capacity: capacity(a),
     is_mine: isMine,
     photos,
-    requests,
+    requests: requestsOut,
     activity,
   });
 });
@@ -619,7 +620,7 @@ app.post('/api/assets/:id/checkout', auth, (req, res) => {
   const assignment = doCheckout({ asset, user: target, actor: req.user, assignment_type, due_date: req.body.due_date, due_time: req.body.due_time, notes: req.body.notes, condition: req.body.condition });
   // Close the employee's open equipment request for this asset — unless it asked for a permanent assignment and this
   // was a temporary checkout (a loan must not silently complete a request for something else).
-  requestRules.completeEquipmentRequests(db, { employeeId: target.id, assetId: asset.id, assignmentType: assignment.assignment_type, actorAccountId: req.user.account_id });
+  requestRules.completeEquipmentRequests(db, { employeeId: target.id, assetId: asset.id, assignmentType: assignment.assignment_type, actorAccountId: req.user.account_id, actorIsAdmin: req.user.role === 'admin' });
   res.json({ ok: true, assignment });
 });
 
@@ -631,14 +632,17 @@ app.post('/api/assets/:id/checkin', admin, (req, res) => {
   const target = req.body.assignment_id ? open.find((o) => o.id === Number(req.body.assignment_id)) : open.length === 1 ? open[0] : null;
   if (!target) throw httpError(400, 'Choose which person is returning it');
   const condition = clean(req.body.condition);
-  db.prepare("UPDATE assignments SET returned_at = datetime('now'), returned_to = ?, condition_in = ?, return_notes = ? WHERE id = ?")
-    .run(req.user.account_id, condition, clean(req.body.notes), target.id);
-  if (condition) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(condition, asset.id);
-  if (req.body.to_maintenance) db.prepare("UPDATE assets SET status = 'maintenance' WHERE id = ?").run(asset.id);
-  else if (asset.status === 'lost') db.prepare("UPDATE assets SET status = 'available' WHERE id = ?").run(asset.id);
-  refreshStatus(asset.id);
-  if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
-  requestRules.completeReturnRequests(db, { employeeId: target.employee_id, assetId: asset.id, actorAccountId: req.user.account_id });
+  // Ending the assignment and completing the employee's return request succeed or fail together.
+  db.transaction(() => {
+    db.prepare("UPDATE assignments SET returned_at = datetime('now'), returned_to = ?, condition_in = ?, return_notes = ? WHERE id = ?")
+      .run(req.user.account_id, condition, clean(req.body.notes), target.id);
+    if (condition) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(condition, asset.id);
+    if (req.body.to_maintenance) db.prepare("UPDATE assets SET status = 'maintenance' WHERE id = ?").run(asset.id);
+    else if (asset.status === 'lost') db.prepare("UPDATE assets SET status = 'available' WHERE id = ?").run(asset.id);
+    refreshStatus(asset.id);
+    if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
+    requestRules.completeReturnRequests(db, { employeeId: target.employee_id, assetId: asset.id, actorAccountId: req.user.account_id, actorIsAdmin: true });
+  }).immediate();
   log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name} · ${assignments.TYPE_LABEL[target.assignment_type]}${target.due_date ? ` · return was due ${assignments.returnBy(target.due_date, target.due_time)}` : ''}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.employee_id);
   notify.checkedIn({ name: target.user_name, email: target.user_email }, asset);
   res.json({ ok: true });
@@ -804,7 +808,7 @@ app.get('/api/requests', auth, (req, res) => {
     LEFT JOIN accounts ra ON ra.id = r.resolved_by LEFT JOIN employees rv ON rv.id = ra.employee_id
     ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
     ORDER BY CASE WHEN r.status IN ('open','dropped_off','approved') THEN 0 ELSE 1 END, r.created_at DESC LIMIT 500`).all(...params);
-  res.json(rows.map((r) => ({ ...r, can_cancel: requestRules.LIVE.includes(r.status) && !cancelBlock(r, req.user) })));
+  res.json(requestRules.withLifecycle(db, rows.map((r) => ({ ...r, can_cancel: requestRules.LIVE.includes(r.status) && !cancelBlock(r, req.user) }))));
 });
 app.post('/api/requests', auth, (req, res) => {
   let category = clean(req.body.category);
@@ -854,6 +858,12 @@ function loadRequest(id) {
   if (!r) throw httpError(404, 'Request not found');
   return r;
 }
+// IT opens a request (the admin detail view calls this when it is shown). Sets opened_at once — that is what ends the
+// employee's right to rescind — and is a no-op on later calls and on closed requests. Admin only; never a GET side effect.
+app.post('/api/requests/:id/open', admin, (req, res) => {
+  const r = requestRules.openRequest(db, Number(req.params.id));
+  res.json(requestRules.withLifecycle(db, r));
+});
 app.post('/api/requests/:id/approve', admin, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.type !== 'equipment') throw httpError(400, 'This request is not open');
@@ -876,6 +886,14 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
   }
   const asset = assetId ? getAsset(assetId) : null;
   if (assetId && !asset) throw httpError(404, 'Asset not found');
+  // Fulfilling (an asset is attached) must hand over what was asked for. A request that named one item (asset_id is only
+  // ever set on an unfulfilled request when a specific item was requested) is fulfilled with that item and no other; an
+  // "any matching" request takes any asset filed under the catalog entry that was asked for. Availability, archived and
+  // seat rules are enforced by createAssignment inside the transaction below.
+  if (asset && r.asset_id !== null && asset.id !== r.asset_id) throw httpError(400, `This request is for a specific item (${r.asset_label || 'the one that was requested'}). It can only be fulfilled with that item.`);
+  if (asset && r.asset_id === null && r.catalog_node_id !== null && !catalog.subtreeIds(db, r.catalog_node_id).includes(asset.catalog_node_id)) {
+    throw httpError(400, `That asset isn't part of the equipment that was requested${r.catalog_path ? ` (${r.catalog_path})` : ''}. Choose a matching asset.`);
+  }
   const note = clean(req.body.note);
   // The assignment (if any) and the request's completion succeed or fail together; emails go out only after commit.
   const assignment = db.transaction(() => {
@@ -883,7 +901,7 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
       assetId: asset.id, employeeId: user.id, actorAccountId: req.user.account_id, actorIsAdmin: true,
       type: assignmentType, dueDate: req.body.due_date, dueTime: req.body.due_time, notes: `Request #${r.id}`,
     }).assignment : null;
-    requestRules.transition(db, r.id, asset ? 'completed' : 'approved', { actorAccountId: req.user.account_id, note, setNote: true, assetId: asset ? asset.id : null });
+    requestRules.transition(db, r.id, asset ? 'completed' : 'approved', { actorAccountId: req.user.account_id, actorIsAdmin: true, note, setNote: true, assetId: asset ? asset.id : null });
     return made;
   }).immediate();
   if (assignment) notify.checkedOut(user, getAsset(asset.id), assignment);
@@ -895,7 +913,7 @@ app.post('/api/requests/:id/deny', admin, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.type !== 'equipment') throw httpError(400, 'Only equipment requests can be declined. Cancel a return request instead.');
   const note = clean(req.body.note);
-  requestRules.transition(db, r.id, 'denied', { actorAccountId: req.user.account_id, note, setNote: true });
+  requestRules.transition(db, r.id, 'denied', { actorAccountId: req.user.account_id, actorIsAdmin: true, note, setNote: true });
   notify.requestResolved(getPerson(r.user_id), { ...r, status: 'denied', resolution_note: note });
   res.json({ ok: true });
 });
@@ -903,7 +921,7 @@ app.post('/api/requests/:id/deny', admin, (req, res) => {
 app.post('/api/requests/:id/resolve', admin, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.type !== 'issue') throw httpError(400, 'Only issue reports can be marked resolved');
-  requestRules.transition(db, r.id, 'completed', { actorAccountId: req.user.account_id, note: clean(req.body.note), setNote: true });
+  requestRules.transition(db, r.id, 'completed', { actorAccountId: req.user.account_id, actorIsAdmin: true, note: clean(req.body.note), setNote: true });
   log(r.asset_id, req.user.account_id, 'issue_resolved', clean(req.body.note) || 'Marked resolved', r.user_id);
   res.json({ ok: true });
 });
@@ -917,8 +935,9 @@ const isSelfInitiated = (r) => !!db.prepare('SELECT 1 FROM accounts WHERE id = ?
 //               return     only one the employee started themselves, and only while 'open' — once they say they dropped
 //                          it off, or when IT is the one who asked, they answer with "I've dropped it off", not a cancel
 //               issue      open
-//             The data model has no "IT has opened this" marker (opened_at / in_review are future lifecycle work, see
-//             PROJECT_STATUS.md), so "not yet processed" is expressed by the statuses that do exist.
+//             AND IT must not have opened it yet (requests.opened_at, Phase 2 Slice 5): once IT has opened or acted on a
+//             request the employee can no longer rescind it. The same condition is part of the UPDATE in requests.transition,
+//             so IT opening it and the employee rescinding it at the same instant cannot both win.
 function cancelBlock(r, user) {
   const isAdmin = user.role === 'admin';
   if (!isAdmin && r.user_id !== user.employee_id) return { status: 403, msg: 'Not allowed' };
@@ -930,6 +949,7 @@ function cancelBlock(r, user) {
     const assigned = r.asset_id && db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND notes = ?').get(r.asset_id, r.user_id, `Request #${r.id}`);
     if (assigned || !isAdmin) return { status: 400, msg: 'IT has already approved this permanent assignment request, so it can no longer be cancelled. Ask IT if the equipment should come back.' };
   }
+  if (!isAdmin && r.opened_at) return { status: 400, msg: requestRules.OPENED_MSG };
   if (!isAdmin && r.type === 'return') {
     if (!(r.self_initiated ?? isSelfInitiated(r))) return { status: 403, msg: 'Not allowed' };
     if (r.status !== 'open') return { status: 400, msg: "You've already told IT you dropped this off, so this can't be cancelled. Ask IT if that was a mistake." };
@@ -942,14 +962,15 @@ app.post('/api/requests/:id/cancel', auth, (req, res) => {
   const r = loadRequest(req.params.id);
   const block = cancelBlock(r, req.user);
   if (block) throw httpError(block.status, block.msg);
-  requestRules.transition(db, r.id, 'cancelled', { actorAccountId: req.user.account_id });
+  const isIT = req.user.role === 'admin';
+  requestRules.transition(db, r.id, 'cancelled', { actorAccountId: req.user.account_id, actorIsAdmin: isIT, requireUnopened: !isIT });
   res.json({ ok: true });
 });
 app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
   const r = loadRequest(req.params.id);
   if (r.user_id !== req.user.employee_id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
   if (r.type !== 'return') throw httpError(400, 'This request is not open');
-  requestRules.transition(db, r.id, 'dropped_off');
+  requestRules.transition(db, r.id, 'dropped_off', { actorIsAdmin: req.user.role === 'admin' });
   const asset = getAsset(r.asset_id);
   if (asset) {
     log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
@@ -1026,7 +1047,7 @@ app.get('/api/dashboard', auth, (req, res) => {
       (SELECT COUNT(*) FROM requests r WHERE r.type='issue' AND r.asset_id = a.id AND r.user_id = s.employee_id AND r.status = 'open') AS open_issues
     FROM assignments s JOIN assets a ON a.id = s.asset_id
     WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(req.user.employee_id);
-  const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.employee_id);
+  const myRequests = db.prepare(`SELECT * FROM requests WHERE user_id = ? AND type = 'equipment' AND status IN ('open','approved') ORDER BY created_at DESC`).all(req.user.employee_id).map((r) => requestRules.withLifecycle(db, r));
   const out = { mine, myRequests };
   if (req.user.role === 'admin') {
     const c = (sql, ...p) => db.prepare(sql).get(...p).c;
@@ -1050,7 +1071,7 @@ app.get('/api/dashboard', auth, (req, res) => {
     out.openRequests = db.prepare(`
       SELECT r.*, u.name AS user_name, a.name AS asset_name, a.tag AS asset_tag FROM requests r
       JOIN employees u ON u.id = r.user_id LEFT JOIN assets a ON a.id = r.asset_id
-      WHERE r.status IN ('open','approved','dropped_off') ORDER BY r.created_at DESC LIMIT 20`).all();
+      WHERE r.status IN ('open','approved','dropped_off') ORDER BY r.created_at DESC LIMIT 20`).all().map((r) => requestRules.withLifecycle(db, r));
     out.expiring = db.prepare(`
       SELECT id, tag, name, category, warranty_expires, license_expires FROM assets
       WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL AND (warranty_expires BETWEEN date('now') AND date('now','+60 day') OR license_expires BETWEEN date('now') AND date('now','+60 day'))
