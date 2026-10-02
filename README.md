@@ -78,6 +78,22 @@ It seeds the same dataset into a temporary directory, confirms setup is complete
 
 ---
 
+## Testing on a real phone
+
+To try the mobile layout on an actual phone, run the dev server on your Mac and open it from the phone on the same Wi-Fi network:
+
+1. Put the Mac and the phone on the same Wi-Fi.
+2. Get the Mac's LAN IP: `ipconfig getifaddr en0`
+3. Start the app: `DATA_DIR=./data-dev PORT=3000 npm run dev`
+4. On the phone, open `http://<MAC-LAN-IP>:3000`
+5. If macOS asks whether to allow Node to accept incoming connections, choose **Allow**.
+
+Do **not** run `npm run seed:dev` just to test from the phone. It deletes and rebuilds `./data-dev` underneath the running server; the dataset is already there if you've seeded it once.
+
+This is for checking layout, navigation and scrolling on a real device. The phone camera scanner still needs **HTTPS** (browsers only allow camera access on secure pages), so on a plain `http://` LAN address you'll get the "needs a secure connection" message and can type the tag instead.
+
+---
+
 ## Deploying for the company
 
 ### Option 1: Docker (recommended)
