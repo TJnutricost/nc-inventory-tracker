@@ -699,7 +699,9 @@ async function viewBrowse() {
     const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
     $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
     $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
-    $('#headact').innerHTML = calendarLink({ node: st.q ? null : (cur() || {}).id }); // availability for exactly what is on screen
+    // Availability for exactly what is on screen, but only once the catalog is narrowed: no calendar at the Browse root (or while searching,
+    // which is global). A company-wide calendar is not useful to employees.
+    $('#headact').innerHTML = !st.q && cur() ? calendarLink({ node: cur().id }) : '';
     if (st.q) { bn.innerHTML = ''; return; } // searching: the grid steps aside, results are global
     const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
     const chain = st.path.map((id) => byId.get(id));
@@ -1558,6 +1560,9 @@ function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
 // a header icon, the admin sidebar, the hamburger — fills `from` with the page being left (see the click handler below), so Back
 // never depends on browser history or on JS state. A calendar opened without `from` (a typed or shared link) falls back to the
 // role's list: Browse equipment / All assets. All availability rules live on the server (src/availability.js, GET /api/availability).
+// WHAT THE SELECTED-DAY PANEL SHOWS FOLLOWS THE SCOPE (broader = more summarized): one asset -> that asset in detail (the future home of
+// Check out now / Reserve); a catalog entry's subtree or all equipment -> counts only (employees) or counts + the day's temporary checkouts
+// (admins). It never lists a subtree's assets. Employees have no all-equipment calendar: it starts from a catalog entry or an asset.
 const calUrl = ({ node, asset, month, day, from } = {}) => {
   const p = new URLSearchParams();
   if (asset) p.set('asset', asset); else if (node) p.set('node', node);
@@ -1614,6 +1619,7 @@ async function viewCalendar() {
   const MAX_AHEAD = 12; // months the arrows allow (the data only knows what is checked out today)
 
   let data; let A = []; let monthDays = 0;
+  const isSummary = () => data.view === 'summary'; // broad scope (catalog subtree / everything): counts, not asset rows
   try { data = await api('GET', '/api/availability?' + q()); } catch (e) {
     const eb = await calBackTarget(want.from, null);
     main().innerHTML = `<div id="backslot">${backLink(eb.href, eb.label, true)}</div><div class="page-head"><h1>Calendar</h1></div><div class="card"><div class="empty">${icon('calendar')}<p>${esc(e.message)}</p><a class="btn" href="${isAdmin() ? '#/calendar' : '#/assets'}">${isAdmin() ? 'Open the full calendar' : 'Back to Browse'}</a></div></div>`;
@@ -1627,20 +1633,19 @@ async function viewCalendar() {
 
   const back = await calBackTarget(want.from, sc); // always present: from the URL, else the role's list
 
-  A = data.assets;
-  const free = (a, i) => a.days[i] === 'available';
+  A = data.assets || [];
   const cellInfo = (i) => {
     const day = data.first.slice(0, 8) + String(i + 1).padStart(2, '0');
     if (day < data.today) return { day, cls: 'past', text: '', label: `${fmtDate(day)}: past` };
-    if (A.length === 1) {
+    if (!isSummary()) {
       const s = A[0].days[i];
       const cls = { available: 'free', expected: 'expected', occupied: 'busy' }[s] || 'off';
       return { day, cls, text: '', label: `${fmtDate(day)}: ${DAY_WORD[s]}` };
     }
-    const n = A.filter((a) => free(a, i)).length; const e = A.filter((a) => a.days[i] === 'expected').length;
-    const cls = !A.length ? 'off' : n === A.length ? 'free' : n > 0 ? 'mixed' : e > 0 ? 'expected' : 'busy';
+    const c = data.days[i]; const n = c.available; const e = c.expected; const total = data.total;
+    const cls = !total ? 'off' : n === total ? 'free' : n > 0 ? 'mixed' : e > 0 ? 'expected' : 'busy';
     // "36" = available that day; "+2" = two more are expected back by then (a due date, not a guarantee)
-    return { day, cls, text: A.length ? `${n}${e ? `<em>+${e}</em>` : ''}` : '', label: `${fmtDate(day)}: ${n} of ${A.length} available${e ? `, ${e} more expected back` : ''}` };
+    return { day, cls, text: total ? `${n}${e ? `<em>+${e}</em>` : ''}` : '', label: `${fmtDate(day)}: ${n} of ${total} available${e ? `, ${e} more expected back` : ''}` };
   };
   const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
 
@@ -1666,19 +1671,52 @@ async function viewCalendar() {
   };
   const addDaysStr = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
 
-  const GROUPS = [['available', 'Available'], ['expected', 'Expected back'], ['occupied', 'Unavailable'], ['repair', 'In repair'], ['ineligible', 'Not lendable'], ['archived', 'Archived']];
+  const dayTitle = (day) => new Date(Date.parse(day + 'T12:00:00Z')).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' });
+  const passedHtml = (day) => `<div class="card pad"><strong>${esc(fmtDate(day))}</strong><p class="muted small" style="margin:6px 0 0">This day has passed. The calendar only looks forward from today.</p></div>`;
+
+  // ONE asset: the detailed view. Name and tag, the date, and exactly what that day is for this asset (the place future reservation controls will live).
+  const assetPanel = (day, i) => {
+    const a = A[0]; const k = a.days[i];
+    const word = k === 'expected' ? 'Expected back' : DAY_WORD[k].replace(/^./, (c) => c.toUpperCase()); // 'Available', 'Unavailable', 'In repair', 'Not lendable'…
+    const lines = detail(a, day, i).filter((l) => l !== word); // the state is already the headline; keep only the extra detail (who/until/seats)
+    return `<div class="card cal-asset"><div class="cal-asset-id"><div class="title">${esc(a.name)}${a.mine ? ' <span class="pill plain available">Yours</span>' : ''}</div>${a.tag ? `<div class="mono small muted">${esc(a.tag)}</div>` : ''}</div>
+      <div class="cal-asset-day"><h2>${esc(dayTitle(day))}</h2><div class="cal-state"><span class="cal-dot ${k}"></span><strong>${esc(word)}</strong></div>
+      ${lines.map((l) => `<p class="small muted" style="margin:4px 0 0">${l}</p>`).join('')}</div></div>`;
+  };
+
+  // A catalog subtree / everything: counts only. Never the assets themselves.
+  const countRows = (c) => {
+    if (isAdmin()) { // schedulable pool only (permanently assigned equipment is not part of this calendar): available · checked out · repair
+      const rows = [[c.available, 'available', 'available'], [c.checked_out, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.off, 'in repair or not lendable', 'off']];
+      return rows.filter(([n, , k]) => n || k !== 'expected');
+    }
+    const rows = [[c.available, 'available', 'available'], [c.unavailable, 'unavailable', 'occupied'], [c.expected, 'expected back', 'expected']];
+    return rows.filter(([n, , k]) => n || k !== 'expected');
+  };
+  const summaryPanel = (day, i) => {
+    const c = data.days[i]; const adminV = isAdmin();
+    const stats = data.total ? `<ul class="cal-counts">${countRows(c).map(([n, label, k]) => `<li><span class="cal-dot ${k}"></span><strong>${n}</strong> ${label}</li>`).join('')}</ul>` : `<div class="empty"><p>Nothing to show for this scope.</p></div>`;
+    const hint = c.expected ? `<p class="small muted" style="margin:0 16px 12px">“Expected back” means a return date falls before this day. It is not a guarantee.</p>` : '';
+    const note = adminV ? '' : `<p class="small muted" style="margin:0 16px 14px">Open a specific item to see its own calendar.</p>`;
+    return `<div class="card"><div class="card-head"><h2>${esc(dayTitle(day))}</h2></div>${stats}${hint}${note}</div>${adminV ? eventsHtml(day) : ''}`;
+  };
+  // Admin, broad scope: only what is scheduling-relevant — temporary checkouts out on that day (never available assets; permanent assignments are not in this calendar at all).
+  const eventsOn = (day) => (data.events || []).filter((x) => x.start <= day && (x.overdue || day <= x.end));
+  const eventsHtml = (day) => {
+    const list = eventsOn(day); const SHOW = 25;
+    const row = (x) => {
+      const when = x.overdue ? 'past its return date, still out' : `until ${fmtDate(x.end)}${clock(x.due_time)}`;
+      return `<li><a class="item" href="#/asset/${x.asset_id}${srcQ('calendar', { node: sc.type === 'node' ? sc.id : null })}"><span class="cal-dot ${x.overdue ? 'overdue' : 'occupied'}"></span><div class="grow"><div class="title truncate">${esc(x.name)}</div>
+        <div class="sub">${[`<span class="mono">${esc(x.tag)}</span>`, esc(x.holder.name) + (x.holder.department ? ' · ' + esc(x.holder.department) : ''), `${when} · since ${esc(fmtDate(x.start))}`].join(' · ')}</div></div>${icon('chev', 'chev')}</a></li>`;
+    };
+    return `<div class="card"><div class="card-head"><h2>Temporary checkouts</h2><span class="muted small">${list.length}${data.events_truncated ? '+' : ''}</span></div>
+      ${list.length ? `<ul class="list">${list.slice(0, SHOW).map(row).join('')}</ul>${list.length > SHOW ? `<p class="small muted" style="margin:10px 16px">+${list.length - SHOW} more. Narrow the calendar to a category to see fewer.</p>` : ''}` : `<div class="empty"><p>No temporary checkouts on this day.</p></div>`}</div>`;
+  };
+
   const panelHtml = () => {
     const day = st.day; const i = Number(day.slice(8)) - 1;
-    if (day < data.today) return `<div class="card pad"><strong>${esc(fmtDate(day))}</strong><p class="muted small" style="margin:6px 0 0">This day has passed. The calendar only looks forward from today.</p></div>`;
-    const n = A.filter((a) => free(a, i)).length;
-    const groups = GROUPS.map(([k, label]) => [k, label, A.filter((a) => a.days[i] === k)]).filter(([, , l]) => l.length);
-    const link = (a) => (a.can_open && !(sc.type === 'asset') ? `href="#/asset/${a.id}${srcQ('calendar', { node: sc.type === 'node' ? sc.id : null })}"` : '');
-    return `<div class="card"><div class="card-head"><h2>${esc(new Date(Date.parse(day + 'T12:00:00Z')).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'UTC' }))}</h2><span class="muted small">${n} of ${A.length} available</span></div>
-      ${groups.length ? groups.map(([k, label, list]) => `<h3 class="ct-h" style="margin:14px 16px 4px">${label} <span class="muted">${list.length}</span></h3><ul class="list">${list.map((a) => {
-        const sub = detail(a, day, i);
-        return `<li><${link(a) ? 'a class="item" ' + link(a) : 'div class="item"'}><span class="cal-dot ${k}"></span><div class="grow"><div class="title truncate">${esc(a.name)}${a.mine ? ' <span class="pill plain available">Yours</span>' : ''}</div>
-          <div class="sub">${[a.tag ? `<span class="mono">${esc(a.tag)}</span>` : '', ...sub].filter(Boolean).join(' · ')}</div></div>${link(a) ? icon('chev', 'chev') : ''}</${link(a) ? 'a' : 'div'}></li>`;
-      }).join('')}</ul>`).join('') : `<div class="empty"><p>Nothing to show for this scope.</p></div>`}</div>`;
+    if (day < data.today) return passedHtml(day);
+    return isSummary() ? summaryPanel(day, i) : assetPanel(day, i);
   };
 
   const gridHtml = () => {
@@ -1699,7 +1737,7 @@ async function viewCalendar() {
     $('#calprev').disabled = st.month <= nowMonth;
     $('#calnext').disabled = st.month >= monthShift(nowMonth, MAX_AHEAD);
   };
-  const subtitle = sc.type === 'asset' ? `${A[0] ? esc(A[0].tag || '') : ''}${A[0] && A[0].catalog_path ? ' · ' + esc(crumbText(A[0].catalog_path)) : ''}` : `${sc.type === 'node' ? esc(crumbText(sc.path)) + ' · ' : ''}${A.length}${sc.truncated ? '+' : ''} asset${A.length === 1 ? '' : 's'}`;
+  const subtitle = !isSummary() ? [A[0] && A[0].tag ? esc(A[0].tag) : '', A[0] && A[0].catalog_path ? esc(crumbText(A[0].catalog_path)) : ''].filter(Boolean).join(' · ') : `${sc.type === 'node' ? esc(crumbText(sc.path)) + ' · ' : ''}${data.total}${sc.truncated ? '+' : ''} asset${data.total === 1 ? '' : 's'}`;
   main().innerHTML = `<div id="backslot">${backLink(back.href, back.label, true)}</div><div class="page-head"><h1>${esc(sc.title)}</h1></div>
     <div class="cal-wrap stack">
       <p class="muted small" style="margin:0">Availability calendar${subtitle ? ' · ' + subtitle : ''}</p>
@@ -1707,16 +1745,16 @@ async function viewCalendar() {
         <div class="cal-nav"><button type="button" class="iconbtn" id="calprev" aria-label="Previous month">${icon('back')}</button><h2 id="calmonth" aria-live="polite"></h2><button type="button" class="iconbtn" id="calnext" aria-label="Next month">${icon('chev')}</button></div>
         <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
         <div class="cal-grid" id="calgrid"></div>
-        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${A.length > 1 ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
+        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
       </div>
       <div id="calpanel"></div>
-      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${A.length > 1 ? ' (a “+2” on a day means two more are expected back by then)' : ''}. Reservations are not available yet.</p>
+      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Reservations are not available yet.</p>
     </div>`;
   const go2 = async (month) => {
     st.month = month; st.day = '';
     try { data = await api('GET', '/api/availability?' + q()); } catch (e) { return fail(e); }
     st.data = data; st.month = data.month; st.day = defaultDay();
-    A = data.assets; monthDays = Number(data.last.slice(8));
+    A = data.assets || []; monthDays = Number(data.last.slice(8));
     keepUrl(); paint();
   };
   paint();
