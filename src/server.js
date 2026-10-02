@@ -11,6 +11,7 @@ const { db, DATA_DIR, getSettings, setSetting } = require('./db');
 const { notify, APP_URL, mailConfigured } = require('./mailer');
 const assignments = require('./assignments');
 const requestRules = require('./requests');
+const availabilityLib = require('./availability');
 const catalog = require('./catalog');
 const { cleanSerial, serialKey } = require('./serial');
 
@@ -456,6 +457,19 @@ app.get('/api/assets', auth, (req, res) => {
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
   res.json(db.prepare(sql).all(...params).map((a) => sanitizeAsset(a, req.user)));
+});
+
+// Availability calendar (read-only): ?node=<catalog id> | ?asset=<asset id> | neither (everything), &month=YYYY-MM. The scope rules,
+// the privacy narrowing for employees and the day states all live in src/availability.js. Not a way around asset visibility:
+// GET /api/assets/:id is unchanged and employees still cannot open assets held by someone else.
+app.get('/api/availability', auth, (req, res) => {
+  const q = req.query;
+  res.json(availabilityLib.availability(db, {
+    isAdmin: req.user.role === 'admin', employeeId: req.user.employee_id || null,
+    nodeId: q.node === undefined || q.node === '' ? undefined : q.node,
+    assetId: q.asset === undefined || q.asset === '' ? undefined : q.asset,
+    month: typeof q.month === 'string' ? q.month : undefined,
+  }));
 });
 
 app.get('/api/assets/lookup/:code', auth, (req, res) => {
@@ -1215,10 +1229,29 @@ setTimeout(overdueSweep, 15e3).unref();
 
 // ---------- static front-end ----------
 const PUB = path.join(__dirname, '..', 'public');
+// Local development (`npm run dev` sets NODE_ENV=development; production images set NODE_ENV=production). In dev the browser must
+// never be able to hold on to old front-end code: nothing under public/ is cached at all, and the service worker is replaced by a
+// "kill switch" that removes itself and its caches from any browser that already installed one (the real worker is network-first
+// with a cached-shell fallback, which silently shows OLD code whenever the dev server is restarting or down). Production is unchanged.
+const DEV = process.env.NODE_ENV === 'development';
+if (DEV) {
+  app.get('/sw.js', (req, res) => {
+    res.set({ 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.send(`// dev kill switch: removes the service worker and its caches (see src/server.js)
+self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (e) => e.waitUntil(
+  caches.keys().then((ks) => Promise.all(ks.map((k) => caches.delete(k)))).then(() => self.registration.unregister())
+    .then(() => self.clients.matchAll({ type: 'window' })).then((cs) => cs.forEach((c) => c.navigate(c.url)))));
+`);
+  });
+}
 app.get('/vendor/html5-qrcode.min.js', (req, res) => res.sendFile(require.resolve('html5-qrcode/html5-qrcode.min.js'), { maxAge: '7d' }));
 app.get('/vendor/JsBarcode.all.min.js', (req, res) => res.sendFile(require.resolve('jsbarcode/dist/JsBarcode.all.min.js'), { maxAge: '7d' }));
 // The app's own html/js/css always revalidate (ETag => cheap 304): a 1h max-age kept stale UI code running in browsers after updates.
-app.use(express.static(PUB, { maxAge: '1h', setHeaders: (res, p) => { if (/\.(html|js|css)$/.test(p)) res.setHeader('Cache-Control', 'no-cache'); } }));
+app.use(express.static(PUB, { maxAge: '1h', setHeaders: (res, p) => {
+  if (DEV) res.setHeader('Cache-Control', 'no-store'); // dev: every request goes to the disk, no validators needed, nothing is kept
+  else if (/\.(html|js|css)$/.test(p)) res.setHeader('Cache-Control', 'no-cache');
+} }));
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 app.get(/^\/(?!api\/|uploads\/).*/, (req, res) => res.sendFile(path.join(PUB, 'index.html')));
 
@@ -1230,9 +1263,19 @@ app.use((err, req, res, next) => {
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  // (Express 5 hands a listen failure to this callback as `err`; it must not print the success banner then. The 'error' handler below reports it.)
+  const server = app.listen(PORT, (err) => {
+    if (err) return;
     console.log(`Nutricost IT Assets running on http://localhost:${PORT}  (APP_URL=${APP_URL})`);
+    if (DEV) console.log('Dev mode: this server restarts itself when backend files change; the browser caches nothing and no service worker is kept. Just refresh the page.');
+    else if (process.env.npm_lifecycle_event === 'start' && process.env.NODE_ENV !== 'production') console.log('Note: `npm start` does NOT restart on code changes. For development use `npm run dev` (auto-restart, no stale browser cache).');
     console.log(mailConfigured() ? `Email: sending via ${process.env.SMTP_HOST || 'smtp.gmail.com'} as ${process.env.SMTP_USER}` : 'Email: NOT configured — messages are logged to the Outbox (Settings → Email).');
+  });
+  // Another server already owns this port: say so plainly. (Otherwise the browser keeps talking to the OLD process, which looks exactly like "my change didn't show up".)
+  server.on('error', (err) => {
+    if (err.code !== 'EADDRINUSE') throw err;
+    console.error(`\nPort ${PORT} is already in use by another process, so THIS server did not start and the browser is still talking to the old one.\nFind it with:  lsof -nP -iTCP:${PORT} -sTCP:LISTEN   then stop it (kill <PID>) and start again, or choose another port with PORT=<number>.\n`);
+    process.exit(1);
   });
 }
 

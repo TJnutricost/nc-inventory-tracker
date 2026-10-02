@@ -313,7 +313,7 @@ test('front end: mobile nav — five tabs incl. Profile for everyone; hamburger 
   assert.doesNotMatch(src, /viewMore|label: 'More'/, 'the More page/tab is gone');
   // admin hamburger: exactly the administration destinations — nothing personal, no Sign out
   const menu = src.slice(src.indexOf('const adminMenuItems = () => ['), src.indexOf('// The drawer lives in #sheet-root'));
-  assert.deepEqual(labels(menu), ['People', 'Equipment catalog', 'Print labels', 'Import / export', 'Activity log', 'Settings']);
+  assert.deepEqual(labels(menu), ['People', 'Equipment catalog', 'Calendar', 'Print labels', 'Import / export', 'Activity log', 'Settings']);
   const drawer = src.slice(src.indexOf('function openDrawer()'), src.indexOf('function mountShell()'));
   assert.doesNotMatch(drawer, /My profile|Sign out|logout/, 'no personal/account actions in the admin hamburger');
   assert.match(drawer, /if \(!isAdmin\(\)/, 'the drawer refuses to open for a non-admin');

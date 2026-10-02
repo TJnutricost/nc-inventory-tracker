@@ -5,7 +5,7 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "NODE_ENV=development node --watch src/server.js",
     "test": "node --test test/",
     "seed:dev": "node scripts/seed-dev.js",
     "seed:verify": "node scripts/seed-verify.js"
