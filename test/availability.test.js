@@ -1,5 +1,8 @@
 // Asset Availability Calendar V1 (Phase 2, slice 6): read-only, derived only from open assignments + asset status. One shared
 // query serves global / catalog-node / single-asset scope. Employees get an anonymous, narrower view; admins get holders.
+// Scope refinement: the broader the scope the more summarized the answer. A single asset is detailed (view 'asset'); a catalog
+// subtree or everything is per-day counts (view 'summary'), plus — admins only — the open TEMPORARY checkouts. Never an asset list.
+// Permanent assignments are not part of the broad ADMIN calendar at all: permanently assigned assets are outside its (schedulable) pool.
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -37,7 +40,8 @@ async function makeLogin(name) {
 const checkout = async (asset, who, extra = {}) => { const r = await admin.post(`/api/assets/${asset.id}/checkout`, { employee_id: who.id, ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body.assignment; };
 const cal = async (who, q = '') => who.get('/api/availability' + q);
 const ok = async (who, q = '') => { const r = await cal(who, q); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
-const names = (body) => body.assets.map((a) => a.name).sort();
+const todayIdx = Number(TODAY.slice(8)) - 1;
+const todayCounts = async (who, q) => (await ok(who, `${q}${q ? '&' : '?'}month=${TODAY.slice(0, 7)}`)).days[todayIdx];
 // the state of an asset on a date (fetches the month that date is in)
 const stateOn = async (who, scopeQ, assetId, date) => {
   const body = await ok(who, `?${scopeQ}${scopeQ ? '&' : ''}month=${date.slice(0, 7)}`);
@@ -56,10 +60,11 @@ test('node scope covers the whole subtree and nothing else; deep nesting works; 
   const aBrand = await newAsset('At brand', { catalog_node_id: brand.id });
   const aModel = await newAsset('At model', { catalog_node_id: model.id });
   const aOther = await newAsset('At other', { catalog_node_id: other.id });
-  assert.deepEqual(names(await ok(admin, `?node=${root.id}`)), ['At brand', 'At model', 'At root']);
-  assert.deepEqual(names(await ok(admin, `?node=${brand.id}`)), ['At brand', 'At model']);
-  assert.deepEqual(names(await ok(admin, `?node=${model.id}`)), ['At model']);
-  assert.deepEqual(names(await ok(admin, `?node=${other.id}`)), ['At other']);
+  const total = async (n) => (await ok(admin, `?node=${n.id}`)).total;
+  assert.equal(await total(root), 3, 'root: itself + brand + model');
+  assert.equal(await total(brand), 2);
+  assert.equal(await total(model), 1);
+  assert.equal(await total(other), 1);
   const scope = (await ok(admin, `?node=${model.id}`)).scope;
   assert.deepEqual([scope.type, scope.id, scope.title, scope.path], ['node', model.id, 'Model', `${root.name} > Brand > Model`]);
   void aRoot; void aBrand; void aModel; void aOther;
@@ -72,9 +77,11 @@ test('global scope includes eligible assets from across the catalog; asset scope
   const unlinked = await newAsset('Global unlinked', { category: 'Weird Thing' });
   const all = await ok(admin);
   assert.equal(all.scope.type, 'global');
-  for (const a of [ax, ay, unlinked]) assert.ok(all.assets.some((r) => r.id === a.id), a.name);
+  assert.ok(all.total >= 3, 'eligible assets from across the catalog are counted');
+  void unlinked;
   const one = await ok(admin, `?asset=${ax.id}`);
-  assert.deepEqual([one.scope.type, one.scope.id, one.assets.map((a) => a.id)], ['asset', ax.id, [ax.id]]);
+  assert.deepEqual([one.view, one.scope.type, one.scope.id, one.assets.map((a) => a.id)], ['asset', 'asset', ax.id, [ax.id]]);
+  void ay;
 });
 
 test('invalid or conflicting scope is rejected safely', async () => {
@@ -148,9 +155,12 @@ test('repair, retired, lost and disposed are unavailable on every future day, an
     for (const d of [TODAY, plus(60)]) assert.equal(await stateOn(admin, `asset=${id}`, Number(id), d), s, `${id} on ${d}`);
   }
   assert.equal(await stateOn(admin, `asset=${arch.id}`, arch.id, plus(2)), 'archived');
-  const everything = await ok(admin);
-  assert.ok(!everything.assets.some((a) => a.id === arch.id), 'archived assets are not part of global/node scopes');
-  assert.ok(everything.assets.some((a) => a.id === repair.id), 'but repair/retired ones are, as unavailable');
+  // broad scopes: archived assets are not counted at all; repair/retired/lost/disposed are (as unavailable, admin-only "off")
+  const bucket = await node(`Off bucket ${++seq}`);
+  for (const a of [repair, retired, lost, disposed, arch]) db.prepare('UPDATE assets SET catalog_node_id = ? WHERE id = ?').run(bucket.id, a.id);
+  const sum = await ok(admin, `?node=${bucket.id}`);
+  assert.equal(sum.total, 4, 'archived assets are not part of node/global scopes');
+  assert.deepEqual(sum.days[todayIdx], { available: 0, expected: 0, checked_out: 0, off: 4 });
 });
 
 test('a multi-seat license is available while any seat is free, occupied only when every seat is taken', async () => {
@@ -198,7 +208,7 @@ test('employee responses never expose who holds anything: no names, departments,
   const n = await node(`Privacy Node ${++seq}`);
   const a = await newAsset('Private laptop', { catalog_node_id: n.id });
   await checkout(a, holder, { assignment_type: 'checkout', due_date: plus(7), notes: 'SECRET NOTE about Zelda' });
-  for (const q of [`?node=${n.id}`, `?asset=${a.id}`, '']) {
+  for (const q of [`?node=${n.id}`, `?asset=${a.id}`]) {
     const r = await cal(me.client, q);
     assert.equal(r.status, 200, q);
     const text = JSON.stringify(r.body);
@@ -227,8 +237,8 @@ test('employees see only lendable-looking assets; repair, retired, lost, dispose
   ];
   const arch = await newAsset('Narrow archived', { catalog_node_id: n.id });
   await admin.post(`/api/assets/${arch.id}/archive`, {});
-  assert.deepEqual(names(await ok(me.client, `?node=${n.id}`)), ['Narrow ok']);
-  assert.deepEqual(names(await ok(admin, `?node=${n.id}`)), ['Narrow lost', 'Narrow disposed', 'Narrow ok', 'Narrow repair', 'Narrow retired'].sort());
+  assert.equal((await ok(me.client, `?node=${n.id}`)).total, 1, 'only the lendable-looking one is even counted');
+  assert.equal((await ok(admin, `?node=${n.id}`)).total, 5, 'admins count repair/retired/lost/disposed too');
   for (const a of [...hidden, arch]) assert.equal((await cal(me.client, `?asset=${a.id}`)).status, 404, a.name);
   assert.equal((await cal(me.client, `?asset=${ok1.id}`)).status, 200);
   // the tag is shown for what they could already open
@@ -256,7 +266,8 @@ test('employees can only scope to live catalog entries; archived entries are a 4
   assert.equal((await cal(me.client, `?node=${n.id}`)).status, 404);
   assert.equal((await cal(me.client, `?node=${child.id}`)).status, 404, 'a live child of an archived parent is not live');
   assert.equal((await cal(admin, `?node=${n.id}`)).status, 200);
-  assert.ok((await ok(admin, `?node=${n.id}`)).assets.some((x) => x.id === a.id));
+  assert.equal((await ok(admin, `?node=${n.id}`)).total, 1);
+  void a;
 });
 
 test('the calendar does not widen asset access: asset pages and lists keep their rules', async () => {
@@ -267,6 +278,206 @@ test('the calendar does not widen asset access: asset pages and lists keep their
   assert.equal((await cal(me.client, `?asset=${a.id}`)).status, 200, 'its availability is anonymous and visible');
   assert.equal((await me.client.get(`/api/assets/${a.id}`)).status, 404, 'its record is still not');
   assert.ok(!(await me.client.get('/api/assets')).body.some((x) => x.id === a.id), 'and it is still not in the employee list');
+});
+
+// ---------------------------------------------------------------- scope refinement: summaries for broad scopes, detail for one asset
+const hasKey = (o, k) => JSON.stringify(o).includes(`"${k}"`);
+
+test('a catalog subtree answers with per-day counts only — never a list of its assets (employee and admin)', async () => {
+  const me = await makeLogin('Summary Viewer');
+  const holder = await makeLogin('Summary Holder');
+  const root = await node(`Sum Root ${++seq}`);
+  const child = await node('Sum Child', root.id);
+  const free1 = await newAsset('Sum free 1', { catalog_node_id: root.id });
+  const free2 = await newAsset('Sum free 2', { catalog_node_id: child.id });
+  const loaned = await newAsset('Sum loaned', { catalog_node_id: child.id });
+  await checkout(loaned, holder, { assignment_type: 'checkout', due_date: plus(3) });
+  const perm = await newAsset('Sum permanent', { catalog_node_id: child.id });
+  await checkout(perm, holder, { assignment_type: 'permanent' });
+  void free1; void free2;
+  for (const who of [me.client, admin]) {
+    const body = await ok(who, `?node=${root.id}&month=${TODAY.slice(0, 7)}`);
+    assert.equal(body.view, 'summary');
+    assert.equal(body.total, who === admin ? 3 : 4, 'admin: schedulable pool (the permanently assigned asset is out); employee: unchanged');
+    assert.equal(body.assets, undefined, 'no asset rows for a subtree');
+    // (an admin's `events` may name the temporary loan; nothing else about the subtree is listed)
+    for (const nm of ['Sum free 1', 'Sum free 2', 'Sum permanent']) assert.ok(!JSON.stringify(body).includes(nm), `${nm} is not listed`);
+    if (who !== admin) assert.ok(!JSON.stringify(body).includes('Sum loaned'), 'an employee sees no asset names at all');
+    // employees: unchanged (the permanent asset is just "unavailable"); admins: it is not in the calendar, only the temporary checkout is out
+    assert.deepEqual(body.days[todayIdx], who === admin ? { available: 2, expected: 0, checked_out: 1, off: 0 } : { available: 2, expected: 0, unavailable: 2, off: 0 }, 'today');
+  }
+  // after the loan's due date the loaned laptop is only "expected back"; the permanent one stays unavailable
+  const later = plus(5);
+  const m = await ok(me.client, `?node=${root.id}&month=${later.slice(0, 7)}`);
+  assert.deepEqual(m.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, unavailable: 1, off: 0 });
+  const am = await ok(admin, `?node=${root.id}&month=${later.slice(0, 7)}`);
+  assert.deepEqual(am.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, checked_out: 0, off: 0 }, 'admin: the loan is back-expected, so not "checked out" that day');
+  // earlier days carry no counts
+  const first = (await ok(me.client, `?node=${root.id}`)).days[0];
+  if (TODAY.slice(8) > '01') assert.deepEqual(first, { available: 0, expected: 0, unavailable: 0, off: 0 });
+});
+
+test('employee summaries are anonymous: no events, holders, tags, ids or repair counts; "off" is admin-only and repair stays hidden', async () => {
+  const me = await makeLogin('Anon Viewer');
+  const holder = await makeLogin('Quiet Holder');
+  const n = await node(`Anon ${++seq}`);
+  const a = await newAsset('Anon laptop', { catalog_node_id: n.id });
+  await newAsset('Anon repair', { catalog_node_id: n.id, status: 'maintenance' });
+  await checkout(a, holder, { assignment_type: 'checkout', due_date: plus(7) });
+  const body = await ok(me.client, `?node=${n.id}`);
+  assert.equal(body.total, 1, 'the repair asset is not even counted');
+  assert.equal(body.events, undefined);
+  for (const leak of ['Quiet Holder', 'holder', 'assignment_id', 'events', 'Anon laptop', a.tag]) assert.ok(!JSON.stringify(body).includes(leak), leak);
+  assert.equal(body.days[todayIdx].off, 0);
+  // the admin view of the same node counts the repair asset as "off"
+  const adminBody = await ok(admin, `?node=${n.id}`);
+  assert.equal(adminBody.total, 2);
+  assert.equal(adminBody.days[todayIdx].off, 1);
+});
+
+test('employees have no all-equipment calendar: it needs a catalog entry or an asset (admins keep the global one)', async () => {
+  const me = await makeLogin('No Global');
+  const r = await cal(me.client, '');
+  assert.equal(r.status, 400);
+  assert.match(r.body.error, /category or an item/i);
+  assert.equal((await cal(me.client, `?month=${TODAY.slice(0, 7)}`)).status, 400);
+  const n = await node(`Ok node ${++seq}`);
+  const a = await newAsset('Ok asset', { catalog_node_id: n.id });
+  assert.equal((await cal(me.client, `?node=${n.id}`)).status, 200);
+  assert.equal((await cal(me.client, `?asset=${a.id}`)).status, 200);
+  assert.equal((await cal(admin, '')).status, 200);
+  assert.equal((await ok(admin)).view, 'summary');
+});
+
+test('a single asset stays detailed for both roles: per-day states, periods, tag/name; admins also get the holder', async () => {
+  const holder = await makeLogin('Detail Holder');
+  const me = await makeLogin('Detail Viewer');
+  const n = await node(`Detail ${++seq}`);
+  const a = await newAsset('Detail laptop', { catalog_node_id: n.id });
+  const due = plus(4);
+  await checkout(a, holder, { assignment_type: 'checkout', due_date: due });
+  const emp = await ok(me.client, `?asset=${a.id}`);
+  const adm = await ok(admin, `?asset=${a.id}`);
+  for (const body of [emp, adm]) {
+    assert.equal(body.view, 'asset');
+    assert.equal(body.assets.length, 1);
+    assert.equal(body.assets[0].name, 'Detail laptop');
+    assert.equal(body.assets[0].days.length, body.last.slice(8) * 1);
+    assert.deepEqual(body.assets[0].periods.map((p) => p.kind), ['occupied', 'expected']);
+    assert.equal(body.days, undefined, 'no summary counts for a single asset');
+  }
+  assert.equal(emp.assets[0].periods[0].holder, undefined);
+  assert.equal(adm.assets[0].periods[0].holder.name, 'Detail Holder');
+});
+
+test('admin broad calendars list only TEMPORARY checkouts: not available assets, not permanent assignments', async () => {
+  const holder = await makeLogin('Event Holder');
+  const holder2 = await makeLogin('Event Holder Two');
+  const n = await node(`Events ${++seq}`);
+  const free = await newAsset('Ev free', { catalog_node_id: n.id });
+  const perm = await newAsset('Ev permanent', { catalog_node_id: n.id });
+  const temp = await newAsset('Ev temporary', { catalog_node_id: n.id });
+  const overdue = await newAsset('Ev overdue', { catalog_node_id: n.id });
+  const repair = await newAsset('Ev repair', { catalog_node_id: n.id, status: 'maintenance' });
+  await checkout(perm, holder, { assignment_type: 'permanent' });
+  const due = plus(2);
+  await checkout(temp, holder2, { assignment_type: 'checkout', due_date: due, due_time: '09:30' });
+  await checkout(overdue, holder, { assignment_type: 'checkout', due_date: plus(3) });
+  db.prepare('UPDATE assignments SET due_date = ? WHERE asset_id = ?').run(plus(-1), overdue.id);
+  void free; void repair;
+  for (const q of [`?node=${n.id}`, '']) {
+    const body = await ok(admin, q);
+    const ev = body.events.filter((e) => [free, perm, temp, overdue, repair].some((x) => x.id === e.asset_id));
+    assert.deepEqual(ev.map((e) => e.name).sort(), ['Ev overdue', 'Ev temporary'], `${q || 'global'}: only temporary checkouts`);
+    assert.ok(!body.events.some((e) => e.asset_id === free.id || e.asset_id === perm.id || e.asset_id === repair.id));
+    const t = ev.find((e) => e.name === 'Ev temporary');
+    assert.deepEqual([t.start, t.end, t.due_time, t.overdue, t.holder.name], [TODAY, due, '09:30', false, 'Event Holder Two']);
+    const o = ev.find((e) => e.name === 'Ev overdue');
+    assert.deepEqual([o.end, o.overdue], [null, true], 'overdue is still out, no invented end');
+    assert.equal(body.assets, undefined, 'and no asset rows');
+  }
+  // soonest-return order puts overdue first
+  const nodeEvents = (await ok(admin, `?node=${n.id}`)).events;
+  assert.deepEqual(nodeEvents.map((e) => e.name), ['Ev overdue', 'Ev temporary']);
+  // scoped to a different branch: neither shows up
+  const other = await node(`Events other ${seq}`);
+  assert.deepEqual((await ok(admin, `?node=${other.id}`)).events, []);
+});
+
+test('permanent assignments are not in the broad admin calendar at all: not in the total, the counts, the day states or the lists — and returning one puts the asset back', async () => {
+  const h1 = await makeLogin('Pool One'); const h2 = await makeLogin('Pool Two'); const h3 = await makeLogin('Pool Three');
+  const n = await node(`Pool ${++seq}`);
+  const [t1, t2, p1, p2, od, rep, fr] = [
+    await newAsset('Pl temp 1', { catalog_node_id: n.id }), await newAsset('Pl temp 2', { catalog_node_id: n.id }),
+    await newAsset('Pl perm 1', { catalog_node_id: n.id }), await newAsset('Pl perm 2', { catalog_node_id: n.id }),
+    await newAsset('Pl overdue', { catalog_node_id: n.id }), await newAsset('Pl repair', { catalog_node_id: n.id, status: 'maintenance' }),
+    await newAsset('Pl free', { catalog_node_id: n.id }),
+  ];
+  await checkout(t1, h1, { assignment_type: 'checkout', due_date: plus(2) });
+  await checkout(t2, h2, { assignment_type: 'checkout', due_date: plus(6) });
+  await checkout(p1, h1, { assignment_type: 'permanent' });
+  await checkout(p2, h3, { assignment_type: 'permanent' });
+  await checkout(od, h3, { assignment_type: 'checkout', due_date: plus(1) });
+  db.prepare('UPDATE assignments SET due_date = ? WHERE asset_id = ?').run(plus(-3), od.id);
+  void rep; void fr;
+  const month = await ok(admin, `?node=${n.id}&month=${TODAY.slice(0, 7)}`);
+  assert.equal(month.total, 5, '7 assets, 2 permanently assigned: the schedulable pool is 5');
+  // today: t1, t2 and the overdue one are out; one in repair; one free. Nothing about permanent assignments.
+  assert.deepEqual(month.days[todayIdx], { available: 1, expected: 0, checked_out: 3, off: 1 });
+  assert.deepEqual(Object.keys(month.days[todayIdx]).sort(), ['available', 'checked_out', 'expected', 'off'], 'no unavailable and no permanent figure');
+  assert.equal(month.days[todayIdx].checked_out, month.events.filter((e) => e.start <= TODAY && (e.overdue || TODAY <= e.end)).length, 'the count IS the list');
+  assert.ok(!month.events.some((e) => [p1.id, p2.id].includes(e.asset_id)));
+  assert.ok(!JSON.stringify(month).includes('Pl perm'));
+  // three days on (the month may roll over, so ask for that month): t1 is due back (expected), t2 and the overdue one are still out
+  const d3 = plus(3); const m3 = await ok(admin, `?node=${n.id}&month=${d3.slice(0, 7)}`);
+  assert.deepEqual(m3.days[Number(d3.slice(8)) - 1], { available: 1, expected: 1, checked_out: 2, off: 1 });
+  // the global calendar's total drops by exactly the permanently assigned assets, too
+  const before = (await ok(admin)).total;
+  const extra = await newAsset('Pl global perm');
+  await checkout(extra, h2, { assignment_type: 'permanent' });
+  assert.equal((await ok(admin)).total, before, 'a newly permanently assigned asset adds nothing to the global pool');
+  // returning a permanent assignment puts the asset back
+  assert.equal((await admin.post(`/api/assets/${p1.id}/checkin`, {})).status, 200);
+  const back = await ok(admin, `?node=${n.id}&month=${TODAY.slice(0, 7)}`);
+  assert.equal(back.total, 6);
+  assert.equal(back.days[todayIdx].available, 2);
+  // a single asset, asked for directly, is still shown in full (even a permanent one)
+  const one = await ok(admin, `?asset=${p2.id}`);
+  assert.deepEqual([one.view, one.assets[0].state], ['asset', 'occupied']);
+});
+
+test('the admin Checked out count is not limited by the events list cap, and employees never get the split', async () => {
+  const me = await makeLogin('Cap Viewer'); const h = await makeLogin('Cap Holder');
+  const n = await node(`Cap ${++seq}`);
+  const a = await newAsset('Cap loan', { catalog_node_id: n.id });
+  await checkout(a, h, { assignment_type: 'checkout', due_date: plus(2) });
+  const emp = await ok(me.client, `?node=${n.id}`);
+  assert.deepEqual(Object.keys(emp.days[todayIdx]).sort(), ['available', 'expected', 'off', 'unavailable']);
+  assert.equal((await ok(admin, `?node=${n.id}`)).days[todayIdx].checked_out, 1);
+});
+
+test('admin events respect the month window: a checkout due before the month, or starting after it, is not an event; open-ended overdue ones are', async () => {
+  const holder = await makeLogin('Window Holder');
+  const n = await node(`Window ${++seq}`);
+  const a = await newAsset('Window loan', { catalog_node_id: n.id });
+  await checkout(a, holder, { assignment_type: 'checkout', due_date: plus(3) });
+  const thisMonth = (await ok(admin, `?node=${n.id}`)).events.map((e) => e.name);
+  assert.deepEqual(thisMonth, ['Window loan']);
+  const farLater = plus(120).slice(0, 7);
+  assert.deepEqual((await ok(admin, `?node=${n.id}&month=${farLater}`)).events, [], 'it is back well before then (expected, not an event)');
+  db.prepare('UPDATE assignments SET due_date = ? WHERE asset_id = ?').run(plus(-5), a.id);
+  assert.deepEqual((await ok(admin, `?node=${n.id}&month=${farLater}`)).events.map((e) => e.name), ['Window loan'], 'overdue = still out, relevant to every future month');
+});
+
+test('the pure helper only ever returns temporary assignments, whatever else is open', () => {
+  const asset = { id: 1, name: 'X', tag: 'T-1' };
+  const rows = [
+    { id: 1, asset_id: 1, employee_id: 5, assignment_type: 'permanent', due_date: null, checked_out_at: '2030-01-01 09:00:00', holder_name: 'P' },
+    { id: 2, asset_id: 1, employee_id: 6, assignment_type: 'checkout', due_date: '2030-01-10', checked_out_at: '2030-01-02 09:00:00', holder_name: 'Q' },
+  ];
+  const win = availability.monthWindow('2030-01', '2030-01-05');
+  const { events } = availability.checkoutEvents([asset], new Map([[1, rows]]), { today: '2030-01-05', win });
+  assert.deepEqual(events.map((e) => [e.assignment_id, e.holder.name]), [[2, 'Q']]);
 });
 
 // ---------------------------------------------------------------- front end: URL-backed scope, source and Back
@@ -350,7 +561,7 @@ test('front end: the calendar has one route for both roles, keeps month/day/sour
   assert.match(view, /const back = await calBackTarget\(want\.from, sc\)/);
   assert.match(view, /backLink\(eb\.href, eb\.label, true\)/, 'even the error screen has a Back');
   // entry points: Browse (employee), catalog + All assets (admin), asset detail (both), admin sidebar + hamburger
-  assert.match(src, /\$\('#headact'\)\.innerHTML = calendarLink\(\{ node: st\.q \? null : \(cur\(\) \|\| \{\}\)\.id \}\)/);
+  assert.match(src, /\$\('#headact'\)\.innerHTML = !st\.q && cur\(\) \? calendarLink\(\{ node: cur\(\)\.id \}\) : ''/, 'employee Browse: calendar only inside a catalog entry');
   assert.match(src, /\$\{calendarLink\(\{ asset: a\.id \}\)\}/);
   assert.match(src, /<a href="#\/new" class="btn primary desk-only">\$\{icon\('plus'\)\} Add asset<\/a>\$\{calendarLink\(\)\}/, 'admin All assets header');
   // catalog header order: Add category first, then the calendar icon
@@ -360,4 +571,45 @@ test('front end: the calendar has one route for both roles, keeps month/day/sour
   const tabs = src.slice(src.indexOf('const common = ['), src.indexOf('const side = ['));
   assert.doesNotMatch(tabs, /calendar/i, 'no bottom-tab entry');
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'public', 'app.css'), 'utf8'), /\.cal-day\b/);
+});
+
+test('front end: employee Browse has no Calendar action at the root or while searching; nested entries and single assets keep theirs', () => {
+  const src = appSrc();
+  const browse = src.slice(src.indexOf('async function viewBrowse()'), src.indexOf('// ============================================================ admin'));
+  const line = browse.match(/\$\('#headact'\)\.innerHTML = [^\n]*/)[0];
+  assert.match(line, /!st\.q && cur\(\) \? calendarLink\(\{ node: cur\(\)\.id \}\) : ''/);
+  assert.doesNotMatch(browse, /calendarLink\(\)/, 'never an unscoped calendar from Browse');
+  assert.match(src, /\$\{calendarLink\(\{ asset: a\.id \}\)\}/, 'asset pages keep it');
+  // the same expression, evaluated: root / search -> nothing, any entry -> a node-scoped link
+  const vm = require('node:vm');
+  const run = (q, curVal) => vm.runInNewContext(`(${line.replace("$('#headact').innerHTML = ", '').replace(/;$/, '')})`, { st: { q }, cur: () => curVal, calendarLink: ({ node }) => `CAL:${node}` });
+  assert.equal(run('', undefined), '', 'Browse root');
+  assert.equal(run('lap', { id: 3 }), '', 'a search is global');
+  assert.equal(run('', { id: 3 }), 'CAL:3', 'a category');
+  assert.equal(run('', { id: 12 }), 'CAL:12', 'a deep model entry');
+});
+
+test('front end: the selected-day panel follows the scope — asset detail for one asset, counts for a subtree, temporary checkouts only for admins', () => {
+  const src = appSrc();
+  const view = src.slice(src.indexOf('async function viewCalendar()'), src.indexOf('// ============================================================ people'));
+  assert.match(view, /const isSummary = \(\) => data\.view === 'summary'/);
+  assert.match(view, /return isSummary\(\) \? summaryPanel\(day, i\) : assetPanel\(day, i\)/);
+  // a subtree/global panel never iterates assets: it reads counts, and (admins) events
+  const summary = view.slice(view.indexOf('const countRows ='), view.indexOf('const panelHtml ='));
+  assert.doesNotMatch(summary, /\bA\b\.(map|filter)|\bA\.length|data\.assets/, 'no per-asset rows in a summary');
+  assert.match(summary, /\[c\.available, 'available', 'available'\], \[c\.unavailable, 'unavailable', 'occupied'\], \[c\.expected, 'expected back', 'expected'\]/, 'employees: generic unavailable');
+  const adminRows = summary.slice(summary.indexOf('if (isAdmin())'), summary.indexOf('const rows = [[c.available, \'available\', \'available\'], [c.unavailable'));
+  assert.match(adminRows, /\[c\.checked_out, 'checked out', 'occupied'\]/, 'admins: checked out');
+  assert.doesNotMatch(adminRows.replace(/\/\/[^\n]*/g, ''), /unavailable|permanent/i, 'no combined Unavailable total and no permanent figure in the admin rows');
+  assert.match(summary, /adminV \? eventsHtml\(day\) : ''/, 'only admins get the day\'s temporary checkouts');
+  assert.match(summary, /Temporary checkouts/);
+  assert.doesNotMatch(summary, /Reserve|reserve/, 'no reservation controls yet');
+  assert.doesNotMatch(view, />\s*Reserve\s*</, 'no Reserve button');
+  // the single-asset panel names the asset and its tag
+  const one = view.slice(view.indexOf('const assetPanel ='), view.indexOf('// A catalog subtree / everything'));
+  assert.match(one, /esc\(a\.name\)/);
+  assert.match(one, /esc\(a\.tag\)/);
+  assert.match(one, /dayTitle\(day\)/);
+  // URL-backed scope/day/month/source and the Back link are untouched
+  assert.match(view, /history\.replaceState\(null, '', calUrl\(\{ node: want\.node, asset: want\.asset,[^\n]*from: want\.from \}\)\)/);
 });
