@@ -391,10 +391,11 @@ test('a permanent request that is approved without an assignment (legacy row) ca
   const open = await asAdminRequest(me, await newAsset('Still open', { category: 'Desktop' }));
   assert.equal((await me.client.post(`/api/requests/${open.id}/cancel`, {})).status, 200);
   assert.equal(asRow(open.id).status, 'cancelled');
-  // and a temporary / unspecified request may still be cancelled while approved
+  // and an approved temporary / unspecified request can no longer be rescinded either: IT acting on it opened it
   const plain = await request(me.client, { category: 'Headset' });
   await admin.post(`/api/requests/${plain.id}/approve`, { note: 'ordered' });
-  assert.equal((await me.client.post(`/api/requests/${plain.id}/cancel`, {})).status, 200);
+  assert.equal((await me.client.post(`/api/requests/${plain.id}/cancel`, {})).status, 400);
+  assert.equal(asRow(plain.id).status, 'approved');
 });
 
 // ================================================================ historical safety

@@ -111,10 +111,25 @@ const CAT_ICON = { Laptop: 'laptop', Desktop: 'desktop', Monitor: 'monitor', 'Ke
 const catIcon = (c) => CAT_ICON[c] || (/laptop|notebook/i.test(c) ? 'laptop' : /monitor|display/i.test(c) ? 'monitor' : /license|software/i.test(c) ? 'key' : 'box');
 const STATUS_LABEL = { available: 'Available', checked_out: 'Checked out', maintenance: 'In repair', retired: 'Retired', disposed: 'Disposed', lost: 'Lost', overdue: 'Overdue' };
 const isPermReq = (r) => r.requested_assignment_type === 'permanent';
-const REQ_LABEL = { open: 'Pending', approved: 'Approved', denied: 'Declined', dropped_off: 'Dropped off', completed: 'Done', cancelled: 'Cancelled' };
-// The label for a request's status, which reads differently by type (an open return is "Return requested", a completed issue "Resolved").
-const statusLabel = (r) => (r.type === 'return' && r.status === 'open' ? 'Return requested' : r.type === 'issue' ? ({ open: 'Open', completed: 'Resolved' }[r.status] || REQ_LABEL[r.status]) : REQ_LABEL[r.status]);
-const requestIcon = (r) => (r.type === 'return' ? 'in' : r.type === 'issue' ? 'alert' : 'inbox');
+// The lifecycle a person sees (derived on the server from status + opened_at; see src/requests.js). One vocabulary for employees and IT.
+// The card pill, the detail sheet and the state filter ALL read it through `stateKey`/`statusLabel` below, so they cannot disagree,
+// and a raw database status ("completed", "cancelled", "denied") is never shown.
+const LIFE_LABEL = { submitted: 'Submitted', in_review: 'In review', approved: 'Approved', dropped_off: 'Dropped off', fulfilled: 'Fulfilled', resolved: 'Resolved', denied: 'Declined', rescinded: 'Rescinded', withdrawn: 'Withdrawn', cancelled: 'Cancelled', dismissed: 'Dismissed' };
+const LIFE_CLASS = { submitted: 'open', in_review: 'in_review', approved: 'approved', dropped_off: 'dropped_off', fulfilled: 'completed', resolved: 'completed', denied: 'denied', rescinded: 'cancelled', withdrawn: 'cancelled', cancelled: 'cancelled', dismissed: 'cancelled' }; // pill colour
+const OPEN_STATES = ['submitted', 'in_review', 'approved', 'dropped_off'];
+const CLOSED_STATES = ['fulfilled', 'resolved', 'denied', 'rescinded', 'withdrawn', 'cancelled', 'dismissed'];
+const ISSUE_ONLY_STATES = ['resolved', 'withdrawn', 'dismissed']; // issue reports' own words; offered in the filter only when there is one
+// Fallback only for a row that arrives without `lifecycle` (a server older than this front end): map the status to the same words.
+const LIFE_FROM_STATUS = { open: 'submitted', approved: 'approved', dropped_off: 'dropped_off', denied: 'denied', completed: 'fulfilled', cancelled: 'cancelled' };
+// The state a request is in, in the words used everywhere: the lifecycle, except an issue report closes as Resolved / Withdrawn / Dismissed.
+const stateKey = (r) => {
+  const l = r.lifecycle || LIFE_FROM_STATUS[r.status];
+  return r.type === 'issue' ? ({ fulfilled: 'resolved', rescinded: 'withdrawn', cancelled: 'dismissed' })[l] || l : l;
+};
+// The pill text. The one deliberate exception: a live return reads "Return requested" (IT asked / the employee asked to give it back).
+const statusLabel = (r) => (r.type === 'return' && ['submitted', 'in_review'].includes(stateKey(r)) ? 'Return requested' : LIFE_LABEL[stateKey(r)] || 'Open');
+const reqPill = (r) => pill(LIFE_CLASS[stateKey(r)] || 'open', statusLabel(r));
+const requestIcon = (r) => (r.type === 'return' ? 'in' : r.type === 'issue' ? 'alert' : 'box'); // equipment request = package (the inbox/tray glyph is kept free for a future Inbox)
 const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
 const fmtClock = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const h = Number(m[1]); return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`; };
 const typeText = (m) => `${esc(TYPE_LABEL[m.assignment_type] || TYPE_LABEL.permanent)}${m.assignment_type === 'checkout' && m.due_date ? ` · return by ${fmtDate(m.due_date)}${m.due_time ? ' ' + fmtClock(m.due_time) : ''}` : ''}`;
@@ -540,7 +555,7 @@ async function viewHome() {
       <div class="stack">${returnBanners(d.mine, 'home')}
       <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
-      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('inbox')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${pill(r.status, REQ_LABEL[r.status])}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('box')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${reqPill(r)}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
     $('#req').onclick = () => requestEquipmentSheet();
     wireDropoffs(main());
@@ -564,7 +579,7 @@ async function viewHome() {
         ${d.openRequests.length || d.overdue.length ? `<ul class="list">
           ${d.openRequests.map((r) => `<li><a class="item" href="${r.asset_id && r.type === 'return' ? '#/asset/' + r.asset_id + srcQ('home') : '#/requests'}"><div class="thumb">${icon(requestIcon(r))}</div>
             <div class="grow"><div class="title truncate">${r.type === 'return' ? `Return: ${esc(r.asset_name || '')}` : r.type === 'issue' ? `Issue: ${esc(r.asset_name || 'equipment')}` : isPermReq(r) ? `${esc(r.user_name)} requests permanent ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.user_name)} needs ${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'equipment'))}`}</div>
-            <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}</a></li>`).join('')}
+            <div class="sub truncate">${r.type === 'return' || r.type === 'issue' ? esc(r.user_name) + ' · ' : ''}${fmtWhen(r.created_at)}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${reqPill(r)}</a></li>`).join('')}
           ${d.overdue.map((o) => `<li><a class="item" href="#/asset/${o.asset_id}${srcQ('home')}"><div class="thumb" style="color:var(--bad)">${icon('alert')}</div>
             <div class="grow"><div class="title truncate">${esc(o.asset_name)}</div><div class="sub">${esc(o.user_name)} · due ${fmtDate(o.due_date)}</div></div>${pill('overdue', 'Overdue')}</a></li>`).join('')}
         </ul>` : `<div class="empty">${icon('check')}<p>All caught up.</p></div>`}
@@ -776,7 +791,7 @@ async function viewAsset(id) {
     } else if (a.status === 'available' && seatsFree > 0) {
       actions = S.me.can_self_checkout
         ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out to me</button>`
-        : `<button class="btn primary lg block" id="act-request">${icon('inbox')} Request this</button>`;
+        : `<button class="btn primary lg block" id="act-request">${icon('box')} Request this</button>`;
     } else if (d.held_by_other || a.status !== 'available') {
       actions = `<div class="banner info">${icon('box')}<div class="grow">This item isn't available right now. <a href="#" id="act-similar">Request something similar</a></div></div>`;
     }
@@ -801,7 +816,7 @@ async function viewAsset(id) {
           <div class="sub">${typeText(h)} · since ${fmtStamp(h.checked_out_at)}${h.user_department ? ` · ${esc(h.user_department)}` : ''}</div></div>
           ${isOverdue(h.due_date) ? pill('overdue', 'Overdue') : ''}
           ${admin && multi ? `<button class="btn sm" data-in="${h.id}">Check in</button>` : ''}</div></li>`).join('')}</ul></div>` : ''}
-      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(requestIcon(r))}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : r.type === 'issue' ? 'Issue reported by ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${pill(r.status, statusLabel(r))}${r.type === 'issue' ? `<a class="btn sm" href="#/requests">Review</a>` : ''}</div></li>`).join('')}</ul></div>` : ''}
+      ${d.requests.length && admin ? `<div class="card"><div class="card-head"><h2>Open requests</h2></div><ul class="list">${d.requests.map((r) => `<li><div class="item"><div class="thumb">${icon(requestIcon(r))}</div><div class="grow"><div class="title">${r.type === 'return' ? 'Return from ' : r.type === 'issue' ? 'Issue reported by ' : isPermReq(r) ? 'Permanent assignment requested by ' : 'Requested by '}${esc(r.user_name)}</div><div class="sub">${fmtWhen(r.created_at)}${r.needed_by ? ' · by ' + fmtDate(r.needed_by) : ''}${r.message ? ' · ' + esc(r.message) : ''}</div></div>${reqPill(r)}${r.type === 'issue' ? `<a class="btn sm" href="#/requests">Review</a>` : ''}</div></li>`).join('')}</ul></div>` : ''}
       ${a.license_key || a.license_expires || multi || a.category === 'Software License' ? `<div class="card"><div class="card-head"><h2>License</h2></div><div class="kv">
           ${a.license_key ? `<div class="k">Key</div><div class="v"><span class="license-key">${esc(a.license_key)}</span> <button class="iconbtn" style="width:32px;height:32px;display:inline-grid;vertical-align:middle" id="copykey" title="Copy">${icon('copy')}</button></div>` : ''}
           <div class="k">Seats</div><div class="v">${d.seats_used} used of ${d.capacity}</div>
@@ -1395,28 +1410,38 @@ function viewScan() {
 
 // ============================================================ requests
 async function viewRequests() {
-  const state = { tab: qs().get('tab') || 'open' };
+  const state = { tab: ['open', 'closed'].includes(qs().get('tab')) ? qs().get('tab') : 'open', f: qs().get('state') || '' };
   main().innerHTML = `<div class="page-head"><h1>Requests</h1><button class="btn primary" id="new">${icon('plus')} ${isAdmin() ? 'New' : 'Request equipment'}</button></div>
-    <div class="stack"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button></div><div id="list"><div class="spinner"></div></div></div>`;
+    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button></div>
+      ${isAdmin() ? '<select id="st" aria-label="Filter by state" style="width:auto;min-height:40px;padding:6px 10px;font-size:15px"></select>' : ''}</div><div id="list"><div class="spinner"></div></div></div>`;
   $('#new').onclick = async () => {
     if (!isAdmin()) return requestEquipmentSheet();
     const { el, close } = sheet(`<h2>New request</h2><div class="stack" style="margin-top:14px">
-      <button class="btn lg block" id="n1">${icon('inbox')} Log an equipment request for someone</button>
+      <button class="btn lg block" id="n1">${icon('box')} Log an equipment request for someone</button>
       <button class="btn lg block" id="n2">${icon('send')} Ask someone to return an item</button></div>`);
     $('#n1', el).onclick = async () => { close(); const users = await getUsers(); const s = sheet(`<h2>Who is it for?</h2><div id="pp" style="margin-top:12px"></div>`); personPicker($('#pp', s.el), users, (u) => { s.close(); requestEquipmentSheet({ forUser: u }); }); };
     $('#n2', el).onclick = () => { close(); go('#/assets?status=checked_out'); toast('Open the item and tap “Request return”'); };
   };
   const render = async () => {
     $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.tab));
-    const rows = await api('GET', '/api/requests?status=' + state.tab);
+    const all = await api('GET', '/api/requests?status=' + state.tab);
     const list = $('#list'); if (!list) return;
-    if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
-    const find = (id) => rows.find((r) => r.id === Number(id));
+    // IT's state filter: the tab's states with how many requests are in each. (Client-side over the same list; the lifecycle comes from the server.)
+    const countOf = (k) => all.filter((r) => stateKey(r) === k).length;
+    const states = (state.tab === 'open' ? OPEN_STATES : CLOSED_STATES).filter((k) => !ISSUE_ONLY_STATES.includes(k) || countOf(k) > 0);
+    if (!states.includes(state.f)) state.f = '';
+    const st = $('#st');
+    if (st) st.innerHTML = `<option value="">All (${all.length})</option>${states.map((k) => `<option value="${k}"${state.f === k ? ' selected' : ''}>${LIFE_LABEL[k]} (${countOf(k)})</option>`).join('')}`;
+    const rows = state.f ? all.filter((r) => stateKey(r) === state.f) : all;
+    if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${all.length ? `No ${LIFE_LABEL[state.f].toLowerCase()} requests.` : state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
+    const find = (id) => all.find((r) => r.id === Number(id));
     const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
     const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${r.asset_name && !r.catalog_path ? ` — ${esc(r.asset_name)}` : ''}`);
     // What exactly was asked for: the catalog level as it was when the request was made, and whether any matching asset or
     // one specific item. (Older requests have only the free-text category.)
-    const scopeOf = (r) => (r.type !== 'equipment' ? '' : r.asset_id ? `Specific asset: ${esc(r.asset_label || [r.asset_tag, r.asset_name].filter(Boolean).join(' — '))}` : r.catalog_path ? 'Any matching asset' : '');
+    // (asset_label is only ever written when a specific item was asked for; asset_id alone can also be the asset IT assigned.)
+    const scopeOf = (r) => (r.type !== 'equipment' ? '' : r.asset_label ? `Specific asset: ${esc(r.asset_label)}` : r.catalog_path ? 'Any matching asset' : r.asset_id && r.status !== 'completed' ? `Specific asset: ${esc([r.asset_tag, r.asset_name].filter(Boolean).join(' — '))}` : '');
+    const specific = (r) => r.type === 'equipment' && r.asset_id !== null && r.status !== 'completed'; // names one item, not yet fulfilled
     // The action buttons a request offers; used by both the list card and the detail sheet (wired by wireActions).
     const actionsFor = (r) => {
       const isRet = r.type === 'return'; const isIssue = r.type === 'issue'; const perm = isPermReq(r);
@@ -1430,21 +1455,24 @@ async function viewRequests() {
         return drop + cancel;
       }
       if (isAdmin() && perm && r.asset_id) return `<button class="btn sm primary" data-approve-perm="${r.id}">${icon('check')} Approve & assign permanently</button><button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
-      if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} Assign an asset</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
+      if (isAdmin() && !isRet) return `<button class="btn sm primary" data-fulfill="${r.id}">${icon('out')} ${specific(r) ? 'Assign ' + esc(r.asset_tag || 'this item') : 'Assign an asset'}</button>${r.status === 'open' ? `<button class="btn sm" data-approve="${r.id}">Approve</button>` : ''}<button class="btn sm danger" data-deny="${r.id}">Decline</button>`;
       if (isAdmin() && isRet) return `${r.asset_id ? `<a class="btn sm primary" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${icon('in')} Check in</a>` : ''}<button class="btn sm" data-cancel="${r.id}">Cancel request</button>`;
       return '';
     };
     // `before` runs first (the detail sheet closes itself so the action's own sheet isn't stacked on it).
     const wireActions = (root, before) => {
       const on = (sel, attr, fn) => $$(sel, root).forEach((b) => b.onclick = (e) => { before && before(); fn(find(b.dataset[attr]), e.currentTarget); });
-      on('[data-fulfill]', 'fulfill', (r) => assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, catalogNode: r.catalog_node_id, onPick: (assetId) => {
+      // Fulfilling hands over what was asked for: the requested item itself for a specific request, otherwise a pick from the
+      // matching assets (the server re-checks the match and availability either way).
+      const assign = (r, assetId) => {
         const { el, close } = sheet(`<h2>Assign & check out</h2><p class="muted small" style="margin-top:0">${esc(r.user_name)} will get an email with the details.</p>
           <form class="form-grid" id="f">${assignTypeFields()}<label class="field"><span>Note to ${esc(r.user_name.split(' ')[0])} (optional)</span><input name="note" placeholder="e.g. Pick it up at the IT room"></label>
           <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Check out</button></div></form>`);
         wireAssignType(el);
         $('#f', el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target));
           busy($('#go', el), async () => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: assetId, assignment_type: fd.assignment_type, due_date: fd.due_date, due_time: fd.due_time, note: fd.note }); close(); toast('Assigned and checked out'); refreshBadge(); render(); }); };
-      } }));
+      };
+      on('[data-fulfill]', 'fulfill', (r) => (specific(r) ? assign(r, r.asset_id) : assetPickerSheet({ title: `Assign to ${r.user_name}`, filterCategory: r.category, catalogNode: r.catalog_node_id, onPick: (assetId) => assign(r, assetId) })));
       on('[data-approve-perm]', 'approvePerm', (r) => noteSheet('Approve permanent assignment', `${r.asset_name || 'This item'} will be permanently assigned to ${r.user_name}. Add a note for them (optional).`, 'Approve & assign', 'e.g. Pick it up at the IT room',
         async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { asset_id: r.asset_id, assignment_type: 'permanent', note }); toast('Permanently assigned'); refreshBadge(); render(); }));
       on('[data-approve]', 'approve', (r) => noteSheet('Approve request', 'Let them know what happens next (optional).', 'Approve', 'e.g. Ordered — should arrive next week', async (note) => { await api('POST', `/api/requests/${r.id}/approve`, { note }); toast('Approved — they’ve been emailed'); refreshBadge(); render(); }));
@@ -1454,33 +1482,41 @@ async function viewRequests() {
       on('[data-dropoff]', 'dropoff', (r, btn) => busy(btn, async () => { await api('POST', `/api/requests/${r.id}/dropped-off`, {}); toast('Thanks! IT has been notified.'); refreshBadge(); render(); }));
     };
     // Full read-only view of a request (notes included) with the same actions, so IT can read before approving or declining.
-    const openDetail = (r) => {
+    // IT viewing a request's detail opens it: the first time, the server records opened_at (Submitted -> In review) and from then
+    // on the employee can no longer rescind it. Employees' views never call this, and a failure never blocks reading the request.
+    const openDetail = async (r) => {
+      let justOpened = false;
+      if (isAdmin() && r.lifecycle === 'submitted') {
+        try { const o = await api('POST', `/api/requests/${r.id}/open`, {}); r.opened_at = o.opened_at; r.lifecycle = o.lifecycle; justOpened = true; } catch { /* still show it */ }
+      }
       const row = (k, v) => (v ? `<div class="k">${k}</div><div class="v">${v}</div>` : '');
       const { el, close } = sheet(`<h2>${esc(kindOf(r))}</h2>
-        <div class="row wrap" style="gap:8px;margin:2px 0 12px">${pill(r.status, statusLabel(r))}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
+        <div class="row wrap" style="gap:8px;margin:2px 0 12px">${reqPill(r)}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
           ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
-          ${row('Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
+          ${row(r.type === 'equipment' && r.status === 'completed' && !r.asset_label ? 'Assigned asset' : 'Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
           ${row('Requested', r.catalog_path ? `<strong>${esc(crumbText(r.catalog_path))}</strong>` : '')}
           ${row('Scope', r.type === 'equipment' ? scopeOf(r) : '')}
           ${row('Category', r.catalog_path ? '' : esc(r.category || ''))}
           ${row(r.type === 'return' ? 'Return by' : 'Needed by', r.needed_by ? fmtDate(r.needed_by) : '')}
           ${row('Submitted', esc(fmtStamp(r.created_at)))}
+          ${row('Opened by IT', r.opened_at ? esc(fmtStamp(r.opened_at)) : '')}
           ${row(r.type === 'issue' ? 'Description' : 'Notes', r.message ? `<div style="white-space:pre-wrap">${esc(r.message)}</div>` : '<span class="muted">No notes were added.</span>')}
           ${row('IT note', r.resolution_note ? `<div style="white-space:pre-wrap">${esc(r.resolution_note)}</div>` : '')}
-          ${row('Resolved', r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `${esc(statusLabel(r))} by ${esc(r.resolved_by_name)} · ${esc(fmtStamp(r.resolved_at))}` : '')}
+          ${row(r.status === 'approved' ? 'Decision' : 'Closed', r.resolved_by_name && !['open', 'dropped_off'].includes(r.status) ? `${esc(statusLabel(r))} by ${esc(r.resolved_by_name)} · ${esc(fmtStamp(r.resolved_at))}` : '')}
         </div>
         <div class="row wrap" id="d-actions" style="margin-top:14px;gap:8px">${actionsFor(r)}</div>
         <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
       $$('[data-x]', el).forEach((a) => a.addEventListener('click', () => close()));
       wireActions($('#d-actions', el), close);
+      if (justOpened) render().catch(() => {}); // the list behind the sheet now shows "In review"
     };
     list.innerHTML = `<div class="stack">${rows.map((r) => {
       const isRet = r.type === 'return';
       const btns = actionsFor(r);
       return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
-        <div class="thumb">${icon(requestIcon(r))}</div>
-        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${pill(r.status, statusLabel(r))}</div>
+        <div class="thumb req-thumb">${icon(requestIcon(r))}</div>
+        <div class="grow"><div class="row spread" style="align-items:flex-start"><div class="title">${titleOf(r)}</div>${reqPill(r)}</div>
           <div class="sub">${esc(kindOf(r))} · ${isAdmin() ? `<a href="#/person/${r.user_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}${r.needed_by ? ` · ${isRet ? 'return' : 'needed'} by ${fmtDate(r.needed_by)}` : ''}${r.asset_tag ? ` · <a class="mono" href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}">${esc(r.asset_tag)}</a>` : ''}</div>
           ${scopeOf(r) && r.type === 'equipment' ? `<div class="small" style="margin-top:4px"><span class="scope-tag ${r.asset_id ? 'spec' : ''}">${scopeOf(r)}</span></div>` : ''}
           ${r.message ? `<div class="truncate" style="margin-top:6px">${esc(r.message)}</div>` : ''}
@@ -1496,7 +1532,9 @@ async function viewRequests() {
     $$('[data-open]', list).forEach((b) => b.onclick = () => openDetail(find(b.dataset.open)));
     wireActions(list);
   };
-  $('#seg').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.v; history.replaceState(null, '', '#/requests?tab=' + state.tab); render().catch(fail); };
+  const keepUrl = () => history.replaceState(null, '', `#/requests?tab=${state.tab}${state.f ? '&state=' + state.f : ''}`);
+  $('#seg').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.v; state.f = ''; keepUrl(); render().catch(fail); };
+  if ($('#st')) $('#st').onchange = (e) => { state.f = e.target.value; keepUrl(); render().catch(fail); };
   render();
 }
 function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
