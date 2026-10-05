@@ -2475,9 +2475,10 @@ async function viewCatalog() {
       ${r.search_keywords ? `<div class="small" style="margin:6px 0"><span class="muted">Search keywords</span> ${esc(r.search_keywords)}</div>` : ''}
       <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.direct_asset_count} asset${r.direct_asset_count === 1 ? '' : 's'} filed directly here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
       <div class="stack">
-        <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add an entry below “${esc(r.name)}”</button>
+        <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add catalog item under “${esc(r.name)}”</button>
+        <p class="small muted" style="margin:-4px 0 4px">Creates a category, brand, model, or other grouping — not a physical asset.</p>
         <button type="button" class="btn lg block" data-act="rename">${icon('edit')} Rename</button>
-        <button type="button" class="btn lg block" data-act="keywords">${icon('search')} Search keywords</button>
+        <button type="button" class="btn lg block" data-act="keywords">${icon('search')} ${r.search_keywords ? 'Edit' : 'Add'} search keywords</button>
         <button type="button" class="btn lg block" data-act="move">${icon('out')} Move to a different parent</button>
         ${r.archived_at ? `<button type="button" class="btn lg block" data-act="restore">${icon('in')} Restore</button>` : `<button type="button" class="btn lg block" data-act="archive">${icon('archive')} Archive</button>`}
         ${inUse ? `<p class="small muted" style="margin:0">It can't be deleted while it has entries below it, assets, or requests. Archive it instead.</p>` : `<button type="button" class="btn lg block danger" data-act="delete">${icon('trash')} Delete (nothing uses it)</button>`}
