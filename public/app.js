@@ -623,7 +623,7 @@ async function viewAssets() {
     : null; // employees have no status filters: Browse is simply the equipment they can get (their own is under My equipment)
   main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${calendarLink()}` : ''}</div>
     <div class="stack">
-      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, tag, serial, person…' : 'Search name, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
+      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, brand, category, tag, serial, person…' : 'Search name, brand, category, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
       ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
       <select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
@@ -690,9 +690,9 @@ async function viewBrowse() {
   };
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1><span id="headact"></span></div>
     <div class="stack">
-      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search name, tag, serial…" value="${esc(st.q)}" enterkeyhint="search"></div>
+      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search camera, laptop, brand, model, tag…" value="${esc(st.q)}" enterkeyhint="search"></div>
         <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
-      <p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>
+      <p class="small muted" style="margin:0">Shared equipment. Something checked out or reserved right now is still listed: open it to see when it is free.</p>
       <div id="bn"></div>
       <div class="card" id="results" hidden></div>
     </div>
@@ -717,11 +717,17 @@ async function viewBrowse() {
     for (const r of kids) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count) }));
     bn.innerHTML = `${chain.length ? cgTop(chain, { allLabel: 'All equipment' }) : ''}${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : ''}`;
   };
+  // Discoverable is not the same as available: a shared item that is checked out or reserved today is listed with its state, and opens its CALENDAR
+  // (the asset page itself is only for what is available now) where the employee can see when it is free, reserve future days or join a waitlist.
   const rowHtml = (a) => {
     const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-    return `<li><a class="item" href="#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id })}">${thumbHtml(a.thumb, a.category)}
+    const out = a.avail_state && a.avail_state !== 'available';
+    const href = out ? calUrl({ asset: a.id, from: calendarSource() }) : `#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id })}`;
+    const state = !out ? statusPill(a) : a.avail_state === 'reserved' ? pill('reserved', 'Reserved') : pill('checked_out', 'Checked out');
+    const when = out ? (a.expected_back ? ` · back ${fmtDate(a.expected_back)}` : a.avail_state === 'reserved' ? ' · see when it is free' : '') : (a.location ? ' · ' + esc(a.location) : '');
+    return `<li><a class="item" href="${href}">${thumbHtml(a.thumb, a.category)}
       <div class="grow"><div class="title truncate">${esc(a.name)}</div>
-      <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${a.location ? ' · ' + esc(a.location) : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+      <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${when}</div></div>${state}${icon('chev', 'chev')}</a></li>`;
   };
   const load = async () => {
     const box = $('#results'); const mine = ++st.token;
@@ -737,7 +743,7 @@ async function viewBrowse() {
       if (mine !== st.token) return;
       box.innerHTML = `<div class="card-head"><span class="muted small">${esc(label)} · ${list.length} asset${list.length === 1 ? '' : 's'}</span></div>${list.length
         ? `<ul class="list">${list.map(rowHtml).join('')}</ul>`
-        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search.' : 'Nothing is available right now.'}</p><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`}`;
+        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search. Try a broader word such as “camera” or “laptop”, or send IT a request.' : 'No shared equipment is listed here yet.'}</p><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`}`;
       $('#reqfoot').hidden = !list.length; // an empty list carries its own request button; the footer one would just repeat it
       const eb = $('[data-reqit]', box); if (eb) eb.onclick = () => requestEquipmentSheet();
     } catch (e) { if (mine === st.token) fail(e); }
@@ -1242,7 +1248,7 @@ async function requestFromCatalogSheet({ category, forUser } = {}) {
     if (st.itemsFor === r.id && st.items) return paintItems();
     const mine = ++loadToken; st.items = null; st.itemsFor = r.id;
     let list;
-    try { list = (await api('GET', `/api/assets?catalog_node=${r.id}${isAdmin() ? '&status=available' : ''}`)).slice(0, 60); } catch { list = []; }
+    try { list = (await api('GET', `/api/assets?catalog_node=${r.id}&status=available&available=1`)).slice(0, 60); } catch { list = []; }
     if (mine !== loadToken) return;
     st.items = list; paintItems();
   };
@@ -1322,9 +1328,9 @@ async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) 
     <div class="picker-list" id="ap-list"><div class="spinner"></div></div>
     <div class="sheet-actions"><button class="btn" data-close>Cancel</button></div>`);
   const load = async (q = '') => {
-    const u = new URLSearchParams({ status: 'available' }); if (q) u.set('q', q); else if (catalogNode) u.set('catalog_node', catalogNode); else if (filterCategory) u.set('category', filterCategory);
+    const u = new URLSearchParams({ status: 'available', available: '1' }); if (q) u.set('q', q); else if (catalogNode) u.set('catalog_node', catalogNode); else if (filterCategory) u.set('category', filterCategory);
     let rows = await api('GET', '/api/assets?' + u).catch(() => []); // the requested catalog entry may have been archived since
-    if (!rows.length && (filterCategory || catalogNode) && !q) rows = await api('GET', '/api/assets?status=available');
+    if (!rows.length && (filterCategory || catalogNode) && !q) rows = await api('GET', '/api/assets?status=available&available=1');
     $('#ap-list', el).innerHTML = rows.length ? rows.map((a) => `<button data-id="${a.id}">${thumbHtml(a.thumb, a.category)}<span class="grow"><strong>${esc(a.name)}</strong><br><span class="small muted"><span class="mono">${esc(a.tag)}</span> · ${esc(a.category)}${a.license_seats > 1 ? ` · ${a.license_seats - a.seats_used} seats free` : ''}</span></span></button>`).join('') : '<div class="empty small">No available assets match.</div>';
   };
   load();
@@ -2348,7 +2354,7 @@ async function viewSettings() {
 // "All in <name>" (browse-only: every non-archived asset in the branch, no management). Without it the page lists what is
 // filed directly in the category.
 async function viewCatalog() {
-  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0 };
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: '', found: null, searchToken: 0 };
   // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
   // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
   // Opened from Settings ("Manage the equipment catalog") the route carries `from=#/settings` (the same URL-backed `from` the calendar uses), and every
@@ -2362,6 +2368,7 @@ async function viewCatalog() {
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
+      <div class="search">${icon('search')}<input id="cq" type="search" placeholder="Search categories, brands, models, keywords…" enterkeyhint="search" autocomplete="off"></div>
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
       <div id="ct"><div class="spinner"></div></div>
     </div>`;
@@ -2374,7 +2381,26 @@ async function viewCatalog() {
     return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
+  // Search (admin): while there is text in the box the card grid steps aside for a list of matching entries, each with its full path; empty = the grid, unchanged.
+  const renderFound = () => {
+    const f = st.found;
+    $('#pagetitle').textContent = 'Equipment catalog'; $('#backslot').innerHTML = ''; $('#headact').innerHTML = '';
+    $('#ct').innerHTML = f === null ? '<div class="spinner"></div>' : f.results.length
+      ? `<p class="small muted" style="margin:0 0 8px">${f.total} match${f.total === 1 ? '' : 'es'}${f.total > f.results.length ? ` · showing the first ${f.results.length}, so add a word to narrow it` : ''}</p>
+        <div class="card"><ul class="list">${f.results.map((r) => `<li><a class="item" href="${hashFor(r.id)}" data-found="${r.id}"><div class="grow" style="min-width:0"><div class="title">${esc(r.name)}${r.archived ? ' <span class="pill plain">Archived</span>' : ''}</div>
+          <div class="sub" style="overflow-wrap:anywhere">${esc(crumbText(r.path))}</div>
+          <div class="sub">${r.asset_count ? `${r.asset_count} asset${r.asset_count === 1 ? '' : 's'}` : 'No assets'}${r.search_keywords ? ` · keywords: ${esc(r.search_keywords)}` : ''}${r.via_keyword ? ' · matched by keyword' : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>`
+      : `<div class="empty">${icon('tag')}<p>No catalog entry matches that. Try a broader word, a brand or a model.</p></div>`;
+  };
+  const runSearch = async () => {
+    const mine = ++st.searchToken; const q = st.search;
+    if (!q) { st.found = null; render(); return; }
+    st.found = null; renderFound();
+    try { const r = await api('GET', '/api/catalog/search?q=' + encodeURIComponent(q)); if (mine !== st.searchToken) return; st.found = r; } catch (e) { if (mine !== st.searchToken) return; st.found = { total: 0, results: [] }; fail(e); }
+    renderFound();
+  };
   const render = () => {
+    if (st.search) return renderFound();
     const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
     const inAll = !!n && st.all && ch.length > 0; // a category with nothing below it has no wider branch to show
     const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
@@ -2446,10 +2472,12 @@ async function viewCatalog() {
     const inUse = r.child_count > 0 || r.direct_asset_count > 0 || r.request_count > 0;
     const { el, close } = sheet(`<h2>${esc(r.name)}</h2>
       <div class="ct-path small"><span class="muted">Full path</span><div><strong>${esc(crumbText(r.path))}</strong></div>${r.live ? '' : '<div class="muted">Not visible to employees.</div>'}</div>
+      ${r.search_keywords ? `<div class="small" style="margin:6px 0"><span class="muted">Search keywords</span> ${esc(r.search_keywords)}</div>` : ''}
       <div class="muted small" style="margin:6px 0 12px">${r.child_count} below it · ${r.direct_asset_count} asset${r.direct_asset_count === 1 ? '' : 's'} filed directly here · ${r.request_count} request${r.request_count === 1 ? '' : 's'} mention it</div>
       <div class="stack">
         <button type="button" class="btn lg block" data-act="add" ${r.live ? '' : 'disabled'}>${icon('plus')} Add an entry below “${esc(r.name)}”</button>
         <button type="button" class="btn lg block" data-act="rename">${icon('edit')} Rename</button>
+        <button type="button" class="btn lg block" data-act="keywords">${icon('search')} Search keywords</button>
         <button type="button" class="btn lg block" data-act="move">${icon('out')} Move to a different parent</button>
         ${r.archived_at ? `<button type="button" class="btn lg block" data-act="restore">${icon('in')} Restore</button>` : `<button type="button" class="btn lg block" data-act="archive">${icon('archive')} Archive</button>`}
         ${inUse ? `<p class="small muted" style="margin:0">It can't be deleted while it has entries below it, assets, or requests. Archive it instead.</p>` : `<button type="button" class="btn lg block danger" data-act="delete">${icon('trash')} Delete (nothing uses it)</button>`}
@@ -2457,6 +2485,13 @@ async function viewCatalog() {
       <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
     const act = {
       add: () => { close(); addBelow(r); },
+      keywords: () => {
+        close();
+        const { el: k, close: closeK } = sheet(`<h2>Search keywords</h2><p class="muted small" style="margin-top:0">${esc(crumbText(r.path))}. Extra words that should find this entry and everything filed below it, separated by commas, for example <em>camera, photography, video</em>. They only help search; they are not shown to employees.</p>
+          <form class="form-grid" id="f"><label class="field"><span>Keywords</span><textarea name="kw" rows="3" maxlength="600" placeholder="camera, photography, video">${esc(r.search_keywords || '')}</textarea></label>
+          <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Save</button></div></form>`);
+        $('#f', k).onsubmit = (e) => { e.preventDefault(); busy($('#go', k), async () => { await api('PUT', `/api/catalog/${r.id}`, { search_keywords: new FormData(e.target).get('kw') }); closeK(); await reload(); toast('Search keywords saved'); }); };
+      },
       rename: () => { close(); nameSheet({ title: 'Rename', text: 'Past requests keep the wording they were made with.', label: 'Name', value: r.name, okLabel: 'Save', onOk: async (name) => { await api('PUT', `/api/catalog/${r.id}`, { name }); await reload(); toast('Renamed'); } }); },
       move: () => {
         close();
@@ -2476,8 +2511,11 @@ async function viewCatalog() {
   };
   const addRoot = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
   $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
+  $('#cq').oninput = debounce((e) => { st.search = e.target.value.trim(); runSearch(); });
   // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
   $('#ct').onclick = (e) => {
+    const hit = e.target.closest('[data-found]');
+    if (hit) { e.preventDefault(); st.search = ''; st.found = null; $('#cq').value = ''; go(hashFor(Number(hit.dataset.found))); window.scrollTo(0, 0); return; } // a search result opens that entry (the grid comes back)
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
     const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
     const to = (h) => { go(h); window.scrollTo(0, 0); };

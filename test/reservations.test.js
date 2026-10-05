@@ -683,7 +683,11 @@ test('an employee can reserve FUTURE days of an item someone else has out right 
   assert.equal(after.body.status, 'confirmed');
   // ... but the existing contract stands: the asset page / record of an item someone else holds is still not theirs
   assert.equal((await me.client.get(`/api/assets/${camera.id}`)).status, 404);
-  assert.ok(!(await me.client.get('/api/assets')).body.some((a) => a.id === camera.id), 'and Browse still lists only what is available now');
+  const listed = (await me.client.get('/api/assets')).body.find((a) => a.id === camera.id);
+  assert.ok(listed, 'Browse still lists it (out temporarily is availability, not discoverability) ...');
+  assert.equal(listed.avail_state, 'checked_out');
+  assert.equal(listed.expected_back, plus(5));
+  assert.ok(!(await me.client.get('/api/assets?available=1')).body.some((a) => a.id === camera.id), '... but "available now" does not');
   // the pool rules still apply: not in the shared pool / repair / archived are refused (not found)
   const off = await newAsset('Bridge off', { requestable: false });
   await checkout(off, holder, { assignment_type: 'checkout', due_date: plus(5) });

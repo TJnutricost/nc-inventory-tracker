@@ -161,9 +161,12 @@ test('the seeded catalog supports the employee request flow: deep path, one avai
       await emp.post('/api/login', { email: 'emerson.ellis@example.com', password: DEV_PASSWORD });
       const a7 = (await emp.get('/api/catalog')).find((n) => n.path === 'Camera > Sony > A7 IV');
       assert.equal(a7.available_count, 1, 'two bodies exist, one is on loan');
-      const offered = await emp.get(`/api/assets?catalog_node=${a7.id}`);
+      const offered = await emp.get(`/api/assets?catalog_node=${a7.id}&available=1`);
       assert.equal(offered.length, 1);
       assert.ok(!('holder_names' in offered[0]), 'no holder information for an employee');
+      const browse = await emp.get(`/api/assets?catalog_node=${a7.id}`);
+      assert.equal(browse.length, 2, 'Browse also lists the one on loan (discoverable; its state says it is out)');
+      assert.deepEqual(browse.map((x) => x.avail_state).sort(), ['available', 'checked_out']);
       const camera = (await emp.get('/api/catalog')).find((n) => n.path === 'Camera');
       assert.ok((await emp.get(`/api/assets?catalog_node=${camera.id}`)).length >= 4, 'the whole subtree is browsable');
     } finally {

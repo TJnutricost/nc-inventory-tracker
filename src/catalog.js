@@ -15,6 +15,25 @@ const SEP = ' > ';
 const normName = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
 const nameKey = (v) => normName(v).toLowerCase();
 
+// Search keywords: free aliases an admin adds to an entry ("camera, photography, video"). Accepts text or a list, separated by commas, semicolons or
+// new lines; a leading "#" is ignored (nobody has to type one). Stored as lower-case, de-duplicated "a, b, c"; NULL when empty.
+const MAX_KEYWORD = 40; const MAX_KEYWORDS = 30;
+function normKeywords(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const list = Array.isArray(raw) ? raw : typeof raw === 'string' ? raw.split(/[,;\n]+/) : null;
+  if (!list) throw httpError(400, 'Search keywords must be text');
+  const out = [];
+  for (const item of list) {
+    if (typeof item !== 'string') throw httpError(400, 'Search keywords must be text');
+    const k = item.trim().replace(/^#+\s*/, '').replace(/\s+/g, ' ').toLowerCase();
+    if (!k) continue;
+    if (k.length > MAX_KEYWORD) throw httpError(400, `Each search keyword can be at most ${MAX_KEYWORD} characters`);
+    if (!out.includes(k)) out.push(k);
+  }
+  if (out.length > MAX_KEYWORDS) throw httpError(400, `Use at most ${MAX_KEYWORDS} search keywords`);
+  return out.length ? out.join(', ') : null;
+}
+
 // The table is tiny (tens to low hundreds of rows), so the whole tree is read at once and kept until a catalog write
 // invalidates it. Keyed on the db handle so a second database in the same process (tests, seeding) never sees stale data.
 let cached = null;
@@ -22,7 +41,7 @@ function invalidate() { cached = null; }
 function loadIndex(db) {
   if (cached && cached.db === db) return cached.index;
   const nodes = new Map(); const children = new Map();
-  for (const n of db.prepare('SELECT id, parent_id, name, archived_at FROM catalog_nodes ORDER BY name_key, id').all()) {
+  for (const n of db.prepare('SELECT id, parent_id, name, archived_at, search_keywords FROM catalog_nodes ORDER BY name_key, id').all()) {
     nodes.set(n.id, n);
     const k = n.parent_id ?? 0;
     if (!children.has(k)) children.set(k, []);
@@ -68,6 +87,21 @@ function subtreeIds(db, id) {
   while (stack.length) { const n = stack.pop(); out.push(n); for (const c of children.get(n) || []) stack.push(c); }
   return out;
 }
+// Everything a search can match for an entry, lower-case: the names of the entry and ALL its ancestors (its path) plus the search keywords of the entry and
+// all its ancestors. A physical asset inherits this through the entry it is filed under.
+function searchText(db, id) {
+  const { nodes } = loadIndex(db);
+  const parts = []; const seen = new Set();
+  for (let n = nodes.get(id); n && !seen.has(n.id); n = nodes.get(n.parent_id)) { seen.add(n.id); parts.push(n.name, n.search_keywords || ''); }
+  return parts.join(' ').toLowerCase();
+}
+// Entries whose searchText contains `token` (already lower-case). Employees only ever search live entries.
+function searchNodeIds(db, token, { liveOnly = false } = {}) {
+  const { nodes } = loadIndex(db);
+  const out = [];
+  for (const id of nodes.keys()) if ((!liveOnly || isLive(db, id)) && searchText(db, id).includes(token)) out.push(id);
+  return out;
+}
 const depthOf = (db, id) => (pathNames(db, id) || []).length;
 
 function getNode(db, id) {
@@ -99,21 +133,23 @@ function parseParent(raw) {
   return n;
 }
 
-function createNode(db, { name, parentId = null }) {
+function createNode(db, { name, parentId = null, searchKeywords }) {
   const clean = cleanName(name);
+  const keywords = normKeywords(searchKeywords);
   if (parentId !== null) {
     getNode(db, parentId);
     if (!isLive(db, parentId)) throw httpError(400, 'That parent is archived. Restore it first.');
   }
   assertSiblingFree(db, parentId, clean);
-  const id = db.prepare('INSERT INTO catalog_nodes (parent_id, name, name_key) VALUES (?, ?, ?)').run(parentId, clean, nameKey(clean)).lastInsertRowid;
+  const id = db.prepare('INSERT INTO catalog_nodes (parent_id, name, name_key, search_keywords) VALUES (?, ?, ?, ?)').run(parentId, clean, nameKey(clean), keywords).lastInsertRowid;
   invalidate();
   return Number(id);
 }
 
 // Renames and/or moves a node. Returns { oldPath, newPath } so the caller can keep assets.category in step for roots.
-function updateNode(db, id, { name, parentId }) {
+function updateNode(db, id, { name, parentId, searchKeywords }) {
   const node = getNode(db, id);
+  const keywords = searchKeywords === undefined ? node.search_keywords : normKeywords(searchKeywords);
   const newName = name === undefined ? node.name : cleanName(name);
   const newParent = parentId === undefined ? node.parent_id : parentId;
   if (newParent !== node.parent_id) {
@@ -125,7 +161,7 @@ function updateNode(db, id, { name, parentId }) {
   }
   assertSiblingFree(db, newParent, newName, id);
   const oldPath = pathText(db, id);
-  db.prepare("UPDATE catalog_nodes SET name = ?, name_key = ?, parent_id = ?, updated_at = datetime('now') WHERE id = ?").run(newName, nameKey(newName), newParent, id);
+  db.prepare("UPDATE catalog_nodes SET name = ?, name_key = ?, parent_id = ?, search_keywords = ?, updated_at = datetime('now') WHERE id = ?").run(newName, nameKey(newName), newParent, keywords, id);
   invalidate();
   return { oldPath, newPath: pathText(db, id), wasRoot: node.parent_id === null, isRoot: newParent === null };
 }
@@ -178,6 +214,6 @@ function findLiveByPath(db, text) {
 }
 
 module.exports = {
-  SEP, MAX_NAME, normName, nameKey, invalidate, loadIndex, pathNames, pathText, rootOf, isLive, subtreeIds, depthOf, getNode,
+  SEP, MAX_NAME, normName, nameKey, normKeywords, searchText, searchNodeIds, invalidate, loadIndex, pathNames, pathText, rootOf, isLive, subtreeIds, depthOf, getNode,
   parseParent, createNode, updateNode, archiveNode, restoreNode, usage, deleteNode, findLiveByPath,
 };

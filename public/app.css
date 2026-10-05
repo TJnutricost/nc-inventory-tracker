@@ -186,6 +186,7 @@ a.item:active, a.item:hover { background: var(--surface-2); }
 .pill.lost, .pill.overdue, .pill.denied { background: var(--bad-soft); color: var(--bad); border-color: transparent; }
 .pill.in_review { background: var(--info-soft); color: var(--info); border-color: transparent; }
 .pill.open, .pill.dropped_off { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+.pill.reserved { background: var(--resv-soft); color: var(--resv); border-color: transparent; }
 .pill.approved, .pill.completed { background: var(--ok-soft); color: var(--ok); border-color: transparent; }
 .pill.plain::before { display: none; }
 
