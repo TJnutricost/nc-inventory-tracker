@@ -436,10 +436,17 @@ app.get('/api/assets', auth, (req, res) => {
   const { q, category } = req.query;
   const status = isAdmin ? req.query.status : undefined;
   const employeeFilter = isAdmin ? (req.query.employee_id || req.query.user_id) : undefined; // user_id kept as a compatibility alias
-  if (q) {
-    where.push(`(a.tag LIKE ? OR a.name LIKE ? OR a.serial LIKE ? OR a.brand LIKE ? OR a.model LIKE ? OR a.location LIKE ?${isAdmin
-      ? ' OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ?)' : ''})`);
-    const like = `%${q}%`; params.push(like, like, like, like, like, like); if (isAdmin) params.push(like);
+  if (typeof q === 'string' && q.trim()) {
+    // Normalized, case-insensitive, token-wise: every word must match SOMEWHERE (substring) in any of the asset's tag, name, serial, brand, model, category,
+    // location, or its catalog entry (the whole path and the search keywords of the entry and all its ancestors); IT also matches a holder's name.
+    for (const token of q.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8)) {
+      const ids = catalog.searchNodeIds(db, token, { liveOnly: !isAdmin });
+      const cols = ['a.tag', 'a.name', 'a.serial', 'a.brand', 'a.model', 'a.location', 'a.category'];
+      const like = `%${token.replace(/[\\%_]/g, '\\$&')}%`;
+      where.push(`(${cols.map((c) => `${c} LIKE ? ESCAPE '\\'`).join(' OR ')}${ids.length ? ` OR a.catalog_node_id IN (${ids.join(',')})` : ''}${isAdmin
+        ? " OR EXISTS (SELECT 1 FROM assignments s JOIN employees u ON u.id = s.employee_id WHERE s.asset_id = a.id AND s.returned_at IS NULL AND u.name LIKE ? ESCAPE '\\')" : ''})`);
+      params.push(...cols.map(() => like)); if (isAdmin) params.push(like);
+    }
   }
   if (category) { where.push('a.category = ?'); params.push(category); }
   if (req.query.catalog_node !== undefined && req.query.catalog_node !== '') {
@@ -456,11 +463,18 @@ app.get('/api/assets', auth, (req, res) => {
   if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
   if (employeeFilter) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)'); params.push(Number(employeeFilter)); }
   if (!isAdmin) {
-    where.push(`a.status = 'available' AND a.available_to_request = 1 AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)`);
+    // The shared pool, for DISCOVERY: what IT made available_to_request, not archived, not already mine. Being checked out (temporarily), reserved or held does NOT
+    // hide an asset (that is availability, shown on the row; the employee can open its calendar, reserve future days or join a waitlist). Equipment with a
+    // permanent holder is still not part of the pool. `?available=1` narrows to what can be had right now (the "request this specific item" pickers).
+    where.push(`a.available_to_request = 1 AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)
+      AND (a.status = 'available' OR (a.status = 'checked_out' AND NOT EXISTS (SELECT 1 FROM assignments p WHERE p.asset_id = a.id AND p.returned_at IS NULL AND p.assignment_type = 'permanent')))`);
     params.push(req.user.employee_id);
+    if (req.query.available === '1') where.push(`a.status = 'available'`);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
-  res.json(db.prepare(sql).all(...params).map((a) => sanitizeAsset(a, req.user)));
+  const rows = db.prepare(sql).all(...params);
+  const states = isAdmin ? null : availabilityLib.todayStates(db, rows); // employees: what each listed asset is today (see src/availability.js)
+  res.json(rows.map((a) => { const out = sanitizeAsset(a, req.user); if (states) { const t = states.get(a.id); out.avail_state = t.state; out.expected_back = t.expected_back; } return out; }));
 });
 
 // Availability calendar (read-only): ?node=<catalog id> | ?asset=<asset id> | neither (everything), &month=YYYY-MM. The scope rules,
@@ -880,6 +894,28 @@ app.post('/api/waitlist/:id/cancel', auth, (req, res) => {
 // One tree, one API, for every screen (phone drill-down, desktop columns, the asset form, the admin editor).
 // Employees get only LIVE entries (not archived, no archived ancestor) and no admin-only counts; admins can ask for everything.
 const heldByMe = (user) => (user.employee_id ? 'AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)' : '');
+// IT's catalog search: entries whose name, whole path or search keywords (own + ancestors') contain every word typed, shallowest first, each with its full path so
+// an ambiguous match (an "EOS R5" under Camera > Canon) makes sense. Archived entries are included and flagged. Admin only.
+app.get('/api/catalog/search', admin, (req, res) => {
+  const tokens = String(req.query.q || '').toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+  if (!tokens.length) return res.json({ total: 0, results: [] });
+  const { nodes } = catalog.loadIndex(db);
+  const direct = new Map(db.prepare('SELECT catalog_node_id id, COUNT(*) c FROM assets WHERE archived_at IS NULL AND catalog_node_id IS NOT NULL GROUP BY catalog_node_id').all().map((r) => [r.id, r.c]));
+  const hits = [];
+  for (const n of nodes.values()) {
+    const text = catalog.searchText(db, n.id);
+    if (!tokens.every((t) => text.includes(t))) continue;
+    const own = `${n.name} ${n.search_keywords || ''}`.toLowerCase();
+    hits.push({ n, depth: catalog.depthOf(db, n.id), own: tokens.every((t) => own.includes(t)) });
+  }
+  hits.sort((a, b) => (b.own - a.own) || a.depth - b.depth || a.n.name.localeCompare(b.n.name));
+  const results = hits.slice(0, 60).map(({ n }) => ({
+    id: n.id, name: n.name, path: catalog.pathText(db, n.id), search_keywords: n.search_keywords || '', archived: !!n.archived_at || !catalog.isLive(db, n.id),
+    asset_count: catalog.subtreeIds(db, n.id).reduce((t, i) => t + (direct.get(i) || 0), 0),
+    via_keyword: !!n.search_keywords && tokens.some((t) => n.search_keywords.includes(t) && !n.name.toLowerCase().includes(t)),
+  }));
+  res.json({ total: hits.length, results });
+});
 app.get('/api/catalog', auth, (req, res) => {
   const isAdmin = req.user.role === 'admin';
   const withArchived = isAdmin && req.query.include_archived === '1';
@@ -905,7 +941,7 @@ app.get('/api/catalog', auth, (req, res) => {
     const kids = (children.get(n.id) || []).filter((i) => isAdmin ? (withArchived || catalog.isLive(db, i)) : catalog.isLive(db, i));
     out.push({
       id: n.id, parent_id: n.parent_id, name: n.name, path: catalog.pathText(db, n.id), child_count: kids.length, available_count: availableIn(n.id),
-      ...(isAdmin ? { archived_at: n.archived_at, live, asset_count: catalog.subtreeIds(db, n.id).reduce((t, i) => t + (adminCounts.active.get(i) || 0), 0), direct_asset_count: adminCounts.assets.get(n.id) || 0, request_count: adminCounts.requests.get(n.id) || 0 } : {}),
+      ...(isAdmin ? { search_keywords: n.search_keywords || '', archived_at: n.archived_at, live, asset_count: catalog.subtreeIds(db, n.id).reduce((t, i) => t + (adminCounts.active.get(i) || 0), 0), direct_asset_count: adminCounts.assets.get(n.id) || 0, request_count: adminCounts.requests.get(n.id) || 0 } : {}),
     });
   }
   res.json(out);
@@ -916,15 +952,15 @@ function syncAssetCategories(nodeId) {
   const upd = db.prepare('UPDATE assets SET category = ? WHERE catalog_node_id = ? AND category <> ?');
   for (const id of catalog.subtreeIds(db, nodeId)) { const root = catalog.rootOf(db, id).name; upd.run(root, id, root); }
 }
-const catalogOut = (id) => { const n = catalog.getNode(db, id); return { id: n.id, parent_id: n.parent_id, name: n.name, path: catalog.pathText(db, n.id), archived_at: n.archived_at, live: catalog.isLive(db, n.id), ...catalog.usage(db, n.id) }; };
+const catalogOut = (id) => { const n = catalog.getNode(db, id); return { id: n.id, parent_id: n.parent_id, name: n.name, search_keywords: n.search_keywords || '', path: catalog.pathText(db, n.id), archived_at: n.archived_at, live: catalog.isLive(db, n.id), ...catalog.usage(db, n.id) }; };
 app.post('/api/catalog', admin, (req, res) => {
   const parentId = catalog.parseParent(req.body.parent_id);
-  const id = db.transaction(() => catalog.createNode(db, { name: req.body.name, parentId: parentId ?? null })).immediate();
+  const id = db.transaction(() => catalog.createNode(db, { name: req.body.name, parentId: parentId ?? null, searchKeywords: req.body.search_keywords })).immediate();
   res.json(catalogOut(id));
 });
 app.put('/api/catalog/:id', admin, (req, res) => {
   const id = Number(req.params.id);
-  db.transaction(() => { catalog.updateNode(db, id, { name: req.body.name, parentId: catalog.parseParent(req.body.parent_id) }); syncAssetCategories(id); }).immediate();
+  db.transaction(() => { catalog.updateNode(db, id, { name: req.body.name, parentId: catalog.parseParent(req.body.parent_id), searchKeywords: req.body.search_keywords }); syncAssetCategories(id); }).immediate();
   res.json(catalogOut(id));
 });
 app.post('/api/catalog/:id/archive', admin, (req, res) => { const id = Number(req.params.id); catalog.archiveNode(db, id); res.json(catalogOut(id)); });

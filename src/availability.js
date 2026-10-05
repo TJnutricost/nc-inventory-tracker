@@ -282,4 +282,26 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
   };
 }
 
-module.exports = { availability, monthWindow, periodsFor, dayState, resolveScope, checkoutEvents, reserveEligibility };
+// What each asset is TODAY, for the employee Browse list (src/server.js GET /api/assets). Discoverability is not availability: a shared asset
+// that is checked out, reserved today or held for someone is still listed; this says which, so the row can read "Checked out · back Oct 12".
+//   state: 'available' | 'reserved' (a confirmed reservation or an active waitlist hold covers today) | 'checked_out' | 'unavailable'
+//   expected_back: the earliest return date among temporary checkouts, when there is one (never who has it)
+function todayStates(db, assets) {
+  const out = new Map();
+  if (!assets.length) return out;
+  const today = db.prepare("SELECT date('now') d").get().d;
+  const ids = assets.map((a) => a.id); const marks = ids.map(() => '?').join(',');
+  const open = new Map(ids.map((i) => [i, []])); const block = new Map(ids.map((i) => [i, []]));
+  for (const r of db.prepare(`SELECT asset_id, assignment_type, due_date, checked_out_at FROM assignments WHERE returned_at IS NULL AND asset_id IN (${marks})`).all(...ids)) open.get(r.asset_id).push(r);
+  for (const r of db.prepare(`SELECT asset_id, start_date, end_date FROM reservations WHERE status = 'confirmed' AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
+  for (const r of db.prepare(`SELECT asset_id, start_date, end_date FROM waitlist_entries WHERE status = 'held' AND hold_expires_at > datetime('now') AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
+  for (const a of assets) {
+    const s = dayState(a, open.get(a.id), today, today, block.get(a.id));
+    const state = s === 'available' ? 'available' : s === 'reserved' ? 'reserved' : s === 'occupied' ? 'checked_out' : 'unavailable';
+    const dues = open.get(a.id).filter((h) => h.assignment_type === 'checkout' && h.due_date && h.due_date >= today).map((h) => h.due_date).sort();
+    out.set(a.id, { state, expected_back: state === 'checked_out' && dues.length ? dues[0] : null });
+  }
+  return out;
+}
+
+module.exports = { todayStates, availability, monthWindow, periodsFor, dayState, resolveScope, checkoutEvents, reserveEligibility };

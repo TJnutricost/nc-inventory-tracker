@@ -586,7 +586,7 @@ test('migration 15 gives existing waitlist rows a FIFO key in their creation ord
   const ins = () => d.prepare("INSERT INTO waitlist_entries (asset_id, employee_id, start_date, end_date) VALUES (?, ?, '2030-01-10', '2030-01-12')").run(asset, emp).lastInsertRowid;
   const a = ins(); const b = ins();
   d.prepare("INSERT INTO outbox (to_addr, subject, body, status) VALUES ('x@y.com', 's', 'b', 'logged')").run();
-  assert.deepEqual(runMigrations(d, all), [15]);
+  assert.deepEqual(runMigrations(d, all.filter((m) => m.id <= 15)), [15]);
   const rows = d.prepare('SELECT id, queue_seq, queued_at, created_at FROM waitlist_entries ORDER BY queue_seq').all();
   assert.deepEqual(rows.map((r) => r.id), [a, b]);
   assert.deepEqual(rows.map((r) => r.queue_seq), [a, b]);

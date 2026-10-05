@@ -218,7 +218,7 @@ test('a returned asset stops being visible to its former holder unless it is ava
   assert.equal((await me.client.get(`/api/assets/${a.id}`)).status, 404, 'now someone else\'s');
 });
 
-test('Browse (the asset list) is "equipment I can get" for employees: available only, never their own or anyone else\'s', async () => {
+test('Browse (the asset list) is the shared pool for employees: discoverable even when temporarily out, never their own, never permanently held, never anyone\'s identity', async () => {
   const me = await makeLogin('List Viewer');
   const other = await makeLogin('List Co-holder');
   const seats = await newAsset('Shared license', { category: 'Software License', license_seats: 3 });
@@ -228,17 +228,27 @@ test('Browse (the asset list) is "equipment I can get" for employees: available 
   const mineAsset = await newAsset('List mine');
   const repair = await newAsset('List repair');
   const gone = await newAsset('List archived');
+  const permanent = await newAsset('List permanent');
   await give(seats, other);
   await give(myseat, me);
-  await give(theirs, other);
+  await give(theirs, other, { assignment_type: 'checkout', due_date: new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10) });
   await give(mineAsset, me);
+  await give(permanent, other, { assignment_type: 'permanent' });
   await admin.put(`/api/assets/${repair.id}`, { status: 'maintenance' });
   await admin.post(`/api/assets/${gone.id}/archive`, {});
   const rows = (await me.client.get('/api/assets')).body;
   const names = rows.map((r) => r.name);
   assert.ok(names.includes('List free') && names.includes('Shared license'), 'available equipment, including a multi-seat license with a free seat');
-  for (const hidden of ['List theirs', 'List mine', 'My seat license', 'List repair', 'List archived']) assert.equal(names.includes(hidden), false, `${hidden} is not in Browse`);
-  assert.ok(rows.every((r) => r.status === 'available'));
+  for (const hidden of ['List mine', 'My seat license', 'List repair', 'List archived', 'List permanent']) assert.equal(names.includes(hidden), false, `${hidden} is not in Browse`);
+  // temporarily out is availability, not discoverability: listed, and said to be checked out (with when it is due back, never who has it)
+  const out = rows.find((r) => r.name === 'List theirs');
+  assert.ok(out, 'a temporarily checked-out shared asset is still listed');
+  assert.equal(out.avail_state, 'checked_out');
+  assert.match(out.expected_back, /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(rows.find((r) => r.name === 'List free').avail_state, 'available');
+  assert.ok(rows.every((r) => ['available', 'checked_out'].includes(r.status)));
+  // `available=1` is the old "what can I get right now" view (used by the request-this-item pickers)
+  assert.ok((await me.client.get('/api/assets?available=1')).body.every((r) => r.status === 'available' && r.name !== 'List theirs'));
   assert.doesNotMatch(JSON.stringify(rows), /List Co-holder/, 'no other employee\'s name anywhere in the list');
   assert.ok(rows.every((r) => !('holder_names' in r) && !('purchase_cost' in r) && !('vendor' in r) && !('notes' in r)));
   assert.equal(rows.find((r) => r.name === 'Shared license').due_date, null);

@@ -807,5 +807,15 @@ module.exports = [
         ALTER TABLE outbox ADD COLUMN delivered_to TEXT;`);
     },
   },
+  {
+    // Search + discoverability refinement.
+    //   catalog_nodes.search_keywords   admin-managed aliases for a catalog entry, stored normalized as "camera, photography, video" (lower-case,
+    //                                   comma-separated, de-duplicated; NULL = none). Kept on the CATALOG entry (not on every physical asset): an asset
+    //                                   inherits the keywords of the entry it is filed under and of every ancestor, so tagging "Camera" once makes
+    //                                   every camera beneath it findable by "photography". Only a search aid: it grants nothing and shows nowhere else.
+    id: 16,
+    name: 'catalog_nodes.search_keywords',
+    up: (db) => { db.exec('ALTER TABLE catalog_nodes ADD COLUMN search_keywords TEXT;'); },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;
