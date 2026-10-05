@@ -26,7 +26,7 @@ test('an employee can ask for equipment, and admin approving it assigns and chec
   assert.equal(req.status, 200);
   assert.equal(req.body.status, 'open');
 
-  const asset = (await admin.post('/api/assets', { name: 'Dell Monitor', tag: 'NC-REQ1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Dell Monitor', tag: 'NC-REQ1' })).body;
   const approve = await admin.post(`/api/requests/${req.body.id}/approve`, { asset_id: asset.id });
   assert.equal(approve.status, 200);
 
@@ -70,7 +70,7 @@ test('an employee can cancel their own open request but not someone else\'s', as
 
 test('return-request → drop-off → check-in lifecycle', async () => {
   const emp = await makeEmployee('Holder Hank', 'hank@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'Loaner Laptop', tag: 'NC-RET-FLOW' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Loaner Laptop', tag: 'NC-RET-FLOW' })).body;
   await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: emp.id });
 
   const rr = await admin.post(`/api/assets/${asset.id}/request-return`, { message: 'Please bring it back' });
@@ -99,7 +99,7 @@ test('return-request → drop-off → check-in lifecycle', async () => {
 
 test('a user cannot send a return-notice for an asset that is not theirs', async () => {
   const emp = await makeEmployee('Not Mine', 'notmine@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'Untouched Asset', tag: 'NC-NOTMINE' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Untouched Asset', tag: 'NC-NOTMINE' })).body;
   const r = await emp.client.post(`/api/assets/${asset.id}/return-notice`, {});
   assert.equal(r.status, 400);
 });

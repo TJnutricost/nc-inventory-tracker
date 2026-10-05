@@ -13,6 +13,7 @@ const assignments = require('./assignments');
 const requestRules = require('./requests');
 const availabilityLib = require('./availability');
 const catalog = require('./catalog');
+const reservationRules = require('./reservations');
 const { cleanSerial, serialKey } = require('./serial');
 
 const app = express();
@@ -198,13 +199,14 @@ function sanitizeAsset(a, user) {
 }
 
 // Employee asset-visibility contract, enforced on the server (hiding navigation is not access control). An admin sees
-// everything. An employee may see an asset only if they currently hold it, or it is available to them: not archived and
-// status 'available' (a multi-seat license with a free seat stays 'available'; a full one is 'checked_out'). Anything else
-// — archived, in repair, lost, retired, held by someone else — is indistinguishable from "not found".
+// everything. An employee may see an asset only if they currently hold it (that follows the ASSIGNMENT: a desk computer assigned to
+// them stays theirs whatever its flags), or it is in the shared pool and available to them: IT made it `available_to_request`, it is
+// not archived, and its status is 'available' (a multi-seat license with a free seat stays 'available'; a full one is 'checked_out').
+// Anything else — not shared, archived, in repair, lost, retired, held by someone else — is indistinguishable from "not found".
 function canViewAsset(user, a) {
   if (!a) return false;
   if (user.role === 'admin') return true;
-  if (!a.archived_at && a.status === 'available') return true;
+  if (!a.archived_at && a.status === 'available' && a.available_to_request) return true;
   return !!user.employee_id && !!db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
 }
 // The asset for this route, or a 404 when it doesn't exist OR this user may not see it.
@@ -426,7 +428,7 @@ const ASSET_LIST_SQL = `
 app.get('/api/assets', auth, (req, res) => {
   const where = []; const params = [];
   const isAdmin = req.user.role === 'admin';
-  // Employees get ONE meaning for this list — "equipment I can get": available, not archived, and not something I already
+  // Employees get ONE meaning for this list — "equipment I can get": in the shared pool (available_to_request), available, not archived, and not something I already
   // hold (that is My Equipment). So the status / holder filters below are admin tools and are ignored for employees; they
   // would otherwise be a way to probe other people's assignments (e.g. searching a multi-seat license by holder name).
   const { q, category } = req.query;
@@ -452,7 +454,7 @@ app.get('/api/assets', auth, (req, res) => {
   if (!(req.user.role === 'admin' && req.query.include_archived === '1')) where.push('a.archived_at IS NULL');
   if (employeeFilter) { where.push('EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)'); params.push(Number(employeeFilter)); }
   if (!isAdmin) {
-    where.push(`a.status = 'available' AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)`);
+    where.push(`a.status = 'available' AND a.available_to_request = 1 AND NOT EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.employee_id = ? AND s.returned_at IS NULL)`);
     params.push(req.user.employee_id);
   }
   const sql = `${ASSET_LIST_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY a.updated_at DESC LIMIT 1000`;
@@ -469,6 +471,7 @@ app.get('/api/availability', auth, (req, res) => {
     nodeId: q.node === undefined || q.node === '' ? undefined : q.node,
     assetId: q.asset === undefined || q.asset === '' ? undefined : q.asset,
     month: typeof q.month === 'string' ? q.month : undefined,
+    canReserve: req.user.role !== 'admin' && !!req.user.employee_id, // (not tied to self-checkout permission) only the single-asset view acts on it
   }));
 });
 
@@ -498,6 +501,10 @@ app.get('/api/assets/:id', auth, (req, res) => {
     WHERE r.asset_id = ? AND r.status IN ('open','dropped_off') ORDER BY r.created_at DESC`).all(a.id)
     .filter((r) => isAdmin || r.user_id === req.user.employee_id);
   const requestsOut = requestRules.withLifecycle(db, requests);
+  // Live reservations on this asset: IT sees all of them; an employee only their own (who else reserved it is not theirs to read here).
+  const reservations = db.prepare(`${RESERVATION_SQL} WHERE r.asset_id = ? AND r.status IN ('pending','confirmed') AND r.end_date >= date('now') ORDER BY r.start_date, r.id`).all(a.id)
+    .filter((r) => isAdmin || r.employee_id === req.user.employee_id).map((r) => reservationOut(r, req.user));
+  const reserve = { allowed: !isAdmin && !!req.user.employee_id && reservationRules.reserveEligibility(a).ok, requires_approval: !!a.reservation_requires_approval };
   const activity = isAdmin ? db.prepare(`
     SELECT ac.*, ${ACTOR_NAME} FROM activity ac ${ACTOR_JOIN}
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
@@ -510,10 +517,21 @@ app.get('/api/assets/:id', auth, (req, res) => {
     is_mine: isMine,
     photos,
     requests: requestsOut,
+    reservations,
+    reserve,
     activity,
   });
 });
 
+// The two per-asset reservation settings (admin only). Strictly boolean-ish so a typo can't silently turn something on.
+const FLAGS = ['available_to_request', 'reservation_requires_approval'];
+function flagValue(body, key, current) {
+  const v = body[key];
+  if (v === undefined) return current ? 1 : 0;
+  if (v === true || v === 1 || v === '1' || v === 'true') return 1;
+  if (v === false || v === 0 || v === '0' || v === 'false') return 0;
+  throw httpError(400, `${key === 'available_to_request' ? 'Available to request' : 'Require approval for reservations'} must be on or off`);
+}
 const ASSET_FIELDS = ['name', 'category', 'brand', 'model', 'serial', 'condition', 'location', 'purchase_date', 'purchase_cost', 'vendor',
   'warranty_expires', 'license_key', 'license_seats', 'license_expires', 'notes'];
 function assetValues(body) {
@@ -549,7 +567,8 @@ app.post('/api/assets', admin, (req, res) => {
   const nodeId = resolveAssetNode(req.body, null) ?? catalog.findLiveByPath(db, v.category);
   if (nodeId !== null) v.category = catalog.rootOf(db, nodeId).name; // the category text always follows the catalog root
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
-  const cols = ['tag', 'status', 'serial_normalized', 'catalog_node_id', ...ASSET_FIELDS];
+  const flags = FLAGS.map((f) => flagValue(req.body, f, 0)); // both default OFF
+  const cols = ['tag', 'status', 'serial_normalized', 'catalog_node_id', ...FLAGS, ...ASSET_FIELDS];
   // Number claim + insert are one transaction: a failed create rolls the counter back, and two creates can't share a tag.
   const create = db.transaction(() => {
     const tag = clean(req.body.tag) || allocateTag();
@@ -557,7 +576,7 @@ app.post('/api/assets', admin, (req, res) => {
     if (used) throw httpError(400, used.archived_at ? `Tag ${tag} belongs to an archived asset and can't be reused` : `Tag ${tag} is already used by another asset`);
     assertSerialFree(v.serial);
     const info = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`)
-      .run(tag, status, serialKey(v.serial), nodeId, ...ASSET_FIELDS.map((f) => v[f]));
+      .run(tag, status, serialKey(v.serial), nodeId, ...flags, ...ASSET_FIELDS.map((f) => v[f]));
     log(info.lastInsertRowid, req.user.account_id, 'created', `${tag} · ${v.name}`);
     return info.lastInsertRowid;
   });
@@ -575,6 +594,7 @@ app.put('/api/assets/:id', admin, (req, res) => {
   const sentTag = clean(req.body.tag);
   if (sentTag && sentTag.toLowerCase() !== a.tag.toLowerCase()) throw httpError(400, "An asset's tag can't be changed once it's created.");
   const tag = a.tag;
+  const flags = FLAGS.map((f) => flagValue(req.body, f, a[f]));
   let status = a.status;
   if (req.body.status && req.body.status !== a.status) {
     const open = openAssignments(a.id).length;
@@ -589,11 +609,12 @@ app.put('/api/assets/:id', admin, (req, res) => {
   }
   db.transaction(() => {
     assertSerialFree(v.serial, a.id);
-    db.prepare(`UPDATE assets SET tag = ?, status = ?, serial_normalized = ?, catalog_node_id = ?, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
-      .run(tag, status, serialKey(v.serial), nodeId, ...ASSET_FIELDS.map((f) => v[f]), a.id);
+    db.prepare(`UPDATE assets SET tag = ?, status = ?, serial_normalized = ?, catalog_node_id = ?, ${FLAGS.map((f) => `${f} = ?`).join(', ')}, ${ASSET_FIELDS.map((f) => `${f} = ?`).join(', ')}, updated_at = datetime('now') WHERE id = ?`)
+      .run(tag, status, serialKey(v.serial), nodeId, ...flags, ...ASSET_FIELDS.map((f) => v[f]), a.id);
   }).immediate();
   const changed = ['tag', 'status', ...ASSET_FIELDS].filter((f) => String((f === 'tag' ? tag : f === 'status' ? status : v[f]) ?? '') !== String(a[f] ?? ''));
   if ((a.catalog_node_id ?? null) !== nodeId) changed.push('catalog');
+  FLAGS.forEach((f, i) => { if (flags[i] !== (a[f] ? 1 : 0)) changed.push(f === 'available_to_request' ? `available to request ${flags[i] ? 'on' : 'off'}` : `reservation approval ${flags[i] ? 'required' : 'not required'}`); });
   if (changed.length) log(a.id, req.user.account_id, 'edited', changed.filter((f) => f !== 'license_key').join(', ') || 'license key');
   refreshStatus(a.id);
   res.json(getAsset(a.id));
@@ -747,6 +768,76 @@ app.use('/uploads', (req, res, next) => {
   next();
 }, express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
 
+// ---------- reservations (Phase 2, slice 7) ----------
+// Rules, transactions and conflict checks live in src/reservations.js. These routes only identify the caller and shape the answers.
+// Employees reserve through the same visibility contract as everything else (an asset they can't see is a 404), and only manage their own.
+const RESERVATION_SQL = `
+  SELECT r.*, a.name AS asset_name, a.tag AS asset_tag, e.name AS employee_name, e.department AS employee_department,
+    COALESCE(dn.name, da.login_email) AS decided_by_name
+  FROM reservations r JOIN assets a ON a.id = r.asset_id JOIN employees e ON e.id = r.employee_id
+  LEFT JOIN accounts da ON da.id = r.decided_by LEFT JOIN employees dn ON dn.id = da.employee_id`;
+// `phase`, `can_cancel` and `can_shorten` are the server's own answers, so the UI never has to guess a rule.
+function reservationOut(r, user) {
+  const t = reservationRules.todayOf(db);
+  const mine = !!user.employee_id && r.employee_id === user.employee_id;
+  const live = reservationRules.LIVE.includes(r.status) && r.end_date >= t;
+  const lastDay = r.start_date > t ? r.start_date : t; // the earliest end date a shortening may pick
+  return {
+    ...r, phase: reservationRules.phaseOf(r, t), mine,
+    can_cancel: live && (user.role === 'admin' || mine),
+    can_shorten: mine && r.status === 'confirmed' && r.end_date >= t && r.end_date > lastDay,
+    shorten_min: lastDay,
+    ...(user.role === 'admin' ? {} : { employee_department: undefined, decided_by_name: undefined }),
+  };
+}
+const reservationById = (id, user) => reservationOut(db.prepare(`${RESERVATION_SQL} WHERE r.id = ?`).get(id), user);
+app.get('/api/reservations', auth, (req, res) => {
+  const isAdmin = req.user.role === 'admin';
+  const st = req.query.status;
+  if (st !== undefined && !['open', 'closed'].includes(st)) throw httpError(400, 'Status must be open or closed');
+  const t = reservationRules.todayOf(db);
+  const where = []; const params = [];
+  if (!isAdmin) { where.push('r.employee_id = ?'); params.push(req.user.employee_id); }
+  const open = "(r.status = 'pending' OR (r.status = 'confirmed' AND r.end_date >= ?))";
+  if (st === 'open') { where.push(open); params.push(t); } else if (st === 'closed') { where.push(`NOT ${open}`); params.push(t); }
+  const order = st === 'closed' ? 'r.end_date DESC, r.id DESC' : `CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.start_date, r.id`;
+  res.json(db.prepare(`${RESERVATION_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT 300`).all(...params).map((r) => reservationOut(r, req.user)));
+});
+// An employee may reserve anything the availability calendar shows them: in the shared pool (available_to_request), not archived, 'available' OR
+// currently 'checked_out' (reserving is how you claim FUTURE dates of an item someone has out now). This does not open the asset page or its
+// record to them (canViewAsset / GET /api/assets/:id are unchanged); reservations.create still enforces every eligibility rule.
+function reservableAsset(req, id) {
+  const a = getAsset(Number(id));
+  if (!a) throw httpError(404, 'Asset not found');
+  if (req.user.role === 'admin' || canViewAsset(req.user, a)) return a;
+  if (a.available_to_request && !a.archived_at && ['available', 'checked_out'].includes(a.status)) return a;
+  throw httpError(404, 'Asset not found');
+}
+app.post('/api/assets/:id/reservations', auth, (req, res) => {
+  const asset = reservableAsset(req, req.params.id);
+  const r = reservationRules.create(db, {
+    assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id,
+    start: req.body.start_date, end: req.body.end_date,
+  });
+  res.json(reservationById(r.id, req.user));
+});
+app.post('/api/reservations/:id/approve', admin, (req, res) => {
+  const r = reservationRules.approve(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
+  res.json(reservationById(r.id, req.user));
+});
+app.post('/api/reservations/:id/decline', admin, (req, res) => {
+  const r = reservationRules.decline(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
+  res.json(reservationById(r.id, req.user));
+});
+app.post('/api/reservations/:id/cancel', auth, (req, res) => {
+  const r = reservationRules.cancel(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: req.user.role === 'admin' });
+  res.json(reservationById(r.id, req.user));
+});
+app.post('/api/reservations/:id/shorten', auth, (req, res) => {
+  const r = reservationRules.shorten(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date });
+  res.json(reservationById(r.id, req.user));
+});
+
 // ---------- equipment catalog ----------
 // One tree, one API, for every screen (phone drill-down, desktop columns, the asset form, the admin editor).
 // Employees get only LIVE entries (not archived, no archived ancestor) and no admin-only counts; admins can ask for everything.
@@ -755,10 +846,10 @@ app.get('/api/catalog', auth, (req, res) => {
   const isAdmin = req.user.role === 'admin';
   const withArchived = isAdmin && req.query.include_archived === '1';
   const { nodes, children } = catalog.loadIndex(db);
-  // Per entry: assets filed directly under it that this viewer could get right now (the Browse contract: available, not
-  // archived, not already theirs), then rolled up through the ancestors so a broad entry shows its whole subtree's count.
+  // Per entry: assets filed directly under it that this viewer could get right now (the Browse contract: available, in the shared
+  // pool for employees, not archived, not already theirs), then rolled up through the ancestors so a broad entry shows its whole subtree's count.
   const direct = new Map();
-  for (const r of db.prepare(`SELECT a.catalog_node_id id, COUNT(*) c FROM assets a WHERE a.archived_at IS NULL AND a.status = 'available' AND a.catalog_node_id IS NOT NULL ${heldByMe(req.user)} GROUP BY a.catalog_node_id`)
+  for (const r of db.prepare(`SELECT a.catalog_node_id id, COUNT(*) c FROM assets a WHERE a.archived_at IS NULL AND a.status = 'available' AND a.catalog_node_id IS NOT NULL ${isAdmin ? '' : 'AND a.available_to_request = 1'} ${heldByMe(req.user)} GROUP BY a.catalog_node_id`)
     .all(...(req.user.employee_id ? [req.user.employee_id] : []))) direct.set(r.id, r.c);
   const availableIn = (id) => catalog.subtreeIds(db, id).filter((i) => isAdmin || catalog.isLive(db, i)).reduce((n, i) => n + (direct.get(i) || 0), 0);
   // Admin counts. asset_count = non-archived assets filed at the entry OR anywhere below it — exactly what

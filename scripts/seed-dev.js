@@ -313,6 +313,12 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     const defs = buildAssetDefs();
     if (defs.length !== EXPECTED_ASSET_COUNT) throw new Error(`Asset def count drifted: ${defs.length} vs ${EXPECTED_ASSET_COUNT}`);
     const special = applySpecialCases(defs);
+    // Slice 7: new assets default to NOT employee-requestable, so the seed opts in explicitly. Everything except the desk computers is in the
+    // shared pool (the desktops show an asset IT keeps out of Browse); the Sony FX3 also needs IT approval to reserve, the other cameras don't.
+    for (const def of defs) {
+      def.available_to_request = def.category !== 'Desktop';
+      def.reservation_requires_approval = def.category === 'Camera' && def.model === 'FX3';
+    }
 
     const idByDef = new Map();
     for (const def of defs) {

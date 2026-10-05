@@ -21,7 +21,7 @@ let seq = 0;
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;
 const node = async (name, parent_id = null) => { const r = await admin.post('/api/catalog', { name, parent_id }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 const rootId = (name) => db.prepare('SELECT id FROM catalog_nodes WHERE parent_id IS NULL AND name_key = ?').get(name.toLowerCase()).id;
-const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { name, tag: `CT-${++seq}`, ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
+const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { available_to_request: true, name, tag: `CT-${++seq}`, ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 async function makeLogin(name) {
   const created = await admin.post('/api/users', { name, email: `ct${++seq}@nutricost.com`, invite: true });
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
@@ -208,8 +208,8 @@ test('an asset created without a catalog entry is filed under its category\'s ro
 
 test('assets can only be linked to real, active nodes; an employee cannot assign', async () => {
   const t = await cameraTree('av');
-  assert.equal((await admin.post('/api/assets', { name: 'X', catalog_node_id: 999999 })).status, 400);
-  assert.equal((await admin.post('/api/assets', { name: 'X', catalog_node_id: 'abc' })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'X', catalog_node_id: 999999 })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'X', catalog_node_id: 'abc' })).status, 400);
   const asset = await newAsset('Linked Camera', { catalog_node_id: t.a7.id });
   await admin.post(`/api/catalog/${t.canon.id}/archive`, {});
   assert.equal((await admin.put(`/api/assets/${asset.id}`, { catalog_node_id: t.r5.id })).status, 400, 'archived entries cannot be newly assigned');

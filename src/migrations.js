@@ -696,5 +696,51 @@ module.exports = [
            OR (status = 'cancelled' AND NOT EXISTS (SELECT 1 FROM accounts a WHERE a.id = requests.resolved_by AND a.employee_id = requests.user_id))`);
     },
   },
+  {
+    // Phase 2 Slice 7 (Asset Reservations V1).
+    //   assets.available_to_request           0/1, DEFAULT 0. Whether the asset is part of the employee-facing SHARED pool: employees can
+    //                                         find it (Browse, search, catalog counts, calendar) and check it out, request or reserve it.
+    //                                         It never hides equipment from the employee it is currently assigned to (that follows the
+    //                                         assignment). EXISTING assets get 0 on purpose: nothing is silently exposed to employees;
+    //                                         IT opts each asset in.
+    //   assets.reservation_requires_approval  0/1, DEFAULT 0, per asset. 0 = a valid reservation confirms immediately; 1 = pending IT approval.
+    //   reservations                          one row per reservation of ONE physical asset. start_date/end_date are calendar dates (YYYY-MM-DD),
+    //                                         INCLUSIVE at both ends. status: pending (waiting for IT) | confirmed | declined | cancelled.
+    //                                         requires_approval is a SNAPSHOT of the asset's setting at submission, so a later toggle can't
+    //                                         change what a row means. Only confirmed rows block availability; a pending row blocks nothing.
+    //                                         Overlap between confirmed rows is prevented by the application inside one BEGIN IMMEDIATE
+    //                                         transaction (SQLite has no range-exclusion constraint); the CHECKs below keep each row coherent.
+    id: 13,
+    name: 'assets: available_to_request + reservation_requires_approval; reservations table',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE assets ADD COLUMN available_to_request INTEGER NOT NULL DEFAULT 0 CHECK (available_to_request IN (0, 1));
+        ALTER TABLE assets ADD COLUMN reservation_requires_approval INTEGER NOT NULL DEFAULT 0 CHECK (reservation_requires_approval IN (0, 1));
+        CREATE TABLE reservations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+          start_date TEXT NOT NULL CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+          end_date TEXT NOT NULL CHECK (end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+          status TEXT NOT NULL CHECK (status IN ('pending','confirmed','declined','cancelled')),
+          requires_approval INTEGER NOT NULL CHECK (requires_approval IN (0, 1)),
+          created_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          decided_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          decided_at TEXT,
+          decision_note TEXT,
+          cancelled_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          cancelled_at TEXT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (end_date >= start_date),
+          CHECK (status <> 'pending' OR (requires_approval = 1 AND decided_at IS NULL)),
+          CHECK (status <> 'declined' OR (requires_approval = 1 AND decided_at IS NOT NULL)),
+          CHECK (status <> 'confirmed' OR requires_approval = 0 OR decided_at IS NOT NULL),
+          CHECK (status <> 'cancelled' OR cancelled_at IS NOT NULL)
+        );
+        CREATE INDEX idx_reservations_asset ON reservations(asset_id, status, start_date);
+        CREATE INDEX idx_reservations_employee ON reservations(employee_id, status);`);
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;
