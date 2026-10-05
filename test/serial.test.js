@@ -16,7 +16,7 @@ before(async () => {
 after(() => stopServer(server));
 
 let seq = 0;
-const create = (serial, extra = {}) => admin.post('/api/assets', { name: `Serial asset ${++seq}`, tag: `SER-${seq}`, serial, ...extra });
+const create = (serial, extra = {}) => admin.post('/api/assets', { available_to_request: true, name: `Serial asset ${++seq}`, tag: `SER-${seq}`, serial, ...extra });
 const row = (id) => db.prepare('SELECT serial, serial_normalized FROM assets WHERE id = ?').get(id);
 const lookup = async (code) => (await admin.get(`/api/assets/lookup/${encodeURIComponent(code)}`)).body;
 
@@ -66,7 +66,7 @@ test('create: a rejected duplicate does not burn a generated tag number', async 
   await create('COUNTER-1');
   const counter = () => db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n;
   const n = counter();
-  const r = await admin.post('/api/assets', { name: 'No tag given', serial: 'counter-1' }); // tag omitted -> generated
+  const r = await admin.post('/api/assets', { available_to_request: true, name: 'No tag given', serial: 'counter-1' }); // tag omitted -> generated
   assert.equal(r.status, 400);
   assert.equal(counter(), n, 'the tag counter is rolled back with the failed create');
 });

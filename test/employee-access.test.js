@@ -18,7 +18,7 @@ after(() => stopServer(server));
 
 let seq = 0;
 const isoPlus = (days) => new Date(Date.now() + days * 864e5).toISOString().slice(0, 10);
-const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { name, tag: `EA-${++seq}`, category: 'Laptop', ...extra })).body;
+const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, tag: `EA-${++seq}`, category: 'Laptop', ...extra })).body;
 async function makeLogin(name, extra = {}) {
   const created = await admin.post('/api/users', { name, email: `ea${++seq}@nutricost.com`, invite: true, ...extra });
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);

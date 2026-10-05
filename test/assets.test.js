@@ -37,17 +37,17 @@ test('creating a user with a duplicate email is rejected', async () => {
 
 test('non-admins cannot create assets', async () => {
   const emp = await makeEmployee('Nora NoAccess', 'nora@nutricost.com');
-  const r = await emp.client.post('/api/assets', { name: 'Sneaky Laptop' });
+  const r = await emp.client.post('/api/assets', { available_to_request: true, name: 'Sneaky Laptop' });
   assert.equal(r.status, 403);
 });
 
 test('creating an asset without a name is rejected', async () => {
-  const r = await admin.post('/api/assets', { category: 'Laptop' });
+  const r = await admin.post('/api/assets', { available_to_request: true, category: 'Laptop' });
   assert.equal(r.status, 400);
 });
 
 test('creating an asset auto-assigns the next tag and defaults', async () => {
-  const r = await admin.post('/api/assets', { name: 'Dell Latitude 7440', category: 'Laptop' });
+  const r = await admin.post('/api/assets', { available_to_request: true, name: 'Dell Latitude 7440', category: 'Laptop' });
   assert.equal(r.status, 200);
   assert.match(r.body.tag, /^NC-\d{5}$/);
   assert.equal(r.body.status, 'available');
@@ -55,15 +55,15 @@ test('creating an asset auto-assigns the next tag and defaults', async () => {
 });
 
 test('duplicate tags are rejected', async () => {
-  const first = await admin.post('/api/assets', { name: 'Monitor A', tag: 'NC-DUP1' });
+  const first = await admin.post('/api/assets', { available_to_request: true, name: 'Monitor A', tag: 'NC-DUP1' });
   assert.equal(first.status, 200);
-  const second = await admin.post('/api/assets', { name: 'Monitor B', tag: 'NC-DUP1' });
+  const second = await admin.post('/api/assets', { available_to_request: true, name: 'Monitor B', tag: 'NC-DUP1' });
   assert.equal(second.status, 400);
 });
 
 test('checkout, capacity, and check-in lifecycle', async () => {
   const emp = await makeEmployee('Val Vasquez', 'val@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'ThinkPad X1', tag: 'NC-LIFE1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'ThinkPad X1', tag: 'NC-LIFE1' })).body;
 
   // Admin checks it out to Val
   const co = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: emp.id, assignment_type: 'checkout', due_date: '2099-01-01' });
@@ -92,7 +92,7 @@ test('checkout, capacity, and check-in lifecycle', async () => {
 
 test('a retired asset cannot be checked out', async () => {
   const emp = await makeEmployee('Rae Retired', 'rae@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'Old Printer', tag: 'NC-RET1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Old Printer', tag: 'NC-RET1' })).body;
   await admin.put(`/api/assets/${asset.id}`, { status: 'retired' });
   const r = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: emp.id });
   assert.equal(r.status, 400);
@@ -100,7 +100,7 @@ test('a retired asset cannot be checked out', async () => {
 
 test('self check-out works by default and is blocked once the admin disables it for that employee', async () => {
   const emp = await makeEmployee('Sam Selfserve', 'sam@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'Spare Headset', tag: 'NC-SELF1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Spare Headset', tag: 'NC-SELF1' })).body;
 
   const ok = await emp.client.post(`/api/assets/${asset.id}/checkout`, { due_date: '2099-01-01' });
   assert.equal(ok.status, 200);
@@ -116,7 +116,7 @@ test('license-seat assets allow concurrent holders up to capacity', async () => 
   const a = await makeEmployee('Lic One', 'lic1@nutricost.com');
   const b = await makeEmployee('Lic Two', 'lic2@nutricost.com');
   const c = await makeEmployee('Lic Three', 'lic3@nutricost.com');
-  const license = (await admin.post('/api/assets', { name: 'Adobe CC', category: 'Software License', tag: 'NC-LIC1', license_seats: 2 })).body;
+  const license = (await admin.post('/api/assets', { available_to_request: true, name: 'Adobe CC', category: 'Software License', tag: 'NC-LIC1', license_seats: 2 })).body;
 
   assert.equal((await admin.post(`/api/assets/${license.id}/checkout`, { user_id: a.id })).status, 200);
   assert.equal((await admin.post(`/api/assets/${license.id}/checkout`, { user_id: b.id })).status, 200);
@@ -129,7 +129,7 @@ test('license-seat assets allow concurrent holders up to capacity', async () => 
 });
 
 test('the legacy DELETE route archives instead of removing the asset', async () => {
-  const asset = (await admin.post('/api/assets', { name: 'To Delete', tag: 'NC-DEL1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'To Delete', tag: 'NC-DEL1' })).body;
   const del = await admin.del(`/api/assets/${asset.id}`);
   assert.equal(del.status, 200);
   const still = await admin.get(`/api/assets/${asset.id}`);
@@ -138,7 +138,7 @@ test('the legacy DELETE route archives instead of removing the asset', async () 
 });
 
 test('a small uploaded photo is resized and gets a thumbnail', async () => {
-  const asset = (await admin.post('/api/assets', { name: 'Photo Subject', tag: 'NC-PHOTO1' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Photo Subject', tag: 'NC-PHOTO1' })).body;
   // 1x1 transparent PNG
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
   const boundary = '----ncTestBoundary';

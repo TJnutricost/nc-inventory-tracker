@@ -25,7 +25,7 @@ const isoPlus = (days) => new Date(Date.now() + days * 864e5).toISOString().slic
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;
 const row = (id) => db.prepare('SELECT * FROM requests WHERE id = ?').get(id);
 const node = async (name, parent_id = null) => { const r = await admin.post('/api/catalog', { name, parent_id }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
-const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { name, tag: `AR-${++seq}`, category: 'Laptop', ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
+const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { available_to_request: true, name, tag: `AR-${++seq}`, category: 'Laptop', ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 async function makeLogin(name) {
   const created = await admin.post('/api/users', { name, email: `ar${++seq}@nutricost.com`, invite: true });
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);

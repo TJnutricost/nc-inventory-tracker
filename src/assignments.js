@@ -4,6 +4,11 @@
 // its category): 'permanent' = ongoing equipment (ADMIN ONLY; no due date/time), 'checkout' = temporary custody that
 // REQUIRES a return date (due_date) and may carry a return time (due_time, HH:MM). Enforced here, on the server.
 //
+// Slice 7: a checkout may not bypass someone else's CONFIRMED reservation. A temporary checkout runs from today to its return date and a
+// permanent assignment has no end, so either is refused (409) when another employee holds a confirmed reservation inside that span. The
+// person who owns the reservation is not blocked by their own. A non-admin (self-checkout) may only take an asset IT made
+// `available_to_request`. IT can still assign any asset, after cancelling a conflicting reservation.
+//
 // Capacity: physical assets hold 1 (license_seats is NULL/≤1); multi-seat assets/licenses use license_seats. The
 // count check and the INSERT run inside one BEGIN IMMEDIATE transaction, so two writers (even in separate
 // processes) can't both pass the check. The partial unique index idx_assign_active_unique additionally stops the
@@ -55,6 +60,13 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
     if (!employee) throw httpError(400, 'Choose who this is going to');
     if (asset.archived_at) throw httpError(400, 'This asset is archived and can\'t be checked out.');
     if (['retired', 'lost', 'maintenance', 'disposed'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
+    if (!actorIsAdmin && !asset.available_to_request) throw httpError(404, 'Asset not found'); // not in the employee-facing pool
+    const reserved = db.prepare(`SELECT start_date, end_date FROM reservations WHERE asset_id = ? AND status = 'confirmed' AND employee_id <> ?
+      AND end_date >= date('now') AND (? IS NULL OR start_date <= ?) ORDER BY start_date LIMIT 1`).get(assetId, employeeId, due, due);
+    if (reserved) {
+      const range = reserved.start_date === reserved.end_date ? reserved.start_date : `${reserved.start_date} to ${reserved.end_date}`;
+      throw httpError(409, `This item is reserved ${range}, so it can't be checked out through then.${actorIsAdmin ? ' Cancel the reservation first, or choose an earlier return date.' : ' Choose an earlier return date, or reserve it for later.'}`);
+    }
 
     const open = db.prepare(`SELECT s.employee_id, e.name FROM assignments s JOIN employees e ON e.id = s.employee_id
       WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);

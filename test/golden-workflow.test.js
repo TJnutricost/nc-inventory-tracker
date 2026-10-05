@@ -30,7 +30,7 @@ test('golden path: lookup -> assign -> re-lookup -> check in -> re-lookup, with 
   const employee = await makeEmployee('Golden Pathson', 'golden.pathson@nutricost.com');
 
   // STEP 1 — initial state
-  const created = await admin.post('/api/assets', { name: 'Golden Path Laptop', category: 'Laptop', tag: TAG });
+  const created = await admin.post('/api/assets', { available_to_request: true, name: 'Golden Path Laptop', category: 'Laptop', tag: TAG });
   assert.equal(created.status, 200);
   const assetId = created.body.id;
   assert.equal(created.body.tag, TAG);
@@ -108,13 +108,13 @@ test('looking up an unknown tag returns found:false', async () => {
 });
 
 test('checking in an asset with no active assignment fails safely', async () => {
-  const created = await admin.post('/api/assets', { name: 'Never Checked Out', category: 'Other' });
+  const created = await admin.post('/api/assets', { available_to_request: true, name: 'Never Checked Out', category: 'Other' });
   const r = await admin.post(`/api/assets/${created.body.id}/checkin`, {});
   assert.equal(r.status, 400);
 });
 
 test('a single-capacity asset cannot be double-assigned', async () => {
-  const created = await admin.post('/api/assets', { name: 'Single Seat Item', category: 'Other' });
+  const created = await admin.post('/api/assets', { available_to_request: true, name: 'Single Seat Item', category: 'Other' });
   const a = await makeEmployee('Alpha Employee', 'alpha.guard@nutricost.com');
   const b = await makeEmployee('Beta Employee', 'beta.guard@nutricost.com');
 

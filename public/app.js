@@ -346,7 +346,8 @@ async function refreshBadge() {
   try {
     const rows = await api('GET', '/api/requests?status=open');
     // For an employee the badge means "IT is waiting on you": a return IT asked for, not one they started themselves.
-    const n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
+    let n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
+    if (isAdmin()) { try { n += (await api('GET', '/api/reservations?status=open')).filter((r) => r.phase === 'pending').length; } catch { /* the badge is best-effort */ } } // reservations waiting for IT
     S.badge = n;
     const tab = $('.tabbar a[data-key=requests]');
     if (tab) { $('.badge-dot', tab)?.remove(); if (n) tab.insertAdjacentHTML('beforeend', `<span class="badge-dot">${n}</span>`); }
@@ -601,7 +602,7 @@ async function viewHome() {
     </div>`;
   wireDropoffs(main());
 }
-const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved' };
+const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved', reserved: 'Reserved', reservation_requested: 'Reservation requested', reservation_approved: 'Reservation approved', reservation_declined: 'Reservation declined', reservation_cancelled: 'Reservation cancelled', reservation_shortened: 'Reservation shortened' };
 function activityList(rows, withAsset, src = '') {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
   return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}${src ? srcQ(src) : ''}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
@@ -673,15 +674,16 @@ async function viewBrowse() {
   try { rows = await getCatalog(); } catch { /* an empty catalog just means search-only browsing */ }
   const byId = new Map(rows.map((r) => [r.id, r]));
   const kidsOf = (pid) => rows.filter((r) => (r.parent_id ?? null) === pid);
-  const st = { q: qs().get('q') || '', path: [], everything: false, token: 0 };
-  // State lives in the URL: #/assets?node=<id> (a category/entry) and #/assets?all=1 (All equipment, only meaningful at the top).
-  const hashFor = (id, all) => '#/assets' + (id ? `?node=${id}` : all ? '?all=1' : '');
+  const st = { q: qs().get('q') || '', path: [], everything: true, token: 0 };
+  // State lives in the URL: #/assets?node=<id> (a category/entry). The Browse root IS "All equipment": it is the default selection and its list is
+  // shown at once (no click needed). An old #/assets?all=1 link is the same thing and is tidied to #/assets.
+  const hashFor = (id) => '#/assets' + (id ? `?node=${id}` : '');
   const fromHash = () => {
     const p = qs(); const id = Number(p.get('node'));
     st.path = [];
     if (byId.has(id)) for (let n = byId.get(id); n; n = byId.get(n.parent_id)) st.path.unshift(n.id);
-    st.everything = !st.path.length && p.get('all') === '1';
-    if (p.get('node') && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry in the URL: back to the top
+    st.everything = !st.path.length; // at the top, All equipment is always the active selection
+    if ((p.get('node') || p.get('all')) && !st.path.length) history.replaceState(null, '', '#/assets'); // unknown / hidden entry, or the old ?all=1: back to the plain root
   };
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1><span id="headact"></span></div>
     <div class="stack">
@@ -691,7 +693,7 @@ async function viewBrowse() {
       <div id="bn"></div>
       <div class="card" id="results" hidden></div>
     </div>
-    <p class="small muted" style="margin-top:12px">Don't see what you need? <a href="#" id="reqlink">Send IT a request</a>.</p>`;
+    <div class="browse-req" id="reqfoot"><span class="small muted">Don't see what you need?</span><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`;
   const cur = () => byId.get(st.path[st.path.length - 1]);
   const availMeta = (n) => (n ? `${n} available` : 'None available');
   const renderNav = () => {
@@ -706,7 +708,7 @@ async function viewBrowse() {
     const c = cur(); const kids = c ? kidsOf(c.id) : kidsOf(null); const leaf = c && !kids.length;
     const chain = st.path.map((id) => byId.get(id));
     const cards = [];
-    if (!c) cards.push(cgCard({ attrs: 'data-everything', name: 'All equipment', meta: 'Everything available', kind: `all${st.everything ? ' on' : ''}`, chev: false }));
+    if (!c) cards.push(cgCard({ attrs: 'data-everything', name: 'All equipment', meta: 'Everything available', kind: 'all on', chev: false })); // the root's default (and only) state: selected
     else if (!leaf) cards.push(cgCard({ attrs: 'data-all', name: `All in ${c.name}`, meta: availMeta(c.available_count), kind: 'all on', chev: false }));
     // Only THIS entry's children. Never the top-level (or sibling) cards again: a leaf shows just its assets; going elsewhere is Back / a breadcrumb.
     for (const r of kids) cards.push(cgCard({ attrs: `data-id="${r.id}"`, name: r.name, meta: availMeta(r.available_count) }));
@@ -714,26 +716,27 @@ async function viewBrowse() {
   };
   const rowHtml = (a) => {
     const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-    return `<li><a class="item" href="#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id, all: !cur() && st.everything })}">${thumbHtml(a.thumb, a.category)}
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id })}">${thumbHtml(a.thumb, a.category)}
       <div class="grow"><div class="title truncate">${esc(a.name)}</div>
       <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${a.location ? ' · ' + esc(a.location) : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
   const load = async () => {
     const box = $('#results'); const mine = ++st.token;
     const c = cur(); const kids = c ? kidsOf(c.id) : [];
-    // What is listed: a search (global), else the selected branch, else — at the top — everything, only if asked for.
+    // What is listed: a search (global), else the selected branch, else — at the top — All equipment (the default).
     const u = new URLSearchParams(); let label = '';
     if (st.q) { u.set('q', st.q); label = 'Search results'; }
     else if (c) { u.set('catalog_node', c.id); label = kids.length ? `All in ${c.name}` : crumbText(c.path); }
-    else if (st.everything) label = 'All equipment';
-    else { box.hidden = true; return; }
+    else label = 'All equipment';
     box.hidden = false; box.innerHTML = '<div class="spinner"></div>';
     try {
       const list = await api('GET', '/api/assets?' + u.toString());
       if (mine !== st.token) return;
       box.innerHTML = `<div class="card-head"><span class="muted small">${esc(label)} · ${list.length} asset${list.length === 1 ? '' : 's'}</span></div>${list.length
         ? `<ul class="list">${list.map(rowHtml).join('')}</ul>`
-        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search.' : 'Nothing is available right now. You can still send IT a request.'}</p></div>`}`;
+        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search.' : 'Nothing is available right now.'}</p><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`}`;
+      $('#reqfoot').hidden = !list.length; // an empty list carries its own request button; the footer one would just repeat it
+      const eb = $('[data-reqit]', box); if (eb) eb.onclick = () => requestEquipmentSheet();
     } catch (e) { if (mine === st.token) fail(e); }
   };
   const go2 = () => { renderNav(); load(); };
@@ -741,7 +744,7 @@ async function viewBrowse() {
   $('#bn').onclick = (e) => {
     const card = e.target.closest('[data-id]'); const crumb = e.target.closest('[data-crumb]');
     let target;
-    if (e.target.closest('[data-everything]')) target = hashFor(null, !st.everything);
+    if (e.target.closest('[data-everything]')) return; // the root already shows All equipment
     else if (e.target.closest('[data-all]')) return; // already showing the whole branch
     else if (card) target = hashFor(Number(card.dataset.id));
     else if (crumb) target = hashFor(Number(crumb.dataset.crumb) > 0 ? Number(crumb.dataset.crumb) : null);
@@ -752,7 +755,7 @@ async function viewBrowse() {
   S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
   $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
-  $('#reqlink').onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
+  $('#reqfoot [data-reqit]').onclick = () => requestEquipmentSheet(); // the same request flow as before (the empty-state button is wired when the list renders)
   fromHash(); go2();
 }
 
@@ -769,6 +772,7 @@ async function viewAsset(id) {
   const myIssues = d.requests.filter((r) => r.type === 'issue' && r.user_id === S.me.id);
   const cover = d.photos.find((p) => p.id === a.cover_photo_id) || d.photos[0];
   const photos = cover ? [cover, ...d.photos.filter((p) => p !== cover)] : [];
+  const resv = d.reservations || []; // live reservations: IT sees all of them, an employee only their own
 
   // ---- action buttons
   let actions = '';
@@ -798,9 +802,12 @@ async function viewAsset(id) {
           ? `<div class="banner info">${icon('check')}<div>You've told IT you dropped this off. It'll come off your list once IT checks it in.</div></div>`
           : `<div class="actions"><button class="btn lg" id="act-ask-return">${icon('send')} Request return</button><button class="btn lg" id="act-return">${icon('in')} I'm returning this</button></div>`) + issueNote + reportBtn;
     } else if (a.status === 'available' && seatsFree > 0) {
-      actions = S.me.can_self_checkout
-        ? `<button class="btn primary lg block" id="act-self">${icon('out')} Check out now</button>`
-        : `<button class="btn primary lg block" id="act-request">${icon('box')} Request this</button>`;
+      const canReserve = !!(d.reserve && d.reserve.allowed);
+      // "Check out now" needs the self-checkout permission (otherwise "Request this"); "Reserve" does not: it needs only the asset's own eligibility.
+      const primary = S.me.can_self_checkout
+        ? `<button class="${canReserve ? '' : 'full '}btn primary lg" id="act-self">${icon('out')} Check out now</button>`
+        : `<button class="${canReserve ? '' : 'full '}btn primary lg" id="act-request">${icon('box')} Request this</button>`;
+      actions = `<div class="actions">${primary}${canReserve ? `<button class="btn lg" id="act-reserve">${icon('calendar')} Reserve</button>` : ''}</div>`;
     } else if (d.held_by_other || a.status !== 'available') {
       actions = `<div class="banner info">${icon('box')}<div class="grow">This item isn't available right now. <a href="#" id="act-similar">Request something similar</a></div></div>`;
     }
@@ -809,7 +816,8 @@ async function viewAsset(id) {
   const kv = [
     ['Catalog', a.catalog_path ? esc(a.catalog_path.split(' > ').join(' › ')) : '', true], ['Category', a.category], ['Brand', a.brand], ['Model', a.model], ['Serial #', a.serial ? `<span class="mono">${esc(a.serial)}</span>` : '', true],
     ['Condition', a.condition], ['Location', a.location], ['Purchased', fmtDate(a.purchase_date)], ['Cost', admin ? money(a.purchase_cost) : ''],
-    ['Vendor', admin ? a.vendor : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
+    ['Vendor', admin ? a.vendor : ''], ['Available to request', admin ? (a.available_to_request ? 'Yes' : 'No — employees can\'t see it') : ''],
+    ['Reservations', admin && a.available_to_request ? (a.reservation_requires_approval ? 'Need IT approval' : 'Confirmed automatically') : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
   main().innerHTML = `<div class="asset-bar"><div class="asset-bar-top">${backLink(backTo.href, backTo.label, backTo.exact)}${calendarLink({ asset: a.id })}</div>
@@ -819,6 +827,7 @@ async function viewAsset(id) {
         ${canPhoto ? `<label class="add-ph">${icon('camera')}<span>Add photo</span><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}</div>`
         : canPhoto ? `<label class="no-photo"><div>${icon('camera')}<strong>Add a photo</strong><div class="small">Snap the device, its label, or any damage</div></div><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}
       ${actions}
+      ${resv.length ? `<div class="card"><div class="card-head"><h2>${admin ? 'Reservations' : 'Your reservations'}</h2><span class="muted small">${resv.length}</span></div><ul class="list">${resv.map((r) => reservationItem(r, { admin, showAsset: false })).join('')}</ul></div>` : ''}
       ${d.holders.length ? `<div class="card"><div class="card-head"><h2>${multi ? 'Assigned to' : d.holders.every((h) => h.assignment_type === 'checkout') ? (admin ? 'Temporarily checked out to' : 'Temporarily checked out to you') : (admin ? 'Assigned to' : 'Assigned to you')}</h2></div><ul class="list">${d.holders.map((h) => `<li><div class="item">
           <div class="avatar">${esc(initials(h.user_name))}</div>
           <div class="grow">${admin ? `<a href="#/person/${h.employee_id}" class="title">${esc(h.user_name)}</a>` : `<div class="title">${esc(h.user_name)}</div>`}
@@ -853,6 +862,8 @@ async function viewAsset(id) {
   on('#act-ret', () => requestReturnSheet(a, d.holders, reload));
   $$('[data-in]').forEach((b) => b.onclick = () => checkinSheet(a, d.holders.filter((h) => h.id === Number(b.dataset.in)), reload));
   on('#act-self', () => selfCheckoutSheet(a));
+  on('#act-reserve', () => go(calUrl({ asset: a.id, reserve: true, from: calendarSource() }))); // the single-asset calendar is where dates are picked
+  wireReservationActions(main(), resv, reload);
   on('#act-request', () => requestEquipmentSheet({ asset: a }));
   on('#act-similar', (e) => { e.preventDefault(); requestEquipmentSheet({ category: a.category }); });
   on('#act-ask-return', () => requestMyReturnSheet({ id: a.id, name: a.name }, reload));
@@ -1359,9 +1370,16 @@ async function viewAssetForm(id) {
         ${f('purchase_date', 'Purchase date', 'type="date"')}${f('purchase_cost', 'Cost (USD)', 'type="number" step="0.01" min="0" inputmode="decimal"')}
         ${f('vendor', 'Vendor', 'placeholder="CDW, Amazon, Dell…"')}${f('warranty_expires', 'Warranty ends', 'type="date"')}
       </fieldset></div>
+      <div class="card pad"><fieldset class="form-grid"><legend>Employee access</legend>
+        <label class="check full"><input type="checkbox" id="atr" ${a.available_to_request ? 'checked' : ''}><span><strong>Available to request</strong><span class="small muted" style="display:block">Show this asset to employees and allow checkout, requests, and reservations.</span></span></label>
+        <label class="check full" id="rra-wrap"><input type="checkbox" id="rra" ${a.reservation_requires_approval ? 'checked' : ''}><span><strong>Require approval for reservations</strong><span class="small muted" style="display:block">Reservations for this asset must be approved by IT.<span id="rra-hint"></span></span></span></label>
+      </fieldset></div>
       <div class="card pad"><label class="field"><span>Notes (admins only)</span><textarea name="notes">${esc(a.notes || '')}</textarea></label></div>
       <button class="btn primary lg block" id="save">${editing ? 'Save changes' : 'Add asset'}</button>
     </form>`;
+  // "Require approval" only matters while the asset is available to request, so it is dimmed (not hidden, not reset) when that is off.
+  const syncAccess = () => { const on = $('#atr').checked; $('#rra').disabled = !on; $('#rra-wrap').classList.toggle('dim', !on); $('#rra-hint').textContent = on ? '' : ' Has no effect until “Available to request” is on.'; };
+  $('#atr').onchange = syncAccess; syncAccess();
   const catSel = $('#cat');
   const toggleLic = () => { const show = catSel.value === 'Software License' || /license|software|subscription/i.test(catSel.value) || a.license_key || a.license_seats; $('#lic').classList.toggle('hidden', !show); };
   catSel.onchange = toggleLic; toggleLic();
@@ -1389,6 +1407,7 @@ async function viewAssetForm(id) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = {}; for (const [k, v] of fd.entries()) if (k !== 'photos') body[k] = v;
+    body.available_to_request = $('#atr').checked; body.reservation_requires_approval = $('#rra').checked; // (a disabled checkbox is not in FormData, so read both directly)
     busy($('#save'), async () => {
       const saved = await api(editing ? 'PUT' : 'POST', editing ? '/api/assets/' + id : '/api/assets', body);
       if (ph && ph.files.length) await uploadPhotos(saved.id, ph.files);
@@ -1419,9 +1438,9 @@ function viewScan() {
 
 // ============================================================ requests
 async function viewRequests() {
-  const state = { tab: ['open', 'closed'].includes(qs().get('tab')) ? qs().get('tab') : 'open', f: qs().get('state') || '' };
+  const state = { tab: ['open', 'closed', 'reservations'].includes(qs().get('tab')) ? qs().get('tab') : 'open', f: qs().get('state') || '' };
   main().innerHTML = `<div class="page-head"><h1>Requests</h1><button class="btn primary" id="new">${icon('plus')} ${isAdmin() ? 'New' : 'Request equipment'}</button></div>
-    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button></div>
+    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button><button data-v="reservations">Reservations</button></div>
       ${isAdmin() ? '<select id="st" aria-label="Filter by state" style="width:auto;min-height:40px;padding:6px 10px;font-size:15px"></select>' : ''}</div><div id="list"><div class="spinner"></div></div></div>`;
   $('#new').onclick = async () => {
     if (!isAdmin()) return requestEquipmentSheet();
@@ -1431,8 +1450,29 @@ async function viewRequests() {
     $('#n1', el).onclick = async () => { close(); const users = await getUsers(); const s = sheet(`<h2>Who is it for?</h2><div id="pp" style="margin-top:12px"></div>`); personPicker($('#pp', s.el), users, (u) => { s.close(); requestEquipmentSheet({ forUser: u }); }); };
     $('#n2', el).onclick = () => { close(); go('#/assets?status=checked_out'); toast('Open the item and tap “Request return”'); };
   };
+  // Reservations (slice 7): a separate list, not a request type. IT sees every one (pending approvals first, with Approve / Decline);
+  // an employee sees their own, with Cancel / Shorten. All rules come from the server.
+  const syncResvLabel = (n) => { const b = $('#seg [data-v=reservations]'); if (b) b.innerHTML = `Reservations${n ? ` <span class="seg-count">${n}</span>` : ''}`; };
+  const renderReservations = async () => {
+    const rows = await api('GET', '/api/reservations');
+    const list = $('#list'); if (!list) return;
+    const adminV = isAdmin();
+    const pending = rows.filter((r) => r.phase === 'pending');
+    const live = rows.filter((r) => ['upcoming', 'active'].includes(r.phase));
+    const done = rows.filter((r) => !['pending', 'upcoming', 'active'].includes(r.phase)).slice(0, 30);
+    syncResvLabel(adminV ? pending.length : 0);
+    const section = (title, items, empty) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${items.length}</span></div>${items.length
+      ? `<ul class="list">${items.map((r) => reservationItem(r, { admin: adminV, tab: 'reservations' })).join('')}</ul>` : `<div class="empty">${icon('calendar')}<p>${empty}</p></div>`}</div>`;
+    list.innerHTML = `<div class="stack">${adminV
+      ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Upcoming & active', live, 'No confirmed reservations ahead.')
+      : section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${done.length ? section('Past & closed', done, '') : ''}</div>`;
+    wireReservationActions(list, rows, () => renderReservations().catch(fail));
+  };
   const render = async () => {
     $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.tab));
+    const stSel = $('#st'); if (stSel) stSel.style.display = state.tab === 'reservations' ? 'none' : '';
+    if (state.tab === 'reservations') return renderReservations();
+    if (isAdmin()) api('GET', '/api/reservations?status=open').then((rs) => syncResvLabel(rs.filter((r) => r.phase === 'pending').length)).catch(() => {});
     const all = await api('GET', '/api/requests?status=' + state.tab);
     const list = $('#list'); if (!list) return;
     // IT's state filter: the tab's states with how many requests are in each. (Client-side over the same list; the lifecycle comes from the server.)
@@ -1552,6 +1592,56 @@ function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
   $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await onOk(e.target.note.value.trim()); close(); }); };
 }
 
+// ============================================================ reservations (Phase 2, slice 7)
+// A reservation is one asset + an inclusive range of calendar dates. The server decides everything (phase, what may be cancelled or
+// shortened, conflicts); these helpers only draw a row and call the endpoints. Employees reach theirs under Requests > Reservations and on
+// the asset page; IT approves under Requests > Reservations.
+const isoAdd = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+const resvRange = (r) => (r.start_date === r.end_date ? fmtDate(r.start_date) : `${fmtDate(r.start_date)} – ${fmtDate(r.end_date)}`);
+const resvDays = (r) => Math.round((Date.parse(r.end_date + 'T00:00:00Z') - Date.parse(r.start_date + 'T00:00:00Z')) / 864e5) + 1;
+const RESV_LABEL = { pending: 'Waiting for approval', upcoming: 'Reserved', active: 'Reserved · now', past: 'Past', declined: 'Declined', cancelled: 'Cancelled' };
+const RESV_CLASS = { pending: 'open', upcoming: 'approved', active: 'approved', past: 'cancelled', declined: 'denied', cancelled: 'cancelled' };
+const resvPill = (r) => pill(RESV_CLASS[r.phase] || 'open', RESV_LABEL[r.phase] || r.phase);
+function reservationItem(r, { admin: forAdmin, showAsset = true, tab = '' } = {}) {
+  const asset = showAsset ? (forAdmin ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab })}" class="title">${esc(r.asset_name)}</a>` : `<span class="title">${esc(r.asset_name)}</span>`) : '';
+  const acts = [];
+  // IT's decision on a pending reservation is Approve or Decline, nothing else. Cancel appears once it is confirmed (Upcoming & active).
+  // (An employee still sees Cancel on their own pending request: that is them withdrawing it.)
+  const itDeciding = forAdmin && r.phase === 'pending';
+  if (itDeciding) acts.push(`<button class="btn sm primary" data-resv-approve="${r.id}">Approve</button><button class="btn sm danger" data-resv-decline="${r.id}">Decline</button>`);
+  if (r.can_cancel && !itDeciding) acts.push(`<button class="btn sm" data-resv-cancel="${r.id}">Cancel${forAdmin && !r.mine ? ' reservation' : ''}</button>`);
+  if (r.can_shorten) acts.push(`<button class="btn sm" data-resv-shorten="${r.id}">Shorten</button>`);
+  const who = forAdmin ? `${esc(r.employee_name)}${r.employee_department ? ' · ' + esc(r.employee_department) : ''}` : '';
+  const sub = [`${esc(resvRange(r))} · ${resvDays(r)} day${resvDays(r) === 1 ? '' : 's'}`, who, forAdmin && r.requires_approval ? 'approval required' : '', showAsset ? `<span class="mono">${esc(r.asset_tag)}</span>` : ''].filter(Boolean).join(' · ');
+  return `<li class="resv"><div class="item" style="align-items:flex-start"><div class="thumb">${icon('calendar')}</div><div class="grow">
+    <div class="row spread" style="align-items:flex-start"><div>${asset}${asset ? '' : `<span class="title">${esc(resvRange(r))}</span>`}</div>${resvPill(r)}</div>
+    <div class="sub">${asset ? sub : [resvDays(r) + ' day' + (resvDays(r) === 1 ? '' : 's'), who, forAdmin && r.requires_approval ? 'approval required' : ''].filter(Boolean).join(' · ')}</div>
+    ${r.decision_note ? `<div class="small muted" style="margin-top:4px">IT: ${esc(r.decision_note)}</div>` : ''}
+    ${acts.length ? `<div class="row wrap" style="margin-top:8px;gap:8px">${acts.join('')}</div>` : ''}</div></div></li>`;
+}
+function shortenSheet(r, done) {
+  const max = isoAdd(r.end_date, -1);
+  const { el, close } = sheet(`<h2>Shorten this reservation</h2><p class="muted small" style="margin-top:0">${esc(r.asset_name)} · ${esc(resvRange(r))}. You can end it sooner. To keep it longer, make a new reservation.</p>
+    <form class="form-grid" id="f"><label class="field"><span>New last day</span><input type="date" name="end_date" required min="${esc(r.shorten_min)}" max="${esc(max)}" value="${esc(max)}"></label>
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Shorten</button></div></form>`);
+  $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await api('POST', `/api/reservations/${r.id}/shorten`, { end_date: e.target.end_date.value }); close(); toast('Reservation shortened'); done(); }); };
+}
+// Wires every reservation button under `root` (rows = the reservations drawn there). `reload` redraws the screen afterwards.
+function wireReservationActions(root, rows, reload) {
+  const find = (id) => rows.find((r) => r.id === Number(id));
+  const each = (sel, key, fn) => $$(sel, root).forEach((b) => { b.onclick = (e) => { e.preventDefault(); fn(find(b.dataset[key]), b); }; });
+  const after = (msg) => { toast(msg); refreshBadge(); reload(); };
+  each('[data-resv-approve]', 'resvApprove', (r, b) => busy(b, async () => { await api('POST', `/api/reservations/${r.id}/approve`, {}); after('Approved'); }));
+  each('[data-resv-decline]', 'resvDecline', (r) => noteSheet('Decline reservation', `${r.employee_name}'s request for ${r.asset_name} (${resvRange(r)}). Add a short reason (optional).`, 'Decline', 'e.g. Needed for a shoot that week',
+    async (note) => { await api('POST', `/api/reservations/${r.id}/decline`, { note }); after('Declined'); }, true));
+  each('[data-resv-cancel]', 'resvCancel', async (r) => {
+    const mine = r.mine !== false && !isAdmin();
+    if (!(await confirmSheet(mine ? 'Cancel this reservation?' : `Cancel ${r.employee_name}'s reservation?`, `${r.asset_name} · ${resvRange(r)}. The dates become available to others right away.`, 'Cancel reservation', true))) return;
+    try { await api('POST', `/api/reservations/${r.id}/cancel`, {}); after('Reservation cancelled'); } catch (e) { fail(e); reload(); }
+  });
+  each('[data-resv-shorten]', 'resvShorten', (r) => shortenSheet(r, () => { refreshBadge(); reload(); }));
+}
+
 // ============================================================ availability calendar (read-only)
 // ONE screen for everyone: #/calendar (everything) · #/calendar?node=<catalog id> (that entry and everything below it) ·
 // #/calendar?asset=<id> (one asset), plus &month=YYYY-MM and &day=YYYY-MM-DD. The URL is the whole state, so refresh and deep links
@@ -1562,17 +1652,30 @@ function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
 // role's list: Browse equipment / All assets. All availability rules live on the server (src/availability.js, GET /api/availability).
 // WHAT THE SELECTED-DAY PANEL SHOWS FOLLOWS THE SCOPE (broader = more summarized): one asset -> that asset in detail (the future home of
 // Check out now / Reserve); a catalog entry's subtree or all equipment -> counts only (employees) or counts + the day's temporary checkouts
-// (admins). It never lists a subtree's assets. Employees have no all-equipment calendar: it starts from a catalog entry or an asset.
-const calUrl = ({ node, asset, month, day, from } = {}) => {
+// (admins). Employees have no all-equipment calendar: it starts from a catalog entry or an asset. An employee's catalog-entry calendar is a
+// discovery bridge ("I need any camera"): the counts, then the actual assets of that entry's subtree grouped by state for the selected day
+// (available, reserved, checked out). Each row opens THAT asset's calendar on the same day; reserving happens there, never on the list.
+// RESERVING (slice 7) lives ONLY on the single-asset calendar, and only when the server says this viewer may (`reserve.allowed`): the same
+// grid becomes a date picker (tap the first day, tap the last day), then a small confirmation sheet. Category / everything calendars never
+// carry reservation controls. `&reserve=1` in the URL opens it in picking mode (the asset page's Reserve button goes there).
+const calUrl = ({ node, asset, month, day, from, reserve } = {}) => {
   const p = new URLSearchParams();
   if (asset) p.set('asset', asset); else if (node) p.set('node', node);
   if (month) p.set('month', month);
   if (day) p.set('day', day);
+  if (reserve && asset) p.set('reserve', '1');
   if (from) p.set('from', from);
   return '#/calendar' + (p.toString() ? '?' + p.toString() : '');
 };
-// Only an in-app hash route may be a Back target (never a calendar, a login screen, or anything that is not "#/…").
-const safeFrom = (v) => (typeof v === 'string' && v.length <= 300 && /^#\/[\w/.-]*(\?[\w=&%.,-]*)?$/.test(v) && !/^#\/(calendar|login|forgot|reset|setup|more)\b/.test(v) ? v : '');
+// Only an in-app hash route may be a Back target (never a login screen or anything that is not "#/…"; a calendar only in the one form below).
+const CAL_FROM = /^#\/calendar\?node=\d+(&month=\d{4}-(0[1-9]|1[0-2]))?(&day=\d{4}-\d{2}-\d{2})?(&from=[\w=&%.,-]*)?$/;
+const safeFrom = (v) => {
+  if (typeof v !== 'string' || v.length > 300) return '';
+  // The one calendar that may be a Back target: a catalog-entry calendar (how an asset's calendar returns to the category list it was opened from,
+  // with its month and day). Its own `from` must itself be a plain in-app route, so calendars never chain.
+  if (CAL_FROM.test(v)) { const inner = new URLSearchParams(v.split('?')[1]).get('from'); return !inner || (!/^#\/calendar\b/.test(inner) && safeFrom(inner)) ? v : ''; }
+  return /^#\/[\w/.-]*(\?[\w=&%.,-]*)?$/.test(v) && !/^#\/(calendar|login|forgot|reset|setup|more)\b/.test(v) ? v : '';
+};
 // The calendar link on a screen. `href` is the plain scoped URL (it works if opened in a new tab); a click also stamps `from`
 // with the page it is clicked on, at click time, so filters/drill-down state in that page's URL come back exactly.
 const calendarLink = ({ node, asset } = {}) => `<a class="iconbtn cal-btn" href="${calUrl({ node, asset })}" data-cal data-node="${node || ''}" data-asset="${asset || ''}" aria-label="Availability calendar for this view" title="Availability calendar">${icon('calendar')}</a>`;
@@ -1592,6 +1695,10 @@ async function calBackTarget(from, sc) {
   const [path, query = ''] = from.split('?'); const q = new URLSearchParams(query);
   const node = Number(q.get('node'));
   try {
+    if (path === '#/calendar' && Number.isInteger(node) && node > 0) { // back to a category's calendar (same month and day)
+      const row = (await api('GET', '/api/catalog' + (admin ? '?include_archived=1' : ''))).find((n) => n.id === node);
+      return { href: from, label: row ? `${row.name} calendar` : 'Calendar' };
+    }
     if ((path === '#/catalog' || path === '#/assets') && Number.isInteger(node) && node > 0) {
       if (sc && sc.type === 'node' && sc.id === node) return { href: from, label: sc.title };
       const row = (await api('GET', '/api/catalog' + (admin ? '?include_archived=1' : ''))).find((n) => n.id === node);
@@ -1610,10 +1717,10 @@ async function viewCalendar() {
   if (!isAdmin()) setActive('assets'); // employees reach it from Browse, so Browse stays highlighted
   const p = qs();
   const today0 = localToday();
-  const want = { node: p.get('node') || '', asset: p.get('asset') || '', month: /^\d{4}-(0[1-9]|1[0-2])$/.test(p.get('month') || '') ? p.get('month') : '', day: /^\d{4}-\d{2}-\d{2}$/.test(p.get('day') || '') ? p.get('day') : '', from: safeFrom(p.get('from')) };
+  const want = { node: p.get('node') || '', asset: p.get('asset') || '', month: /^\d{4}-(0[1-9]|1[0-2])$/.test(p.get('month') || '') ? p.get('month') : '', day: /^\d{4}-\d{2}-\d{2}$/.test(p.get('day') || '') ? p.get('day') : '', from: safeFrom(p.get('from')), reserve: p.get('reserve') === '1' };
   const st = { month: want.month || today0.slice(0, 7), day: want.day, data: null };
   const q = () => new URLSearchParams({ ...(want.asset ? { asset: want.asset } : want.node ? { node: want.node } : {}), month: st.month }).toString();
-  const keepUrl = () => history.replaceState(null, '', calUrl({ node: want.node, asset: want.asset, month: st.month === today0.slice(0, 7) ? '' : st.month, day: st.day === defaultDay() ? '' : st.day, from: want.from })); // (the default month/day are left out of the URL)
+  const keepUrl = () => history.replaceState(null, '', calUrl({ node: want.node, asset: want.asset, month: st.month === today0.slice(0, 7) ? '' : st.month, day: st.day === defaultDay() ? '' : st.day, reserve: sel.on, from: want.from })); // (the default month/day are left out of the URL)
   const monthShift = (m, n) => { const [y, mo] = m.split('-').map(Number); const d = new Date(Date.UTC(y, mo - 1 + n, 1)); return d.toISOString().slice(0, 7); };
   const monthTitle = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
   const MAX_AHEAD = 12; // months the arrows allow (the data only knows what is checked out today)
@@ -1634,12 +1741,18 @@ async function viewCalendar() {
   const back = await calBackTarget(want.from, sc); // always present: from the URL, else the role's list
 
   A = data.assets || [];
+  // Reserving: offered only on the single-asset view, only when the server says so. `sel` = the range being picked (end '' = just the start so far).
+  const canReserve = !isSummary() && !!(A[0] && A[0].reserve && A[0].reserve.allowed);
+  const sel = { on: canReserve && want.reserve, start: '', end: '' };
+  const stateCache = new Map(); // month -> this asset's day states, so a range can be checked across months
+  const cacheMonth = () => { if (!isSummary() && A[0]) stateCache.set(data.month, A[0].days); };
+  cacheMonth();
   const cellInfo = (i) => {
     const day = data.first.slice(0, 8) + String(i + 1).padStart(2, '0');
     if (day < data.today) return { day, cls: 'past', text: '', label: `${fmtDate(day)}: past` };
     if (!isSummary()) {
       const s = A[0].days[i];
-      const cls = { available: 'free', expected: 'expected', occupied: 'busy' }[s] || 'off';
+      const cls = { available: 'free', expected: 'expected', occupied: 'busy', reserved: 'reserved' }[s] || 'off';
       return { day, cls, text: '', label: `${fmtDate(day)}: ${DAY_WORD[s]}` };
     }
     const c = data.days[i]; const n = c.available; const e = c.expected; const total = data.total;
@@ -1647,7 +1760,7 @@ async function viewCalendar() {
     // "36" = available that day; "+2" = two more are expected back by then (a due date, not a guarantee)
     return { day, cls, text: total ? `${n}${e ? `<em>+${e}</em>` : ''}` : '', label: `${fmtDate(day)}: ${n} of ${total} available${e ? `, ${e} more expected back` : ''}` };
   };
-  const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
+  const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', reserved: 'reserved', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
 
   const periodsOn = (a, day, kind) => a.periods.filter((x) => x.kind === kind && x.start <= day && (!x.end || day <= x.end));
   const clock = (t) => (t ? ` ${fmtClock(t)}` : '');
@@ -1666,7 +1779,15 @@ async function viewCalendar() {
       const ends = periodsOn(a, day, 'expected').map((x) => addDaysStr(x.start, -1));
       parts.push(`Due back ${ends.length ? 'by ' + fmtDate(ends.sort()[0]) : 'before then'} — not guaranteed`);
       if (adminV) parts.push(...periodsOn(a, day, 'expected').map(who).filter(Boolean));
+    } else if (s === 'reserved') {
+      for (const x of (a.reservations || []).filter((r) => r.status === 'confirmed' && r.start <= day && day <= r.end)) {
+        parts.push(`Reserved ${x.start === x.end ? fmtDate(x.start) : fmtDate(x.start) + ' – ' + fmtDate(x.end)}${x.mine && !adminV ? ' · by you' : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
+      }
     } else parts.push(DAY_WORD[s].replace(/^./, (c) => c.toUpperCase()));
+    // a request still waiting for IT does not hold the day; its owner (and IT) is reminded of it here
+    for (const x of (a.reservations || []).filter((r) => r.status === 'pending' && r.start <= day && day <= r.end)) {
+      parts.push(`${adminV ? 'Pending request' : 'Your request'} ${x.start === x.end ? fmtDate(x.start) : fmtDate(x.start) + ' – ' + fmtDate(x.end)} is waiting for IT approval${adminV && x.holder ? ' · ' + who(x) : ''}`);
+    }
     return parts;
   };
   const addDaysStr = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
@@ -1687,18 +1808,33 @@ async function viewCalendar() {
   // A catalog subtree / everything: counts only. Never the assets themselves.
   const countRows = (c) => {
     if (isAdmin()) { // schedulable pool only (permanently assigned equipment is not part of this calendar): available · checked out · repair
-      const rows = [[c.available, 'available', 'available'], [c.checked_out, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.off, 'in repair or not lendable', 'off']];
-      return rows.filter(([n, , k]) => n || k !== 'expected');
+      const rows = [[c.available, 'available', 'available'], [c.checked_out, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved'], [c.off, 'in repair or not lendable', 'off']];
+      return rows.filter(([n, , k]) => n || !['expected', 'reserved'].includes(k));
     }
-    const rows = [[c.available, 'available', 'available'], [c.unavailable, 'unavailable', 'occupied'], [c.expected, 'expected back', 'expected']];
-    return rows.filter(([n, , k]) => n || k !== 'expected');
+    const rows = [[c.available, 'available', 'available'], [c.unavailable, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved']];
+    return rows.filter(([n, , k]) => n || !['expected', 'reserved'].includes(k));
   };
   const summaryPanel = (day, i) => {
     const c = data.days[i]; const adminV = isAdmin();
     const stats = data.total ? `<ul class="cal-counts">${countRows(c).map(([n, label, k]) => `<li><span class="cal-dot ${k}"></span><strong>${n}</strong> ${label}</li>`).join('')}</ul>` : `<div class="empty"><p>Nothing to show for this scope.</p></div>`;
     const hint = c.expected ? `<p class="small muted" style="margin:0 16px 12px">“Expected back” means a return date falls before this day. It is not a guarantee.</p>` : '';
-    const note = adminV ? '' : `<p class="small muted" style="margin:0 16px 14px">Open a specific item to see its own calendar.</p>`;
-    return `<div class="card"><div class="card-head"><h2>${esc(dayTitle(day))}</h2></div>${stats}${hint}${note}</div>${adminV ? eventsHtml(day) : ''}`;
+    return `<div class="card"><div class="card-head"><h2>${esc(dayTitle(day))}</h2></div>${stats}${hint}</div>${adminV ? eventsHtml(day) : assetsHtml(day, i)}`;
+  };
+  // Employee, catalog-entry calendar: the actual assets for the selected day, grouped by state (the server already left out permanent
+  // assignments, items not available to request, and everything outside this entry's subtree). A row opens that asset's own calendar on the
+  // same day, with Back returning here; there is deliberately no Reserve button in the list.
+  const GROUPS = [['available', 'Available'], ['reserved', 'Reserved'], ['occupied', 'Checked out'], ['expected', 'Expected back']];
+  const calHere = () => calUrl({ node: want.node, month: st.month === today0.slice(0, 7) ? '' : st.month, day: st.day === defaultDay() ? '' : st.day, from: want.from });
+  const assetsHtml = (day, i) => {
+    if (!data.assets || !data.assets.length) return '';
+    const from = safeFrom(calHere()); // (too long to be a safe Back target => the asset calendar falls back to Browse)
+    const m = day.slice(0, 7);
+    const groups = GROUPS.map(([k, label]) => [k, label, data.assets.filter((a) => a.days[i] === k)]).filter(([, , l]) => l.length);
+    return `<div class="card cal-assets">${groups.map(([k, label, list]) => `<h3 class="ct-h" style="margin:14px 16px 4px">${label} <span class="muted">${list.length}</span></h3><ul class="list">${list.map((a) => {
+      const sub = detail(a, day, i).filter((l) => l !== label);
+      return `<li><a class="item" href="${calUrl({ asset: a.id, month: m === today0.slice(0, 7) ? '' : m, day, from })}"><span class="cal-dot ${k}"></span><div class="grow"><div class="title truncate">${esc(a.name)}${a.mine ? ' <span class="pill plain available">Yours</span>' : ''}</div>
+        <div class="sub">${[a.tag ? `<span class="mono">${esc(a.tag)}</span>` : '', ...sub].filter(Boolean).join(' · ')}</div></div>${icon('chev', 'chev')}</a></li>`;
+    }).join('')}</ul>`).join('')}${data.assets_truncated ? `<p class="small muted" style="margin:10px 16px 14px">Showing the first ${data.assets.length} items. Open a narrower category to see the rest.</p>` : ''}</div>`;
   };
   // Admin, broad scope: only what is scheduling-relevant — temporary checkouts out on that day (never available assets; permanent assignments are not in this calendar at all).
   const eventsOn = (day) => (data.events || []).filter((x) => x.start <= day && (x.overdue || day <= x.end));
@@ -1713,19 +1849,38 @@ async function viewCalendar() {
       ${list.length ? `<ul class="list">${list.slice(0, SHOW).map(row).join('')}</ul>${list.length > SHOW ? `<p class="small muted" style="margin:10px 16px">+${list.length - SHOW} more. Narrow the calendar to a category to see fewer.</p>` : ''}` : `<div class="empty"><p>No temporary checkouts on this day.</p></div>`}</div>`;
   };
 
+  // The reservation card under the single-asset day panel: a button to start, then the range being picked.
+  const nDays = (s0, e0) => Math.round((Date.parse(e0 + 'T00:00:00Z') - Date.parse(s0 + 'T00:00:00Z')) / 864e5) + 1;
+  const rangeText = (s0, e0) => (s0 === e0 ? fmtDate(s0) : `${fmtDate(s0)} – ${fmtDate(e0)}`);
+  const reservePanel = () => {
+    const a = A[0]; const needs = a.reserve.requires_approval;
+    if (!sel.on) {
+      return `<div class="card pad cal-reserve"><button class="btn primary lg block" id="resv-start">${icon('calendar')} Reserve this asset</button>
+        <p class="small muted" style="margin:10px 0 0">You will pick a start and an end date on the calendar. ${needs ? 'IT approves reservations for this item.' : 'Reservations for this item are confirmed right away.'}</p></div>`;
+    }
+    const e0 = sel.end || sel.start;
+    return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Reserve ${esc(a.name)}</h3>
+      <p class="small muted" style="margin:0 0 10px">${!sel.start ? 'Tap the first day you need it.' : !sel.end ? 'Tap the last day, or tap the same day again for a single day. Both days are included.' : 'Both days are included. Tap another day to start over.'}</p>
+      ${sel.start ? `<div class="cal-range"><strong>${esc(rangeText(sel.start, e0))}</strong><span class="muted small"> · ${nDays(sel.start, e0)} day${nDays(sel.start, e0) === 1 ? '' : 's'}${sel.end ? '' : ' so far'}</span></div>` : ''}
+      <div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" id="resv-cancel">Cancel</button>${sel.start ? '<button class="btn" id="resv-clear">Clear dates</button>' : ''}<button class="btn primary" id="resv-go" ${sel.start ? '' : 'disabled'}>${needs ? 'Review request' : 'Review & reserve'}</button></div></div>`;
+  };
   const panelHtml = () => {
     const day = st.day; const i = Number(day.slice(8)) - 1;
-    if (day < data.today) return passedHtml(day);
-    return isSummary() ? summaryPanel(day, i) : assetPanel(day, i);
+    const body = day < data.today ? passedHtml(day) : isSummary() ? summaryPanel(day, i) : assetPanel(day, i);
+    return body + (canReserve ? reservePanel() : '');
   };
 
   const gridHtml = () => {
     const [y, mo] = st.month.split('-').map(Number);
     const lead = new Date(Date.UTC(y, mo - 1, 1)).getUTCDay();
     const cells = Array.from({ length: lead }, () => '<span class="cal-day blank" aria-hidden="true"></span>');
+    const range = sel.on && sel.start ? [sel.start, sel.end || sel.start] : null;
     for (let i = 0; i < monthDays; i++) {
       const c = cellInfo(i);
-      cells.push(`<button type="button" class="cal-day ${c.cls}${c.day === st.day ? ' sel' : ''}${c.day === data.today ? ' today' : ''}" data-day="${c.day}" aria-label="${esc(c.label)}" aria-pressed="${c.day === st.day}"><span class="d">${i + 1}</span><span class="c">${c.text}</span></button>`);
+      const pick = sel.on && c.day >= data.today ? (['free', 'expected'].includes(c.cls) ? ' pick' : ' nopick') : '';
+      const inR = range && c.day >= range[0] && c.day <= range[1];
+      const edge = range && (c.day === range[0] || c.day === range[1]);
+      cells.push(`<button type="button" class="cal-day ${c.cls}${pick}${inR ? ' inrange' : ''}${edge ? ' edge' : ''}${c.day === st.day ? ' sel' : ''}${c.day === data.today ? ' today' : ''}" data-day="${c.day}" aria-label="${esc(c.label)}${inR ? ', selected' : ''}" aria-pressed="${c.day === st.day}"><span class="d">${i + 1}</span><span class="c">${c.text}</span></button>`);
     }
     return cells.join('');
   };
@@ -1745,25 +1900,72 @@ async function viewCalendar() {
         <div class="cal-nav"><button type="button" class="iconbtn" id="calprev" aria-label="Previous month">${icon('back')}</button><h2 id="calmonth" aria-live="polite"></h2><button type="button" class="iconbtn" id="calnext" aria-label="Next month">${icon('chev')}</button></div>
         <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
         <div class="cal-grid" id="calgrid"></div>
-        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
+        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="reserved"></i>Reserved</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
       </div>
       <div id="calpanel"></div>
-      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Reservations are not available yet.</p>
+      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Confirmed reservations hold their dates; a request still waiting for IT approval does not.</p>
     </div>`;
   const go2 = async (month) => {
     st.month = month; st.day = '';
     try { data = await api('GET', '/api/availability?' + q()); } catch (e) { return fail(e); }
     st.data = data; st.month = data.month; st.day = defaultDay();
-    A = data.assets || []; monthDays = Number(data.last.slice(8));
+    A = data.assets || []; monthDays = Number(data.last.slice(8)); cacheMonth();
     keepUrl(); paint();
+  };
+  // ---- picking a range (single-asset calendar only)
+  const stateOf = (d) => { const days = stateCache.get(d.slice(0, 7)); return days ? days[Number(d.slice(8)) - 1] : null; };
+  const takeable = (s0) => s0 === 'available' || s0 === 'expected'; // what the server accepts: expected-back days may be reserved, occupied/reserved ones may not
+  const ensureMonths = async (s0, e0) => {
+    for (let m = s0.slice(0, 7); m <= e0.slice(0, 7); m = monthShift(m, 1)) {
+      if (!stateCache.has(m)) stateCache.set(m, (await api('GET', `/api/availability?asset=${want.asset}&month=${m}`)).assets[0].days);
+    }
+  };
+  const firstTaken = (s0, e0) => { for (let d = s0; d <= e0; d = addDaysStr(d, 1)) if (!takeable(stateOf(d))) return d; return null; };
+  const pickDay = async (day) => {
+    if (day < data.today) return;
+    if (!takeable(stateOf(day))) { toast(`${fmtDate(day)} isn't free to reserve.`, true); return; }
+    if (!sel.start || sel.end || day < sel.start) { sel.start = day; sel.end = ''; return; }
+    if (day === sel.start) { sel.end = day; return; }
+    try { await ensureMonths(sel.start, day); } catch (e) { fail(e); return; }
+    const taken = firstTaken(sel.start, day);
+    if (taken) { toast(`${fmtDate(taken)} is already taken, so that range won't work. Pick a shorter one.`, true); return; }
+    sel.end = day;
+  };
+  const review = (s0, e0) => {
+    const a = A[0]; const needs = a.reserve.requires_approval;
+    const { el, close } = sheet(`<h2>${needs ? 'Request this reservation?' : 'Reserve this item?'}</h2>
+      <div class="holder" style="margin:12px 0"><div class="thumb">${icon('calendar')}</div><div><strong>${esc(a.name)}</strong> <span class="mono small muted">${esc(a.tag || '')}</span></div></div>
+      <div class="kv"><div class="k">Start</div><div class="v">${esc(fmtDate(s0))}</div><div class="k">End</div><div class="v">${esc(fmtDate(e0))}</div><div class="k">Length</div><div class="v">${nDays(s0, e0)} day${nDays(s0, e0) === 1 ? '' : 's'}, both days included</div></div>
+      <p class="small muted" style="margin:12px 0 0">${needs ? 'IT must approve this reservation. It does not hold the dates until they do.' : 'This reservation is confirmed right away.'}</p>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Back</button><button class="btn primary" id="go">${needs ? 'Submit for approval' : 'Confirm reservation'}</button></div>`);
+    $('#go', el).onclick = () => busy($('#go', el), async () => {
+      try {
+        const r = await api('POST', `/api/assets/${a.id}/reservations`, { start_date: s0, end_date: e0 });
+        close(); toast(r.status === 'confirmed' ? 'Reserved' : 'Submitted for IT approval'); refreshBadge();
+      } catch (err) { close(); toast(err.message, true); } // (someone may have just taken those dates: the calendar below reloads as it is now)
+      sel.on = false; sel.start = sel.end = '';
+      stateCache.clear(); await go2(st.month);
+      if (s0.slice(0, 7) === st.month) { st.day = s0; keepUrl(); paint(); }
+    });
   };
   paint();
   $('#calprev').onclick = () => go2(monthShift(st.month, -1));
   $('#calnext').onclick = () => go2(monthShift(st.month, 1));
-  $('#calgrid').onclick = (e) => {
+  $('#calgrid').onclick = async (e) => {
     const b = e.target.closest('[data-day]'); if (!b) return;
-    st.day = b.dataset.day; keepUrl(); paint();
+    st.day = b.dataset.day;
+    if (sel.on) await pickDay(st.day);
+    keepUrl(); paint();
     const panel = $('#calpanel'); if (panel && panel.getBoundingClientRect().top > window.innerHeight - 120) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  };
+  $('#calpanel').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b || !canReserve) return;
+    if (b.id === 'resv-start') { sel.on = true; sel.start = sel.end = ''; }
+    else if (b.id === 'resv-cancel') { sel.on = false; sel.start = sel.end = ''; }
+    else if (b.id === 'resv-clear') { sel.start = sel.end = ''; }
+    else if (b.id === 'resv-go') { if (sel.start) review(sel.start, sel.end || sel.start); return; }
+    else return;
+    keepUrl(); paint();
   };
   keepUrl();
 }

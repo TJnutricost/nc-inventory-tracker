@@ -11,7 +11,7 @@ before(async () => {
 });
 after(() => stopServer(server));
 
-const newAsset = async (name) => (await admin.post('/api/assets', { name })).body;
+const newAsset = async (name) => (await admin.post('/api/assets', { available_to_request: true, name })).body;
 const addPhoto = (assetId) => db.prepare("INSERT INTO photos (asset_id, filename, thumb) VALUES (?, 'p.jpg', 'p_t.jpg')").run(assetId).lastInsertRowid;
 const cover = (assetId) => db.prepare('SELECT cover_photo_id c FROM assets WHERE id = ?').get(assetId).c;
 
@@ -68,12 +68,12 @@ test('request approval: unknown or malformed asset id is a client error and the 
 });
 
 test('asset category/location: trimmed, and non-text values rejected', async () => {
-  const ok = await admin.post('/api/assets', { name: 'Trim me', category: '  Laptop  ', location: '  Warehouse ' });
+  const ok = await admin.post('/api/assets', { available_to_request: true, name: 'Trim me', category: '  Laptop  ', location: '  Warehouse ' });
   assert.equal(ok.status, 200);
   assert.equal(ok.body.category, 'Laptop');
   assert.equal(ok.body.location, 'Warehouse');
-  assert.equal((await admin.post('/api/assets', { name: 'Bad', category: { x: 1 } })).status, 400);
-  assert.equal((await admin.post('/api/assets', { name: 'Bad', location: ['HQ'] })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'Bad', category: { x: 1 } })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'Bad', location: ['HQ'] })).status, 400);
   assert.equal((await admin.put(`/api/assets/${ok.body.id}`, { category: 42 })).status, 400);
   assert.equal(db.prepare('SELECT category FROM assets WHERE id = ?').get(ok.body.id).category, 'Laptop');
 });

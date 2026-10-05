@@ -13,7 +13,7 @@ before(async () => {
 after(() => stopServer(server));
 
 test('CSV export includes a header row and the assets that exist', async () => {
-  await admin.post('/api/assets', { name: 'Exportable Thing', tag: 'NC-EXP1', purchase_cost: 42.5 });
+  await admin.post('/api/assets', { available_to_request: true, name: 'Exportable Thing', tag: 'NC-EXP1', purchase_cost: 42.5 });
   const r = await admin.get('/api/export/assets.csv');
   assert.equal(r.status, 200);
   // fetch's UTF-8 decoder strips the leading BOM the server sends; a real browser download keeps it.
@@ -42,7 +42,7 @@ test('CSV import creates new assets and reports row errors', async () => {
 });
 
 test('CSV import updates an existing asset by tag instead of duplicating it', async () => {
-  await admin.post('/api/assets', { name: 'Original Name', tag: 'NC-IMP-UPD', location: 'HQ - IT Room' });
+  await admin.post('/api/assets', { available_to_request: true, name: 'Original Name', tag: 'NC-IMP-UPD', location: 'HQ - IT Room' });
   const csv = 'tag,name,location\nNC-IMP-UPD,Original Name,Warehouse\n';
   const r = await admin.rawPost('/api/import/assets', { headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'text/plain' }, body: csv });
   assert.equal(r.body.updated, 1);

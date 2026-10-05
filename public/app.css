@@ -15,6 +15,8 @@
   --warn: #b25e09; --warn-soft: #fff1dc;
   --bad: #c0362c;  --bad-soft: #fde8e6;
   --info: var(--brand-accent); --info-soft: var(--brand-accent-soft);
+  --resv: #6d4ae0; --resv-soft: #efe9fd; /* reserved: its own hue, distinct from "expected back" (blue) */
+  --resv-range: #d8cdfa; --resv-range-ink: #4a2fb8; --resv-edge-ink: #ffffff; /* a range being picked: light violet between, strong violet at both ends */
   --radius: 14px;
   --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
   --tabbar-h: 64px;
@@ -27,6 +29,8 @@
     --text: #eef0f3; --muted: #98a2b3;
     --brand-accent: #4c8dff; --brand-accent-soft: #16233a;
     --ok: #3ccf91; --ok-soft: #0f2a20; --warn: #f0a44b; --warn-soft: #2e2211; --bad: #ff7b70; --bad-soft: #3a1714;
+    --resv: #a58bff; --resv-soft: #231b3d;
+    --resv-range: #3b2f6e; --resv-range-ink: #dcd2ff; --resv-edge-ink: #150f2b;
     --shadow: 0 1px 2px rgba(0,0,0,.4);
     color-scheme: dark;
   }
@@ -472,6 +476,15 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cal-day.busy { background: var(--bad-soft); color: var(--bad); }
 .cal-day.expected { background: var(--info-soft); color: var(--info); border: 1px dashed currentColor; }
 .cal-day.off { background: repeating-linear-gradient(135deg, var(--surface-2), var(--surface-2) 5px, var(--line) 5px, var(--line) 6px); color: var(--muted); }
+.cal-day.reserved { background: var(--resv-soft); color: var(--resv); }
+.cal-day.pick { cursor: pointer; }
+.cal-day.nopick:not(.past):not(.blank) { opacity: .45; }
+/* The picked range reads as ONE block: every day is filled with a light violet, and the first and last day are the strong violet. */
+.cal-day.inrange { background: var(--resv-range); color: var(--resv-range-ink); }
+.cal-day.edge { background: var(--resv); color: var(--resv-edge-ink); }
+.cal-day.edge .c, .cal-day.edge .d { color: var(--resv-edge-ink); }
+.cal-day.edge.today .d { text-decoration-color: var(--resv-edge-ink); }
+.cal-day:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
 .cal-day.past { background: none; color: var(--muted); opacity: .5; }
 .cal-day.today .d { text-decoration: underline; text-underline-offset: 3px; }
 .cal-day.sel { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
@@ -482,11 +495,13 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cal-legend i.mixed { background: var(--warn-soft); box-shadow: inset 0 0 0 1px var(--warn); }
 .cal-legend i.busy { background: var(--bad-soft); box-shadow: inset 0 0 0 1px var(--bad); }
 .cal-legend i.expected { background: var(--info-soft); border: 1px dashed var(--info); }
+.cal-legend i.reserved { background: var(--resv-soft); box-shadow: inset 0 0 0 1px var(--resv); }
 .cal-legend i.off { background: repeating-linear-gradient(135deg, var(--surface-2), var(--surface-2) 3px, var(--line) 3px, var(--line) 4px); }
 .cal-dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: var(--muted); }
 .cal-dot.available { background: var(--ok); }
 .cal-dot.expected { background: var(--info); }
 .cal-dot.occupied { background: var(--bad); }
+.cal-dot.reserved { background: var(--resv); }
 .cal-dot.overdue { background: var(--warn); }
 .cal-dot.off { background: var(--muted); opacity: .6; }
 .cal-counts { list-style: none; margin: 0; padding: 4px 16px 14px; display: grid; gap: 8px; }
@@ -499,3 +514,11 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cal-asset-day h2 { font-size: 15px; color: var(--muted); font-weight: 650; margin: 0 0 8px; }
 .cal-state { display: flex; align-items: center; gap: 10px; font-size: 18px; }
 @media (min-width: 700px) { .cal-day { min-height: 68px; } .cal-day .d { font-size: 15px; } }
+.cal-reserve h3 { font-size: 16px; }
+.cal-range { font-size: 17px; }
+.seg-count { background: var(--bad); color: #fff; font-size: 11px; border-radius: 9px; padding: 1px 6px; margin-left: 4px; }
+.check.dim { opacity: .55; }
+li.resv .item { padding-top: 12px; padding-bottom: 12px; }
+.browse-req { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 12px; padding: 12px 14px; border: 1px dashed var(--line); border-radius: var(--radius); }
+.browse-req[hidden] { display: none; }
+.empty .btn { margin-top: 14px; }

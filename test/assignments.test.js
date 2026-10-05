@@ -20,7 +20,7 @@ before(async () => {
 after(() => stopServer(server));
 
 let seq = 0;
-const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { name, tag: `AS-${++seq}`, ...extra })).body;
+const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, tag: `AS-${++seq}`, ...extra })).body;
 const newPerson = async (name) => (await admin.post('/api/users', { name, email: `p${++seq}@nutricost.com`, login: false })).body;
 const assign = (asset, person, extra = {}) => admin.post(`/api/assets/${asset.id}/checkout`, { employee_id: person.id, ...extra });
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;

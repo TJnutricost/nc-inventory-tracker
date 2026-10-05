@@ -16,7 +16,7 @@ after(() => stopServer(server));
 
 let seq = 0;
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;
-const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { name, tag: `SC-${++seq}`, ...extra })).body;
+const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, tag: `SC-${++seq}`, ...extra })).body;
 const DUE = '2099-01-01';
 async function makeLogin(name) {
   const created = (await admin.post('/api/users', { name, email: `sc${++seq}@nutricost.com` })).body;

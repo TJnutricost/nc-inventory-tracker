@@ -76,7 +76,7 @@ test('IT can create an employee with no login: no account row, assignable, canno
   assert.equal(count('SELECT COUNT(*) c FROM outbox'), outboxBefore, 'no invite email');
   assert.equal(count('SELECT COUNT(*) c FROM employees WHERE id = ?', p.body.id), 1);
 
-  const asset = (await admin.post('/api/assets', { name: 'Handheld Scanner' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Handheld Scanner' })).body;
   const co = await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: p.body.id });
   assert.equal(co.status, 200);
   const detail = (await admin.get(`/api/users/${p.body.id}`)).body;
@@ -159,7 +159,7 @@ test('duplicate person or login emails are rejected case-insensitively on create
 // ---------------------------------------------------------------- deactivation keeps the person
 test('deactivating disables the login and keeps the person and their assignments', async () => {
   const { c, person } = await withLogin('Dexter Deactivate', 'dexter@nutricost.com');
-  const asset = (await admin.post('/api/assets', { name: 'Dex Laptop' })).body;
+  const asset = (await admin.post('/api/assets', { available_to_request: true, name: 'Dex Laptop' })).body;
   await admin.post(`/api/assets/${asset.id}/checkout`, { user_id: person.id });
   const r = await admin.put(`/api/users/${person.id}`, { name: 'Dexter Deactivate', email: 'dexter@nutricost.com', role: 'employee', active: false });
   assert.equal(r.status, 200);

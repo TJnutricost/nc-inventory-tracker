@@ -14,7 +14,7 @@ before(async () => {
 });
 after(() => stopServer(server));
 
-const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { name, ...extra })).body;
+const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, ...extra })).body;
 const newUser = async (name, email) => (await admin.post('/api/users', { name, email, invite: false })).body;
 const row = (id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;
@@ -69,7 +69,7 @@ test('an archived asset\'s history still resolves in the activity feed', async (
 test('an archived tag can never be reused, by create or CSV import; archived assets can\'t be edited, re-archived or checked out', async () => {
   const a = await newAsset('Reserved', { tag: 'NC-RSV1' });
   await admin.post(`/api/assets/${a.id}/archive`, {});
-  const dup = await admin.post('/api/assets', { name: 'Impostor', tag: 'nc-rsv1' });
+  const dup = await admin.post('/api/assets', { available_to_request: true, name: 'Impostor', tag: 'nc-rsv1' });
   assert.equal(dup.status, 400);
   assert.match(dup.body.error, /archived/);
   const imp = await admin.rawPost('/api/import/assets', { headers: { 'X-Requested-With': 'fetch', 'Content-Type': 'text/plain' }, body: 'tag,name\nNC-RSV1,Changed\n' });
@@ -155,22 +155,22 @@ test('previewing the next tag consumes nothing; creating claims exactly that num
 });
 
 test('near-simultaneous creates all receive distinct tags', async () => {
-  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => admin.post('/api/assets', { name: `Parallel ${i}` })));
+  const results = await Promise.all(Array.from({ length: 12 }, (_, i) => admin.post('/api/assets', { available_to_request: true, name: `Parallel ${i}` })));
   assert.ok(results.every((r) => r.status === 200));
   assert.equal(new Set(results.map((r) => r.body.tag)).size, 12);
 });
 
 test('a failed create does not burn a number or leave a duplicate possibility', async () => {
-  await admin.post('/api/assets', { name: 'Taken', tag: 'NC-TAKEN' });
+  await admin.post('/api/assets', { available_to_request: true, name: 'Taken', tag: 'NC-TAKEN' });
   const before = (await admin.get('/api/next-tag')).body.tag;
-  assert.equal((await admin.post('/api/assets', { name: 'Dup', tag: 'NC-TAKEN' })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'Dup', tag: 'NC-TAKEN' })).status, 400);
   assert.equal((await admin.get('/api/next-tag')).body.tag, before);
   assert.equal((await newAsset('After failure')).tag, before);
 });
 
 test('generation skips numbers already taken by manually chosen tags', async () => {
   const next = (await admin.get('/api/next-tag')).body.tag;
-  await admin.post('/api/assets', { name: 'Manual squatter', tag: next });
+  await admin.post('/api/assets', { available_to_request: true, name: 'Manual squatter', tag: next });
   const made = await newAsset('Auto after squatter');
   assert.notEqual(made.tag, next);
   assert.equal(new Set([made.tag, next]).size, 2);
@@ -184,7 +184,7 @@ test('changing the prefix keeps the numeric sequence and does not free old-prefi
   const after = await newAsset('After prefix change');
   assert.equal(after.tag, 'IT-' + String(n + 1).padStart(5, '0'));
   await admin.put('/api/settings', { tag_prefix: 'NC-' });
-  assert.equal((await admin.post('/api/assets', { name: 'Old prefix reuse', tag: last.tag })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'Old prefix reuse', tag: last.tag })).status, 400);
 });
 
 function bootAt(dir) {
@@ -201,8 +201,8 @@ test('the tag counter survives an application restart and archiving', async () =
   let boot = bootAt(dir);
   let srv = await startServer(boot.app);
   let c = (await setupAdmin(srv)).client;
-  const t1 = (await c.post('/api/assets', { name: 'One' })).body;
-  const t2 = (await c.post('/api/assets', { name: 'Two' })).body;
+  const t1 = (await c.post('/api/assets', { available_to_request: true, name: 'One' })).body;
+  const t2 = (await c.post('/api/assets', { available_to_request: true, name: 'Two' })).body;
   await c.post(`/api/assets/${t2.id}/archive`, {});
   const last = boot.db.prepare('SELECT last_number n FROM asset_tag_counter').get().n;
   await stopServer(srv); boot.db.close();
@@ -212,7 +212,7 @@ test('the tag counter survives an application restart and archiving', async () =
   c = makeClient(srv);
   await c.post('/api/login', { email: 'ada@nutricost.com', password: 'correct-horse-1' });
   assert.equal(boot.db.prepare('SELECT last_number n FROM asset_tag_counter').get().n, last);
-  const t3 = (await c.post('/api/assets', { name: 'Three' })).body;
+  const t3 = (await c.post('/api/assets', { available_to_request: true, name: 'Three' })).body;
   assert.notEqual(t3.tag, t1.tag);
   assert.notEqual(t3.tag, t2.tag);
   assert.equal(parseInt(t3.tag.match(/(\d+)$/)[1], 10), last + 1);
@@ -224,5 +224,5 @@ test('existing manual tag lookup and duplicate-tag rejection still work', async 
   assert.equal((await admin.get('/api/assets/lookup/NC-MAN1')).body.id, a.id);
   assert.equal((await admin.get('/api/assets/lookup/ser-man-1')).body.id, a.id);
   assert.deepEqual((await admin.get('/api/assets/lookup/NOPE-000')).body, { found: false, code: 'NOPE-000' });
-  assert.equal((await admin.post('/api/assets', { name: 'Dup', tag: 'NC-MAN1' })).status, 400);
+  assert.equal((await admin.post('/api/assets', { available_to_request: true, name: 'Dup', tag: 'NC-MAN1' })).status, 400);
 });
