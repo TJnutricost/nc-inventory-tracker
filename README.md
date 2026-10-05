@@ -21,7 +21,7 @@ It runs on phones, tablets and desktops. On a phone, users can add it to the hom
 | **People** | Invite people, set admin or user, deactivate, see each person's current and past equipment | Their own profile |
 | **Data** | CSV import (bulk onboarding) and export, full activity log per asset | |
 
-**Emails sent automatically:** welcome/invite, password reset, checked out to you, return received, please return, dropped-off alert (to IT), new equipment request (to IT), request approved or declined, self check-out alert (to IT), overdue reminder (on the due date, then every 3 days).
+**Emails sent automatically:** welcome/invite, password reset, checked out to you, return received, please return, dropped-off alert (to IT), new equipment request (to IT), request approved or declined, self check-out alert (to IT), overdue reminder (on the due date, then every 3 days). Waitlist (informational notice to the current reserver when another team joins; "available for you, confirm within 24 hours" to the next person in line). **Settings → IT email** sets the display name and the IT contact / reply-to address; passwords and keys stay in `.env`.
 
 **Barcode scanning** works three ways:
 1. **Phone or tablet camera.** Tap Scan. It reads Code 128, Code 39, UPC/EAN, QR, Data Matrix and more. This needs **https**.
@@ -146,7 +146,7 @@ See `PROJECT_STATUS.md` for the full roadmap and current status of each of these
 
 ## Email (Google Workspace / Gmail)
 
-There are two ways to set it up. Both go in `.env`, and the app needs a restart afterwards.
+Set it up in `.env` (option A below); the app needs a restart afterwards.
 
 **A. Mailbox and App Password (simplest)**
 1. Use or create a mailbox such as `it@nutricost.com`.
@@ -162,8 +162,13 @@ There are two ways to set it up. Both go in `.env`, and the app needs a restart 
    ```
    If App passwords don't appear, a Workspace admin needs to allow them, or you can use option B.
 
-**B. Workspace SMTP relay (no mailbox password)**
-In the Admin console, go to Apps → Google Workspace → Gmail → Routing → **SMTP relay service**, and allow your server's IP address. Then set `SMTP_HOST=smtp-relay.gmail.com`, `SMTP_PORT=587`, and use `SMTP_USER`/`SMTP_PASS` only if you required authentication.
+**B. Workspace SMTP relay:** *not supported yet.* The mailer only starts when **both** `SMTP_USER` and `SMTP_PASS` are set (it always signs in), so an IP-allow-listed relay without a password cannot be used. If App passwords are blocked for your Workspace, ask a Workspace admin to allow them for the sending mailbox.
+
+**Every variable the mailer reads:** `SMTP_HOST` (default `smtp.gmail.com`), `SMTP_PORT` (default `465`; other ports use STARTTLS), `SMTP_USER`, `SMTP_PASS` (the App Password), `MAIL_FROM` (optional, defaults to `SMTP_USER`), `APP_URL` (links in emails), plus the optional `MAIL_ALLOW_IT_FROM`, `APP_TIMEZONE` and the testing-only `MAIL_TEST_RECIPIENT`. Credentials live only in `.env` (locally) or Railway secrets, never in the database or Settings.
+
+**Seeding and tests never send email.** `npm run seed:dev`, `npm run seed:verify` and `npm test` are safe to run even with your real `SMTP_USER` / `SMTP_PASS` / `MAIL_TEST_RECIPIENT` in `.env` or your shell: they set `NC_NO_EXTERNAL_MAIL=1` before the app loads, which makes the app skip `.env` and never create an SMTP connection (seeded invites are only recorded in the Outbox as "Not sent"). You do not need to disable anything first. A normal `npm run dev` / `npm start` is unaffected.
+
+**Testing real email locally (seeded users are `@example.com`).** In your own `.env` set `SMTP_USER` + `SMTP_PASS` (your work mailbox + its App Password) and `MAIL_TEST_RECIPIENT=<your real work email>`, then run `npm run dev` against the seeded data. Every email the app sends (waitlist notices, invites, reminders…) is delivered to *you*, with `[DEV for <intended recipient>]` in the subject and a banner naming who it was meant for; Settings shows a yellow "Email test mode" notice. **Settings → Outbox is a development/debug record only**: a row means the app *tried* to send (`Not sent` = email isn't configured, nothing left the app; `Sent` = the mail server accepted it; `Failed` = rejected, with the reason). It never means the recipient received anything.
 
 To check it, go to **Settings → Send me a test email**. The Outbox shows each message as sent, failed (with the reason) or not sent.
 

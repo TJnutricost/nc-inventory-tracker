@@ -67,7 +67,7 @@ test('migration 13 adds both settings as OFF for every existing asset and create
   const all = require('../src/migrations');
   runMigrations(d, all.filter((m) => m.id <= 12));
   d.prepare("INSERT INTO assets (tag, name) VALUES ('OLD-1', 'Existing desk computer')").run();
-  assert.deepEqual(runMigrations(d, all), [13]);
+  assert.deepEqual(runMigrations(d, all.filter((m) => m.id <= 13)), [13]);
   assert.deepEqual({ ...d.prepare("SELECT available_to_request a, reservation_requires_approval r FROM assets WHERE tag = 'OLD-1'").get() }, { a: 0, r: 0 });
   const emp = d.prepare("INSERT INTO employees (name) VALUES ('E')").run().lastInsertRowid;
   const asset = d.prepare("SELECT id FROM assets").get().id;
@@ -618,7 +618,11 @@ test('front end: Reserve and the reservation tools exist only where they belong'
   assert.doesNotMatch(summary, /<button|resv-|Reserve this|data-resv/, 'broad calendars stay read-only: no reservation control anywhere in the count panel, the asset list or the admin list');
   // the single-asset panel offers it only when the server says so
   assert.match(view, /A\[0\]\.reserve && A\[0\]\.reserve\.allowed/);
-  assert.match(view, /\/reservations`/);
+  // the reservation POST now lives in the ONE shared date sheet (rangeSheet); the calendar reaches it only through its canReserve-gated handlers
+  assert.match(src.slice(src.indexOf('function rangeSheet('), src.indexOf('function wireWaitlistActions(')), /\/reservations`/);
+  assert.match(view, /canReserve && st\.day >= data\.today && A\[0\]\.days\[i\] === 'reserved'/);
+  assert.match(view, /const canReserve = !isSummary\(\) && !!\(A\[0\] && A\[0\]\.reserve && A\[0\]\.reserve\.allowed\)/);
+  assert.doesNotMatch(view, /toast\([^)]*is reserved/, 'tapping a reserved day opens the sheet; there is no warning toast');
 });
 
 test('front end: employee Browse starts on All equipment for real (selected AND listed, no click), and "Send IT a request" is a button using the unchanged request flow', () => {

@@ -16,6 +16,11 @@
 // Integrity: every write (create, approve, shorten, cancel, decline) runs in ONE `BEGIN IMMEDIATE` transaction that re-reads the rows it
 // depends on, so two simultaneous requests cannot both claim the same dates (SQLite allows one writer; the second waits, then sees the first).
 // Approval re-checks the whole range at approval time and never overrides an existing confirmed reservation.
+//
+// Waitlist (slice 8, src/waitlist.js): an ACTIVE availability hold (a waitlist entry in status 'held' whose hold_expires_at is still in the
+// future) blocks every other reservation of those dates exactly like a confirmed reservation does; an expired hold blocks nothing, even
+// before the sweep has recorded it. Whenever dates may have come free (cancel, shorten, decline) the queue is re-evaluated INSIDE the same
+// transaction, so nobody can slip into the gap between the dates freeing up and the next person in line being offered them.
 const availability = require('./availability');
 const { capacity } = require('./assignments');
 
@@ -38,11 +43,21 @@ function validateRange(start, end, today) {
 
 const { reserveEligibility } = availability; // shared with the single-asset calendar (which uses it to decide whether to offer Reserve)
 
-// First thing standing in the way of [start, end] for this asset, or null. `excludeId` = the reservation being (re)checked.
-function findConflict(db, asset, start, end, { excludeId = 0, today }) {
+// First thing standing in the way of [start, end] for this asset, or null. `excludeId` = the reservation being (re)checked;
+// `ignoreHoldId` = the waitlist hold being confirmed (it must not block itself); `forHold` = the question is "may this entry be OFFERED a
+// hold?", which also treats another employee's PENDING reservation made from a hold as still occupying its dates (it keeps its place in line).
+function findConflict(db, asset, start, end, { excludeId = 0, today, ignoreHoldId = 0, forHold = false }) {
   const o = db.prepare(`SELECT start_date, end_date FROM reservations WHERE asset_id = ? AND status = 'confirmed' AND id <> ? AND start_date <= ? AND end_date >= ? ORDER BY start_date LIMIT 1`)
     .get(asset.id, excludeId, end, start);
   if (o) return `It is already reserved ${span(o.start_date, o.end_date)}.`;
+  const h = db.prepare(`SELECT start_date, end_date FROM waitlist_entries WHERE asset_id = ? AND status = 'held' AND hold_expires_at > datetime('now') AND id <> ? AND start_date <= ? AND end_date >= ? ORDER BY start_date LIMIT 1`)
+    .get(asset.id, ignoreHoldId, end, start);
+  if (h) return `It is on a priority hold for a waitlisted team ${span(h.start_date, h.end_date)}.`;
+  if (forHold) {
+    const p = db.prepare(`SELECT start_date, end_date FROM reservations WHERE asset_id = ? AND status = 'pending' AND waitlist_entry_id IS NOT NULL AND id <> ? AND start_date <= ? AND end_date >= ? ORDER BY start_date LIMIT 1`)
+      .get(asset.id, excludeId, end, start);
+    if (p) return `A reservation from the waitlist is waiting for IT approval ${span(p.start_date, p.end_date)}.`;
+  }
   const open = db.prepare('SELECT * FROM assignments WHERE asset_id = ? AND returned_at IS NULL').all(asset.id);
   if (open.length) {
     for (let d = start; d <= end; d = addDays(d, 1)) {
@@ -64,6 +79,18 @@ const loadAsset = (db, id) => db.prepare('SELECT * FROM assets WHERE id = ?').ge
 // The employee submits. Confirmed at once, or pending IT approval, per the ASSET's setting. Reserving does NOT depend on the employee's
 // self-checkout permission (that permission governs "Check out now" only); the gates are the asset's own: available_to_request ON and the
 // normal eligibility rules, plus a linked, active employee.
+// The one place a reservation row is written, shared by create() and by confirming a waitlist hold (src/waitlist.js). Must run inside a
+// BEGIN IMMEDIATE transaction; the caller has already done its own eligibility / conflict checks.
+function insertReservation(db, asset, { employeeId, actorAccountId, start, end, waitlistEntryId = null }) {
+  const needs = asset.reservation_requires_approval ? 1 : 0;
+  const id = db.prepare(`INSERT INTO reservations (asset_id, employee_id, start_date, end_date, status, requires_approval, created_by, waitlist_entry_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(asset.id, employeeId, start, end, needs ? 'pending' : 'confirmed', needs, actorAccountId, waitlistEntryId).lastInsertRowid;
+  note(db, asset.id, actorAccountId, needs ? 'reservation_requested' : 'reserved', `${span(start, end)}${needs ? ' · waiting for IT approval' : ''}${waitlistEntryId ? ' · from the waitlist' : ''}`, employeeId);
+  return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id);
+}
+const hasOwnOverlap = (db, assetId, employeeId, start, end) =>
+  !!db.prepare(`SELECT 1 FROM reservations WHERE asset_id = ? AND employee_id = ? AND status IN ('pending','confirmed') AND start_date <= ? AND end_date >= ?`).get(assetId, employeeId, end, start);
+
 function create(db, { assetId, employeeId, actorAccountId, start, end }) {
   return db.transaction(() => {
     const today = todayOf(db);
@@ -74,18 +101,22 @@ function create(db, { assetId, employeeId, actorAccountId, start, end }) {
     const emp = db.prepare('SELECT status FROM employees WHERE id = ?').get(employeeId);
     if (!emp || emp.status !== 'active') throw httpError(400, 'Your account is not active.');
     validateRange(start, end, today);
-    if (db.prepare(`SELECT 1 FROM reservations WHERE asset_id = ? AND employee_id = ? AND status IN ('pending','confirmed') AND start_date <= ? AND end_date >= ?`).get(assetId, employeeId, end, start)) {
+    if (hasOwnOverlap(db, assetId, employeeId, start, end)) {
       throw httpError(409, 'You already have a reservation for this item that overlaps those dates.');
+    }
+    // your own hold is not "someone else's": it points you at the confirm button instead of leaving you to wonder why the dates are taken
+    if (db.prepare(`SELECT 1 FROM waitlist_entries WHERE asset_id = ? AND employee_id = ? AND status = 'held' AND hold_expires_at > datetime('now') AND start_date <= ? AND end_date >= ?`).get(assetId, employeeId, end, start)) {
+      throw httpError(409, 'You have a priority hold on those dates. Confirm it under Requests > Reservations.');
     }
     const clash = findConflict(db, asset, start, end, { today });
     if (clash) throw httpError(409, `${clash} Choose different dates.`);
-    const needs = asset.reservation_requires_approval ? 1 : 0;
-    const id = db.prepare(`INSERT INTO reservations (asset_id, employee_id, start_date, end_date, status, requires_approval, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-      .run(assetId, employeeId, start, end, needs ? 'pending' : 'confirmed', needs, actorAccountId).lastInsertRowid;
-    note(db, assetId, actorAccountId, needs ? 'reservation_requested' : 'reserved', `${span(start, end)}${needs ? ' · waiting for IT approval' : ''}`, employeeId);
-    return db.prepare('SELECT * FROM reservations WHERE id = ?').get(id);
+    return insertReservation(db, asset, { employeeId, actorAccountId, start, end });
   }).immediate();
 }
+
+// Dates may have come free: let the waitlist offer them (inside the caller's transaction; src/waitlist.js is required lazily because it
+// requires this module).
+const requeue = (db, assetId) => require('./waitlist').evaluateAsset(db, assetId);
 
 // IT approves a pending reservation. The whole range is checked again NOW; if anything has taken those dates (or the asset is no
 // longer reservable) approval fails with 409 and the row stays pending, for IT to decline.
@@ -118,6 +149,7 @@ function decline(db, id, { actorAccountId, note: text }) {
       .run(actorAccountId, text || null, id);
     if (!info.changes) throw httpError(409, 'This reservation was just updated by someone else. Reload and try again.');
     note(db, r.asset_id, actorAccountId, 'reservation_declined', `${span(r.start_date, r.end_date)}${text ? ` · ${text}` : ''}`, r.employee_id);
+    requeue(db, r.asset_id); // (a declined reservation made from a waitlist hold gives its dates back to the queue)
     return load(db, id);
   }).immediate();
 }
@@ -135,6 +167,7 @@ function cancel(db, id, { actorAccountId, employeeId, isAdmin }) {
     const info = db.prepare("UPDATE reservations SET status = 'cancelled', cancelled_by = ?, cancelled_at = datetime('now'), updated_at = datetime('now') WHERE id = ? AND status IN ('pending','confirmed')").run(actorAccountId, id);
     if (!info.changes) throw httpError(409, 'This reservation was just updated by someone else. Reload and try again.');
     note(db, r.asset_id, actorAccountId, 'reservation_cancelled', `${span(r.start_date, r.end_date)}${isAdmin && r.employee_id !== employeeId ? ' · cancelled by IT' : ''}`, r.employee_id);
+    requeue(db, r.asset_id);
     return load(db, id);
   }).immediate();
 }
@@ -157,6 +190,7 @@ function shorten(db, id, { actorAccountId, employeeId, newEnd }) {
     const info = db.prepare("UPDATE reservations SET end_date = ?, updated_at = datetime('now') WHERE id = ? AND status = 'confirmed' AND end_date = ?").run(newEnd, id, r.end_date);
     if (!info.changes) throw httpError(409, 'This reservation was just updated by someone else. Reload and try again.');
     note(db, r.asset_id, actorAccountId, 'reservation_shortened', `${fmt(r.start_date)}: end ${fmt(r.end_date)} → ${fmt(newEnd)}`, r.employee_id);
+    requeue(db, r.asset_id);
     return load(db, id);
   }).immediate();
 }
@@ -167,4 +201,4 @@ function phaseOf(r, today) {
   return r.end_date < today ? 'past' : r.start_date <= today ? 'active' : 'upcoming';
 }
 
-module.exports = { LIVE, MAX_DATE, validDate, validateRange, reserveEligibility, findConflict, create, approve, decline, cancel, shorten, phaseOf, todayOf };
+module.exports = { LIVE, MAX_DATE, httpError, validDate, validateRange, reserveEligibility, findConflict, insertReservation, hasOwnOverlap, note, loadAsset, fmt, span, create, approve, decline, cancel, shorten, phaseOf, todayOf };
