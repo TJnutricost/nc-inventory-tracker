@@ -2,7 +2,7 @@
 
 **Status:** Audit complete. Target decisions **APPROVED** (2026-09-28) as the Phase 1 design. **Nothing in this document is implemented** — every item marked *Planned* is future work in Phase 1B–1G.
 
-> **Update 2026-10-01 — Phase 1 is complete** (1B–1E plus the Foundation Closeout; see `PROJECT_STATUS.md` §11 for what was built). This file is the original 1A design record. Two decisions were **superseded by the closeout brief**: §3.2 *serials* — hard uniqueness on the normalized serial (trim + case-insensitive, archived included, blank = NULL, no placeholder list) replaced "warn + override"; §3.7 *request lifecycle* — only integrity hardening of the existing statuses was built, the new states / `opened_at` rescind cutoff remain future work. There is no Phase 1F/1G.
+> **Update 2026-10-01 — Phase 1 is complete** (1B–1E plus the Foundation Closeout; see `PROJECT_HISTORY.md` §11 for what was built). This file is the original 1A design record. Two decisions were **superseded by the closeout brief**: §3.2 *serials* — hard uniqueness on the normalized serial (trim + case-insensitive, archived included, blank = NULL, no placeholder list) replaced "warn + override"; §3.7 *request lifecycle* — only integrity hardening of the existing statuses was built, the new states / `opened_at` rescind cutoff remain future work. There is no Phase 1F/1G.
 **Branch:** `feature/phase-1a-data-model-design` (from `stage` @ `054ab25`)
 **Scope of this slice:** inspection + design + documentation only. No schema, behavior, migration, or test changes.
 
@@ -55,7 +55,7 @@ Not a problem (verified): user hard-delete is blocked by FKs (`FOREIGN KEY const
 
 Every subsection is **Approved / Planned (not implemented)** unless it says otherwise. The slice that delivers it is noted.
 
-### 3.1 Employees and accounts (Phase 1D — implemented; see PROJECT_STATUS.md for the as-built schema and the notes below)
+### 3.1 Employees and accounts (Phase 1D — implemented; see PROJECT_HISTORY.md for the as-built schema and the notes below)
 
 > **Phase 1E additions to `employees`:** `can_self_checkout` (see §3.8) and optional free-text `building` (nullable; trimmed; no list/table/settings — Nutricost has 14+ buildings and IT types what applies). Login status is shown on the profile; the People list emphasizes self-checkout permission.
 
@@ -98,7 +98,7 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
   - **`retired`, `disposed`, and archive require all active assignments to be resolved first** (the existing retire guard extends to the new terminal states and to archive).
 - *Current behavior that already matches:* retire is refused with an open assignment; `lost` with an open assignment is already allowed (F6 is therefore **not a defect** — it is now the approved rule).
 
-### 3.4 Assignment history and capacity (Phase 1E — implemented; as-built notes in PROJECT_STATUS.md. Deviations from the plan below: capacity reuses `license_seats` instead of a new `seat_capacity` column; the due field stays `due_date`)
+### 3.4 Assignment history and capacity (Phase 1E — implemented; as-built notes in PROJECT_HISTORY.md. Deviations from the plan below: capacity reuses `license_seats` instead of a new `seat_capacity` column; the due field stays `due_date`)
 
 - **Invariants (Approved / Planned):**
   1. Assignments are never deleted; they survive asset lifecycle changes (RESTRICT, not CASCADE) and account changes.
@@ -207,28 +207,28 @@ Every subsection is **Approved / Planned (not implemented)** unless it says othe
 
 Ordered to minimize schema churn: cheap fixes and the migration runner first, then lifecycle, then the identity split, then history hardening built on the split, then identifiers, then requests. Each slice is independently reviewable/mergeable into `stage`. If a sub-slice proves necessary, it is reported before scope expands. **All Planned — none started.**
 
-### Phase 1B — Migration Foundation + Immediate Integrity Fixes — **IMPLEMENTED** (see PROJECT_STATUS.md; category/location length limits and list-membership validation deferred)
+### Phase 1B — Migration Foundation + Immediate Integrity Fixes — **IMPLEMENTED** (see PROJECT_HISTORY.md; category/location length limits and list-membership validation deferred)
 - **Goal:** migration runner; cover-photo ownership validation (F2, incl. repairing bad rows); invalid request `asset_id`/`user_id` → proper 4xx not 500 (F8); self-checkout default OFF for new DBs; small category/location input validation if it fits cleanly.
 - **Affects:** `src/db.js` (runner, default), `PUT /assets/:id/cover`, `POST /requests`, asset create/update/import validation, tests/seed that assume self-checkout ON.
 - **User-visible:** foreign/missing cover photo is rejected; clear errors on bad request input; new installs start with self-checkout off.
 - **Tests:** runner idempotent on fresh + existing DB; cover own/foreign/missing/clear; request bad ids → 400; fresh DB default OFF while an existing DB's stored value is preserved; category validation.
 - **Risk:** low. No major model rewrite.
 
-### Phase 1C — Asset Lifecycle + Durable Tag Issuance — **IMPLEMENTED** (see PROJECT_STATUS.md)
+### Phase 1C — Asset Lifecycle + Durable Tag Issuance — **IMPLEMENTED** (see PROJECT_HISTORY.md)
 - **Goal:** Archive replaces Delete; `archived_at`; `disposed`; terminal-state assignment guards (retired/disposed/archive need no active assignments; `lost` may stay assigned); monotonic never-reused tags via durable high-water counter; prefix changes don't reset numbers; tags immutable.
 - **Affects:** `assets` (+ counter table), asset endpoints/filters/dashboard, activity, UI Delete→Archive with reason.
 - **User-visible:** "Archive" with reason; archived hidden by default with a filter; tag field read-only after creation.
 - **Tests:** archive preserves assignments/activity/photos/requests; guards; lost-while-assigned allowed; tag not reissued after archiving the top asset; prefix change continues the number; tag edit refused; dashboard counts.
 - **Risk:** medium (touches many queries). Depends on 1B.
 
-### Phase 1D — Employee / Account Split — **IMPLEMENTED** (as-built details in PROJECT_STATUS.md; `auth_provider`/`auth_subject` placeholders intentionally not added yet)
+### Phase 1D — Employee / Account Split — **IMPLEMENTED** (as-built details in PROJECT_HISTORY.md; `auth_provider`/`auth_subject` placeholders intentionally not added yet)
 - **Goal:** `employees` + `accounts`; migrate `users` 1:1 keeping ids; update references; preserve current local login; roles `admin`/`employee`; IT can create employees with no account and assign to them.
 - **Affects:** `users` → two tables, all joins on `users`, People/Accounts admin UI, CSV import `assigned_email`, seed script, mailer recipients, sessions (`uid` → account).
 - **User-visible:** "Users" becomes people with optional login; assets assignable to no-login people. Login behaves as today.
 - **Tests:** migration preserves every assignment/request/activity link; no-login employee assignable; one account ↔ at most one employee and vice versa; role mapping `user→employee`; admin authz independent of employee link/hostname; golden-workflow test still green.
 - **Risk:** highest (large surface, no external auth). Depends on 1C (and 1B runner).
 
-### Phase 1E — Assignment + Historical Integrity — **IMPLEMENTED** (migration 6; see PROJECT_STATUS.md. Not done: `seat_capacity` column, §3.10 audit improvements, cover-photo FK)
+### Phase 1E — Assignment + Historical Integrity — **IMPLEMENTED** (migration 6; see PROJECT_HISTORY.md. Not done: `seat_capacity` column, §3.10 audit improvements, cover-photo FK)
 - **Goal:** history-safe FKs (assignments/activity/requests → assets RESTRICT; cover-photo FK path); assignments reference employees, actors reference accounts; active `(asset_id, employee_id)` unique index; `seat_capacity` with transactional capacity enforcement; durable activity/audit improvements (3.10); **assignment mode** — an assignment-level permanent-vs-checkout distinction that history preserves (3.4; approved 2026-09-30, exact field name TBD in 1E, not inferred from category).
 - **Affects:** `assignments`, `activity`, `requests`, `assets` (SQLite table rebuilds), `log()` and `doCheckout`.
 - **User-visible:** none directly; richer activity entries. (Whether check-out/assign flows expose the mode is decided in 1E.)
