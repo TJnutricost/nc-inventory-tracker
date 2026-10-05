@@ -47,10 +47,10 @@ async function api(method, url, body, { raw } = {}) {
 }
 
 let toastTimer;
-function toast(msg, isErr = false) {
+function toast(msg, isErr = false, kind = '') { // kind 'ok' = a green success toast (used where the result is worth confirming clearly)
   const t = $('#toast');
-  t.textContent = msg; t.className = 'show' + (isErr ? ' err' : '');
-  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ''), 2800);
+  t.textContent = msg; t.className = 'show' + (isErr ? ' err' : kind ? ' ' + kind : '');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.className = ''), msg.length > 40 ? 4500 : 2800); // (a longer message needs longer to read)
 }
 const fail = (e) => toast(e.message || String(e), true);
 
@@ -347,7 +347,8 @@ async function refreshBadge() {
     const rows = await api('GET', '/api/requests?status=open');
     // For an employee the badge means "IT is waiting on you": a return IT asked for, not one they started themselves.
     let n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
-    if (isAdmin()) { try { n += (await api('GET', '/api/reservations?status=open')).filter((r) => r.phase === 'pending').length; } catch { /* the badge is best-effort */ } } // reservations waiting for IT
+    // IT: reservations waiting for approval + everyone currently on a waitlist. Employee: offers waiting for their answer. Active items only, never history.
+    try { n += (await api('GET', '/api/reservation-counts')).attention; } catch { /* the badge is best-effort */ }
     S.badge = n;
     const tab = $('.tabbar a[data-key=requests]');
     if (tab) { $('.badge-dot', tab)?.remove(); if (n) tab.insertAdjacentHTML('beforeend', `<span class="badge-dot">${n}</span>`); }
@@ -370,9 +371,10 @@ function assetCtx() {
   const p = qs(); const src = p.get('src');
   if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
   const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
-  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null };
+  // `from=#/settings` rides along only when the catalog itself was opened from Settings: the asset's Back then returns to the catalog WITH it.
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
 }
-const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, tab: c.tab }) : ''; }; // carried on to the edit form and back
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, tab: c.tab, from: c.fromSettings ? '#/settings' : null }) : ''; }; // carried on to the edit form and back
 async function assetBackTarget() {
   const c = assetCtx();
   const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
@@ -387,7 +389,8 @@ async function assetBackTarget() {
     try { const u = (await api('GET', '/api/users/' + c.id)).user; return { href: `#/person/${c.id}`, label: u.name, exact: true }; } catch { return { href: '#/people', label: 'People', exact: true }; }
   }
   // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
-  const root = c.src === 'catalog' ? { href: '#/catalog', label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
+  const catFrom = (href) => (c.fromSettings ? `${href}${href.includes('?') ? '&' : '?'}from=${encodeURIComponent('#/settings')}` : href); // the catalog keeps its Settings source
+  const root = c.src === 'catalog' ? { href: catFrom('#/catalog'), label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
   if (!c.node) return { ...root, exact: true };
   let rows = []; try { rows = await api('GET', '/api/catalog' + (c.src === 'catalog' ? '?include_archived=1' : '')); } catch { /* fall back to the root */ }
   const n = rows.find((r) => r.id === c.node);
@@ -395,7 +398,7 @@ async function assetBackTarget() {
   // Opened from a virtual "All in <name>" view (admin catalog &all=1; employee Browse, where an entry with children always shows its
   // whole branch): say so. The URL is the same real-entry route — "All in" is never a stored entry.
   const virtual = c.src === 'catalog' ? c.all : n.child_count > 0;
-  return { href: `${c.src === 'catalog' ? '#/catalog' : '#/assets'}?node=${n.id}${c.src === 'catalog' && c.all ? '&all=1' : ''}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
+  return { href: c.src === 'catalog' ? catFrom(`#/catalog?node=${n.id}${c.all ? '&all=1' : ''}`) : `#/assets?node=${n.id}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
 }
 
 // ============================================================ router
@@ -602,7 +605,7 @@ async function viewHome() {
     </div>`;
   wireDropoffs(main());
 }
-const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved', reserved: 'Reserved', reservation_requested: 'Reservation requested', reservation_approved: 'Reservation approved', reservation_declined: 'Reservation declined', reservation_cancelled: 'Reservation cancelled', reservation_shortened: 'Reservation shortened' };
+const ACTION_LABEL = { created: 'Added', edited: 'Edited', checked_out: 'Checked out', checked_in: 'Checked in', return_requested: 'Return requested', dropped_off: 'Dropped off', photo_added: 'Photo added', archived: 'Archived', requested: 'Requested', issue_reported: 'Issue reported', issue_resolved: 'Issue resolved', reserved: 'Reserved', reservation_requested: 'Reservation requested', reservation_approved: 'Reservation approved', reservation_declined: 'Reservation declined', reservation_cancelled: 'Reservation cancelled', reservation_shortened: 'Reservation shortened', waitlist_joined: 'Joined waitlist', waitlist_hold_started: 'Availability hold started', waitlist_confirmed: 'Hold confirmed', waitlist_declined: 'Hold declined', waitlist_left: 'Left waitlist', waitlist_updated: 'Waitlist dates changed', waitlist_removed: 'Removed from waitlist', waitlist_expired: 'Waitlist entry expired' };
 function activityList(rows, withAsset, src = '') {
   if (!rows.length) return `<div class="empty"><p>No activity yet.</p></div>`;
   return `<ul class="timeline">${rows.map((r) => `<li><span class="dot"></span><div class="grow"><div><strong>${esc(ACTION_LABEL[r.action] || r.action)}</strong>${withAsset && r.asset_id ? ` · <a href="#/asset/${r.asset_id}${src ? srcQ(src) : ''}">${esc(r.asset_name || '')} <span class="mono small">${esc(r.tag || '')}</span></a>` : ''}</div>
@@ -1454,25 +1457,31 @@ async function viewRequests() {
   // an employee sees their own, with Cancel / Shorten. All rules come from the server.
   const syncResvLabel = (n) => { const b = $('#seg [data-v=reservations]'); if (b) b.innerHTML = `Reservations${n ? ` <span class="seg-count">${n}</span>` : ''}`; };
   const renderReservations = async () => {
-    const rows = await api('GET', '/api/reservations');
+    const [rows, wl] = await Promise.all([api('GET', '/api/reservations'), api('GET', '/api/waitlist')]); // (waitlist entries live here too, not in a product of their own)
     const list = $('#list'); if (!list) return;
     const adminV = isAdmin();
     const pending = rows.filter((r) => r.phase === 'pending');
     const live = rows.filter((r) => ['upcoming', 'active'].includes(r.phase));
     const done = rows.filter((r) => !['pending', 'upcoming', 'active'].includes(r.phase)).slice(0, 30);
-    syncResvLabel(adminV ? pending.length : 0);
-    const section = (title, items, empty) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${items.length}</span></div>${items.length
-      ? `<ul class="list">${items.map((r) => reservationItem(r, { admin: adminV, tab: 'reservations' })).join('')}</ul>` : `<div class="empty">${icon('calendar')}<p>${empty}</p></div>`}</div>`;
+    const offered = wl.filter((w) => w.phase === 'held');
+    const queued = wl.filter((w) => w.phase === 'waiting');
+    const activeWl = wl.filter((w) => w.phase === 'held' || w.phase === 'waiting'); // (server order: asset, then place in line)
+    const wlDone = wl.filter((w) => !['held', 'waiting', 'confirmed', 'pending', 'reservation_declined', 'reservation_cancelled'].includes(w.phase)).slice(0, 30); // (a confirmed one is the reservation above)
+    syncResvLabel(adminV ? pending.length + activeWl.length : offered.length);
+    const section = (title, items, empty, draw = (r) => reservationItem(r, { admin: adminV, tab: 'reservations' })) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${items.length}</span></div>${items.length
+      ? `<ul class="list">${items.map(draw).join('')}</ul>` : `<div class="empty">${icon('calendar')}<p>${empty}</p></div>`}</div>`;
+    const drawWl = (w) => waitlistItem(w, { admin: adminV });
     list.innerHTML = `<div class="stack">${adminV
-      ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Upcoming & active', live, 'No confirmed reservations ahead.')
-      : section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${done.length ? section('Past & closed', done, '') : ''}</div>`;
+      ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Waitlist', activeWl, 'Nobody is on a waitlist.', drawWl) + section('Upcoming & active', live, 'No confirmed reservations ahead.')
+      : `${offered.length ? section('Available for you', offered, '', drawWl) : ''}${section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${queued.length ? section('Waitlist', queued, '', drawWl) : ''}`}${done.length ? section('Past & closed', done, '') : ''}${wlDone.length ? section('Past waitlist entries', wlDone, '', drawWl) : ''}</div>`;
     wireReservationActions(list, rows, () => renderReservations().catch(fail));
+    wireWaitlistActions(list, wl, () => renderReservations().catch(fail));
   };
   const render = async () => {
     $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.tab));
     const stSel = $('#st'); if (stSel) stSel.style.display = state.tab === 'reservations' ? 'none' : '';
     if (state.tab === 'reservations') return renderReservations();
-    if (isAdmin()) api('GET', '/api/reservations?status=open').then((rs) => syncResvLabel(rs.filter((r) => r.phase === 'pending').length)).catch(() => {});
+    api('GET', '/api/reservation-counts').then((c) => syncResvLabel(c.attention)).catch(() => {});
     const all = await api('GET', '/api/requests?status=' + state.tab);
     const list = $('#list'); if (!list) return;
     // IT's state filter: the tab's states with how many requests are in each. (Client-side over the same list; the lifecycle comes from the server.)
@@ -1612,19 +1621,52 @@ function reservationItem(r, { admin: forAdmin, showAsset = true, tab = '' } = {}
   if (r.can_cancel && !itDeciding) acts.push(`<button class="btn sm" data-resv-cancel="${r.id}">Cancel${forAdmin && !r.mine ? ' reservation' : ''}</button>`);
   if (r.can_shorten) acts.push(`<button class="btn sm" data-resv-shorten="${r.id}">Shorten</button>`);
   const who = forAdmin ? `${esc(r.employee_name)}${r.employee_department ? ' · ' + esc(r.employee_department) : ''}` : '';
-  const sub = [`${esc(resvRange(r))} · ${resvDays(r)} day${resvDays(r) === 1 ? '' : 's'}`, who, forAdmin && r.requires_approval ? 'approval required' : '', showAsset ? `<span class="mono">${esc(r.asset_tag)}</span>` : ''].filter(Boolean).join(' · ');
+  const sub = [`${esc(resvRange(r))} · ${resvDays(r)} day${resvDays(r) === 1 ? '' : 's'}`, who, forAdmin && r.requires_approval ? 'approval required' : '', r.waitlist_entry_id ? 'from the waitlist' : '', showAsset ? `<span class="mono">${esc(r.asset_tag)}</span>` : ''].filter(Boolean).join(' · ');
   return `<li class="resv"><div class="item" style="align-items:flex-start"><div class="thumb">${icon('calendar')}</div><div class="grow">
     <div class="row spread" style="align-items:flex-start"><div>${asset}${asset ? '' : `<span class="title">${esc(resvRange(r))}</span>`}</div>${resvPill(r)}</div>
     <div class="sub">${asset ? sub : [resvDays(r) + ' day' + (resvDays(r) === 1 ? '' : 's'), who, forAdmin && r.requires_approval ? 'approval required' : ''].filter(Boolean).join(' · ')}</div>
     ${r.decision_note ? `<div class="small muted" style="margin-top:4px">IT: ${esc(r.decision_note)}</div>` : ''}
     ${acts.length ? `<div class="row wrap" style="margin-top:8px;gap:8px">${acts.join('')}</div>` : ''}</div></div></li>`;
 }
+// Shorten: the reservation's own days are shown on a calendar that is always visible (no pop-up date picker). Tap the new LAST day: days up to it are
+// kept, the days after it are released (green). Only the end can move earlier, never the start or later (the server enforces it).
 function shortenSheet(r, done) {
-  const max = isoAdd(r.end_date, -1);
-  const { el, close } = sheet(`<h2>Shorten this reservation</h2><p class="muted small" style="margin-top:0">${esc(r.asset_name)} · ${esc(resvRange(r))}. You can end it sooner. To keep it longer, make a new reservation.</p>
-    <form class="form-grid" id="f"><label class="field"><span>New last day</span><input type="date" name="end_date" required min="${esc(r.shorten_min)}" max="${esc(max)}" value="${esc(max)}"></label>
-    <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Shorten</button></div></form>`);
-  $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { await api('POST', `/api/reservations/${r.id}/shorten`, { end_date: e.target.end_date.value }); close(); toast('Reservation shortened'); done(); }); };
+  const lastPick = isoAdd(r.end_date, -1); const first = r.shorten_min;
+  let end = lastPick; let month = lastPick.slice(0, 7);
+  const firstMonth = r.start_date.slice(0, 7); const lastMonth = r.end_date.slice(0, 7);
+  const monthName = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
+  const shift = (m, n) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1 + n, 1)).toISOString().slice(0, 7); };
+  const { el, close } = sheet(`<h2>Shorten this reservation</h2><p class="muted small" style="margin-top:0">${esc(r.asset_name)} · ${esc(resvRange(r))}. Tap the new last day. To keep it longer, make a new reservation.</p>
+    <form id="f"><div class="card cal-card" style="box-shadow:none">
+      <div class="cal-nav"><button type="button" class="iconbtn" id="sc-prev" aria-label="Previous month">${icon('back')}</button><h2 id="sc-month" aria-live="polite"></h2><button type="button" class="iconbtn" id="sc-next" aria-label="Next month">${icon('chev')}</button></div>
+      <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
+      <div class="cal-grid" id="sc-grid"></div>
+      <div class="cal-legend small muted"><span><i class="reserved"></i>Kept</span><span><i class="free"></i>Released</span></div></div>
+      <p id="sc-sum" style="margin:12px 0 0"></p>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Shorten</button></div></form>`);
+  const paint = () => {
+    const [y, mo] = month.split('-').map(Number);
+    const lead = new Date(Date.UTC(y, mo - 1, 1)).getUTCDay(); const days = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+    const cells = Array.from({ length: lead }, () => '<span class="cal-day blank" aria-hidden="true"></span>');
+    for (let d = 1; d <= days; d++) {
+      const iso = `${month}-${String(d).padStart(2, '0')}`;
+      const inRes = iso >= r.start_date && iso <= r.end_date; const can = iso >= first && iso <= lastPick;
+      const cls = !inRes ? 'off' : iso === end ? 'edge' : iso < end ? 'inrange' : 'free';
+      const label = !inRes ? 'not part of this reservation' : iso > end ? 'will be released' : iso === end ? 'new last day' : 'kept';
+      cells.push(`<button type="button" class="cal-day ${cls}${can ? ' pick' : ''}" ${can ? `data-day="${iso}"` : 'disabled'} aria-label="${esc(fmtDate(iso))}: ${label}"><span class="d">${d}</span><span class="c"></span></button>`);
+    }
+    $('#sc-grid', el).innerHTML = cells.join('');
+    $('#sc-month', el).textContent = monthName(month);
+    $('#sc-prev', el).disabled = month <= firstMonth; $('#sc-next', el).disabled = month >= lastMonth;
+    const n = Math.round((Date.parse(r.end_date + 'T00:00:00Z') - Date.parse(end + 'T00:00:00Z')) / 864e5);
+    $('#sc-sum', el).innerHTML = `New last day: <strong>${esc(fmtDate(end))}</strong> <span class="muted small">· ${n} day${n === 1 ? '' : 's'} released (${esc(fmtDate(isoAdd(end, 1)))}${n > 1 ? ' – ' + esc(fmtDate(r.end_date)) : ''})</span>`;
+  };
+  $('#sc-grid', el).onclick = (e) => { const b = e.target.closest('[data-day]'); if (b) { end = b.dataset.day; paint(); } };
+  $('#sc-prev', el).onclick = () => { month = shift(month, -1); paint(); };
+  $('#sc-next', el).onclick = () => { month = shift(month, 1); paint(); };
+  paint();
+  // (the success message comes only after the server has finished: it names the range the reservation now has)
+  $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { const u = await api('POST', `/api/reservations/${r.id}/shorten`, { end_date: end }); close(); toast(`Reservation shortened to ${resvRange(u)}.`, false, 'ok'); done(); }); };
 }
 // Wires every reservation button under `root` (rows = the reservations drawn there). `reload` redraws the screen afterwards.
 function wireReservationActions(root, rows, reload) {
@@ -1640,6 +1682,101 @@ function wireReservationActions(root, rows, reload) {
     try { await api('POST', `/api/reservations/${r.id}/cancel`, {}); after('Reservation cancelled'); } catch (e) { fail(e); reload(); }
   });
   each('[data-resv-shorten]', 'resvShorten', (r) => shortenSheet(r, () => { refreshBadge(); reload(); }));
+}
+
+// ---- waitlist (slice 8): shown in the same Requests > Reservations list. First come, first served; nothing is ever reserved for you until
+// you confirm an offer, and nobody can ask a current reserver to give anything up. The server decides the phase and which buttons apply.
+const WL_LABEL = { waiting: 'Waitlisted', held: 'Available — confirm within 24 hours', confirmed: 'Confirmed', pending: 'Waiting for approval', declined: 'No longer needed', left: 'Left waitlist', removed: 'Removed by IT', expired: 'Expired', reservation_declined: 'Declined by IT', reservation_cancelled: 'Reservation cancelled' };
+const WL_CLASS = { waiting: 'in_review', held: 'open', confirmed: 'approved', pending: 'open', reservation_declined: 'denied' };
+const ordinal = (n) => `${n}${[, 'st', 'nd', 'rd'][(n % 100 >> 3) ^ 1 && n % 10] || 'th'}`;
+function waitlistItem(w, { admin: forAdmin }) {
+  const days = resvDays(w);
+  const asset = forAdmin ? `<a href="#/asset/${w.asset_id}${srcQ('requests', { tab: 'reservations' })}" class="title">${esc(w.asset_name)}</a>` : `<span class="title">${esc(w.asset_name)}</span>`;
+  const sub = [`${esc(resvRange(w))} · ${days} day${days === 1 ? '' : 's'}`, forAdmin ? `${esc(w.employee_name)}${w.employee_department ? ' · ' + esc(w.employee_department) : ''}` : '',
+    w.position && w.phase === 'waiting' ? `${ordinal(w.position)} in line` : '', `${w.phase === 'waiting' ? 'in line since' : 'joined'} ${fmtWhen(w.phase === 'waiting' ? w.queued_at : w.created_at)}`, `<span class="mono">${esc(w.asset_tag)}</span>`].filter(Boolean).join(' · ');
+  const acts = [];
+  if (w.can_confirm) acts.push(`<button class="btn sm primary" data-wl-confirm="${w.id}">Yes, I still need it</button><button class="btn sm" data-wl-decline="${w.id}">I don't need it</button>`);
+  else if (w.can_leave) acts.push(`${w.can_edit ? `<button class="btn sm" data-wl-edit="${w.id}">Edit dates</button>` : ''}<button class="btn sm" data-wl-cancel="${w.id}">Leave waitlist</button>`);
+  if (w.can_remove) acts.push(`<button class="btn sm danger" data-wl-remove="${w.id}">Remove</button>`);
+  const hold = w.hold_expires_at ? `<div class="small" style="margin-top:4px"><strong>${forAdmin ? 'Held until' : 'Held for you until'} ${esc(fmtStamp(w.hold_expires_at))}.</strong> ${forAdmin ? 'If they do not answer, the next person in line is offered it.' : 'Confirm that you still need it, or let it go so the next person can have it.'}</div>` : '';
+  return `<li class="resv"><div class="item" style="align-items:flex-start"><div class="thumb">${icon('calendar')}</div><div class="grow">
+    <div class="row spread" style="align-items:flex-start"><div>${asset}</div>${pill(WL_CLASS[w.phase] || 'cancelled', WL_LABEL[w.phase] || w.phase)}</div>
+    <div class="sub">${sub}</div>${hold}
+    ${acts.length ? `<div class="row wrap" style="margin-top:8px;gap:8px">${acts.join('')}</div>` : ''}</div></div></li>`;
+}
+// ONE date sheet for everything that asks for a range of one item's dates: reserve it, join its waitlist, or change the dates of a waitlist
+// entry (`entry`). It never decides anything itself: as the dates change it asks the server (GET /api/assets/:id/range-check) what that range
+// means, so the button always says what will really happen: all free -> Reserve; blocked by a reservation -> Join waitlist; otherwise a reason.
+// `reservedDay` = it was opened by tapping a day that is already reserved (the intro says so). Dates are plain calendar days, both included.
+function rangeSheet({ asset, start, end, entry = null, reservedDay = false, today = localToday(), onDone }) {
+  const edit = !!entry;
+  const { el, close } = sheet(`<h2 id="rs-title">${edit ? 'Edit waitlist dates' : 'Choose your dates'}</h2>
+    <p class="muted small" style="margin-top:0"><strong>${esc(asset.name)}</strong>${asset.tag ? ` <span class="mono">${esc(asset.tag)}</span>` : ''}. ${edit ? 'Change the days you are waiting for.' : reservedDay ? `<strong>${esc(fmtDate(start))} is already reserved.</strong> Choose the whole range you need. If any of it is reserved you can join the waitlist; if all of it is free you can reserve it.` : 'Choose the whole range you need. Both days are included.'}</p>
+    <form class="form-grid" id="f"><div class="form-grid cols"><label class="field"><span>First day</span><input type="date" name="start_date" required min="${esc(today)}" value="${esc(start)}"></label>
+      <label class="field"><span>Last day</span><input type="date" name="end_date" required min="${esc(start >= today ? start : today)}" value="${esc(end)}"></label></div>
+      <div id="rs-note"></div>
+      ${edit ? `<div class="banner warn">${icon('alert')}<div class="grow small"><strong>Changing your dates updates your place in line.</strong> You move behind anyone already waiting for the new dates.</div></div>` : ''}
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go" disabled>${edit ? 'Save new dates' : 'Continue'}</button></div></form>`);
+  const f = $('#f', el); let tok = 0; let out = null;
+  const paint = (r) => {
+    out = r && r.outcome ? r : null;
+    const o = out && out.outcome; const needs = out && out.requires_approval;
+    const same = edit && f.start_date.value === entry.start_date && f.end_date.value === entry.end_date;
+    let kind = 'info'; let text = 'Checking those dates…'; let label = edit ? 'Save new dates' : 'Continue'; let ok = false; let title = edit ? 'Edit waitlist dates' : 'Choose your dates';
+    if (o === 'reserve') {
+      if (edit) { text = 'All of these days are free right now, so there is nothing to wait for. Pick dates that are reserved to stay on the waitlist, or leave the waitlist and reserve these days from the calendar.'; kind = 'warn'; }
+      else { title = needs ? 'Request this reservation?' : 'Reserve this item?'; text = `All of these days are free. ${needs ? 'IT must approve this reservation. It does not hold the dates until they do.' : 'This reservation is confirmed right away.'}`; label = needs ? 'Submit for approval' : 'Reserve'; ok = true; }
+    } else if (o === 'waitlist') {
+      title = edit ? 'Edit waitlist dates' : 'Join the waitlist';
+      text = `${esc(out.message)} If the whole range opens up you will be offered it for 24 hours (first come, first served). The current reservation is not affected.`;
+      label = edit ? 'Save new dates' : 'Join waitlist'; ok = !same;
+      if (same) text = 'These are your current dates. Change them to update your waitlist entry.';
+    } else if (o) { text = esc(out.message); kind = 'warn'; }
+    if (!o) { text = 'Checking those dates…'; }
+    $('#rs-title', el).textContent = title;
+    $('#rs-note', el).innerHTML = `<div class="banner ${kind}">${icon(kind === 'warn' ? 'alert' : 'calendar')}<div class="grow small">${o === 'waitlist' || o === 'reserve' ? text : esc(text)}</div></div>`;
+    const go = $('#go', el); go.textContent = label; go.disabled = !ok;
+  };
+  const check = async () => {
+    const my = ++tok; const s0 = f.start_date.value; const e0 = f.end_date.value;
+    if (!s0 || !e0) { out = null; $('#go', el).disabled = true; $('#rs-note', el).innerHTML = `<div class="banner warn">${icon('alert')}<div class="grow small">Choose a first day and a last day.</div></div>`; return; }
+    paint(null);
+    try { const r = await api('GET', `/api/assets/${asset.id}/range-check?start_date=${encodeURIComponent(s0)}&end_date=${encodeURIComponent(e0)}${edit ? '&entry_id=' + entry.id : ''}`); if (my === tok) paint(r); }
+    catch (e) { if (my === tok) paint({ outcome: 'unavailable', message: e.message }); }
+  };
+  f.start_date.onchange = () => { if (f.end_date.value < f.start_date.value) f.end_date.value = f.start_date.value; f.end_date.min = f.start_date.value; check(); };
+  f.end_date.onchange = check;
+  f.onsubmit = (e) => {
+    e.preventDefault(); if (!out) return;
+    const body = { start_date: f.start_date.value, end_date: f.end_date.value }; const o = out.outcome;
+    busy($('#go', el), async () => {
+      try {
+        if (o === 'reserve' && !edit) { const r = await api('POST', `/api/assets/${asset.id}/reservations`, body); close(); toast(r.status === 'confirmed' ? 'Reserved' : 'Submitted for IT approval'); }
+        else if (o === 'waitlist' && !edit) { await api('POST', `/api/assets/${asset.id}/waitlist`, body); close(); toast('You are on the waitlist'); }
+        else if (o === 'waitlist' && edit) { await api('PUT', `/api/waitlist/${entry.id}`, body); close(); toast('Dates updated. You are now behind anyone already waiting for those dates.'); }
+        else return;
+      } catch (err) { fail(err); check(); return; } // (someone may have just changed things: the sheet re-asks the server)
+      refreshBadge(); if (onDone) await onDone(body);
+    });
+  };
+  check();
+}
+function wireWaitlistActions(root, rows, reload) {
+  const find = (id) => rows.find((w) => w.id === Number(id));
+  const each = (sel, key, fn) => $$(sel, root).forEach((b) => { b.onclick = (e) => { e.preventDefault(); fn(find(b.dataset[key]), b); }; });
+  const after = (msg) => { toast(msg); refreshBadge(); reload(); };
+  const call = async (path, msg) => { try { const r = await api('POST', path, {}); after(typeof msg === 'function' ? msg(r) : msg); } catch (e) { fail(e); refreshBadge(); reload(); } };
+  each('[data-wl-confirm]', 'wlConfirm', (w, b) => busy(b, () => call(`/api/waitlist/${w.id}/confirm`, (r) => (r.reservation.status === 'confirmed' ? 'Reserved for you' : 'Submitted for IT approval'))));
+  each('[data-wl-decline]', 'wlDecline', async (w) => {
+    if (await confirmSheet("You don't need it?", `${w.asset_name} · ${resvRange(w)}. It will be offered to the next person in line.`, "I don't need it", true)) call(`/api/waitlist/${w.id}/decline`, 'Released. Thanks for letting us know');
+  });
+  each('[data-wl-edit]', 'wlEdit', (w) => rangeSheet({ asset: { id: w.asset_id, name: w.asset_name, tag: w.asset_tag }, start: w.start_date, end: w.end_date, entry: w, onDone: reload }));
+  each('[data-wl-cancel]', 'wlCancel', async (w) => {
+    if (await confirmSheet('Leave the waitlist?', `${w.asset_name} · ${resvRange(w)}. You will lose your place in line.`, 'Leave waitlist', true)) call(`/api/waitlist/${w.id}/cancel`, 'You left the waitlist');
+  });
+  each('[data-wl-remove]', 'wlRemove', async (w) => {
+    if (await confirmSheet(`Remove ${w.employee_name} from the waitlist?`, `${w.asset_name} · ${resvRange(w)}. ${w.phase === 'held' ? 'Their hold is released and the next person in line is offered the dates.' : 'They lose their place in line.'}`, 'Remove', true)) call(`/api/waitlist/${w.id}/cancel`, 'Removed from the waitlist');
+  });
 }
 
 // ============================================================ availability calendar (read-only)
@@ -1783,6 +1920,10 @@ async function viewCalendar() {
       for (const x of (a.reservations || []).filter((r) => r.status === 'confirmed' && r.start <= day && day <= r.end)) {
         parts.push(`Reserved ${x.start === x.end ? fmtDate(x.start) : fmtDate(x.start) + ' – ' + fmtDate(x.end)}${x.mine && !adminV ? ' · by you' : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
       }
+      // dates held for someone from the waitlist (a 24-hour offer): taken for everyone else, whoever the person is
+      for (const x of (a.holds || []).filter((h) => h.start <= day && day <= h.end)) {
+        parts.push(x.mine ? `Held for you until ${fmtStamp(x.hold_expires_at)}` : `On hold for a waitlisted team${adminV && x.hold_expires_at ? ' until ' + fmtStamp(x.hold_expires_at) : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
+      }
     } else parts.push(DAY_WORD[s].replace(/^./, (c) => c.toUpperCase()));
     // a request still waiting for IT does not hold the day; its owner (and IT) is reminded of it here
     for (const x of (a.reservations || []).filter((r) => r.status === 'pending' && r.start <= day && day <= r.end)) {
@@ -1856,7 +1997,7 @@ async function viewCalendar() {
     const a = A[0]; const needs = a.reserve.requires_approval;
     if (!sel.on) {
       return `<div class="card pad cal-reserve"><button class="btn primary lg block" id="resv-start">${icon('calendar')} Reserve this asset</button>
-        <p class="small muted" style="margin:10px 0 0">You will pick a start and an end date on the calendar. ${needs ? 'IT approves reservations for this item.' : 'Reservations for this item are confirmed right away.'}</p></div>`;
+        <p class="small muted" style="margin:10px 0 0">You will pick a start and an end date on the calendar. ${needs ? 'IT approves reservations for this item.' : 'Reservations for this item are confirmed right away.'} Need a day that is already reserved? Tap it to join the waitlist.</p></div>`;
     }
     const e0 = sel.end || sel.start;
     return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Reserve ${esc(a.name)}</h3>
@@ -1864,10 +2005,30 @@ async function viewCalendar() {
       ${sel.start ? `<div class="cal-range"><strong>${esc(rangeText(sel.start, e0))}</strong><span class="muted small"> · ${nDays(sel.start, e0)} day${nDays(sel.start, e0) === 1 ? '' : 's'}${sel.end ? '' : ' so far'}</span></div>` : ''}
       <div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" id="resv-cancel">Cancel</button>${sel.start ? '<button class="btn" id="resv-clear">Clear dates</button>' : ''}<button class="btn primary" id="resv-go" ${sel.start ? '' : 'disabled'}>${needs ? 'Review request' : 'Review & reserve'}</button></div></div>`;
   };
+  // Waitlist (slice 8). Offered when the day you are looking at is reserved by someone else (or held for another team). Joining changes nothing
+  // for the current reserver; if the whole range you ask for frees up you get a 24-hour offer, first come, first served.
+  const wlStatus = (w) => (w.phase === 'held' ? `held for you until ${fmtStamp(w.hold_expires_at)}` : 'waitlisted');
+  const waitlistPanel = () => {
+    const mineWl = (A[0].waitlist || []).filter((w) => w.mine);
+    if (!mineWl.length) return '';
+    return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Your waitlist</h3><div class="stack" style="gap:6px">${mineWl.map((w) => `<div class="small"><strong>${esc(rangeText(w.start, w.end))}</strong> · ${esc(wlStatus(w))}</div>`).join('')}<a class="small" href="#/requests?tab=reservations">${mineWl.some((w) => w.phase === 'held') ? 'Confirm or let go of your hold' : 'Edit dates or leave the waitlist'} →</a></div></div>`;
+  };
+  // IT: everyone in line for this asset, oldest first. (Informational: IT may remove an entry from Requests > Reservations, never reorder one.)
+  const queueHtml = () => {
+    const q = isAdmin() && A[0] && A[0].waitlist ? A[0].waitlist : [];
+    if (!q.length) return '';
+    return `<div class="card"><div class="card-head"><h2>Waitlist</h2><span class="muted small">${q.length}</span></div><ul class="list">${q.map((w, n) => `<li><a class="item" href="#/requests?tab=reservations"><div class="grow"><div class="title truncate">${n + 1}. ${esc(w.holder.name)}${w.holder.department ? ' · ' + esc(w.holder.department) : ''}</div>
+      <div class="sub">${esc(rangeText(w.start, w.end))} · ${w.phase === 'held' ? `held until ${esc(fmtStamp(w.hold_expires_at))}` : 'waiting'} · joined ${esc(fmtWhen(w.created_at))}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>`;
+  };
+  // The one date sheet (see rangeSheet): reserve, or join the waitlist when the range is reserved. Afterwards the calendar reloads as it is now.
+  const openRange = (s0, e0, reservedDay) => rangeSheet({ asset: A[0], start: s0, end: e0, reservedDay, today: data.today, onDone: async () => {
+    sel.on = false; sel.start = sel.end = ''; stateCache.clear(); await go2(st.month);
+    if (s0.slice(0, 7) === st.month) { st.day = s0; keepUrl(); paint(); }
+  } });
   const panelHtml = () => {
     const day = st.day; const i = Number(day.slice(8)) - 1;
     const body = day < data.today ? passedHtml(day) : isSummary() ? summaryPanel(day, i) : assetPanel(day, i);
-    return body + (canReserve ? reservePanel() : '');
+    return body + (canReserve ? reservePanel() + waitlistPanel() : '') + (isSummary() ? '' : queueHtml());
   };
 
   const gridHtml = () => {
@@ -1903,7 +2064,7 @@ async function viewCalendar() {
         <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="reserved"></i>Reserved</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
       </div>
       <div id="calpanel"></div>
-      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Confirmed reservations hold their dates; a request still waiting for IT approval does not.</p>
+      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Confirmed reservations hold their dates, and so do dates held for someone from the waitlist; a request still waiting for IT approval does not.</p>
     </div>`;
   const go2 = async (month) => {
     st.month = month; st.day = '';
@@ -1928,25 +2089,11 @@ async function viewCalendar() {
     if (day === sel.start) { sel.end = day; return; }
     try { await ensureMonths(sel.start, day); } catch (e) { fail(e); return; }
     const taken = firstTaken(sel.start, day);
-    if (taken) { toast(`${fmtDate(taken)} is already taken, so that range won't work. Pick a shorter one.`, true); return; }
+    if (taken) { // a reserved day inside the range: that is a waitlist question, not an error (the sheet explains); anything else is just taken
+      if (stateOf(taken) === 'reserved') { sel.end = day; return 'conflict'; }
+      toast(`${fmtDate(taken)} is already taken, so that range won't work. Pick a shorter one.`, true); return;
+    }
     sel.end = day;
-  };
-  const review = (s0, e0) => {
-    const a = A[0]; const needs = a.reserve.requires_approval;
-    const { el, close } = sheet(`<h2>${needs ? 'Request this reservation?' : 'Reserve this item?'}</h2>
-      <div class="holder" style="margin:12px 0"><div class="thumb">${icon('calendar')}</div><div><strong>${esc(a.name)}</strong> <span class="mono small muted">${esc(a.tag || '')}</span></div></div>
-      <div class="kv"><div class="k">Start</div><div class="v">${esc(fmtDate(s0))}</div><div class="k">End</div><div class="v">${esc(fmtDate(e0))}</div><div class="k">Length</div><div class="v">${nDays(s0, e0)} day${nDays(s0, e0) === 1 ? '' : 's'}, both days included</div></div>
-      <p class="small muted" style="margin:12px 0 0">${needs ? 'IT must approve this reservation. It does not hold the dates until they do.' : 'This reservation is confirmed right away.'}</p>
-      <div class="sheet-actions"><button type="button" class="btn" data-close>Back</button><button class="btn primary" id="go">${needs ? 'Submit for approval' : 'Confirm reservation'}</button></div>`);
-    $('#go', el).onclick = () => busy($('#go', el), async () => {
-      try {
-        const r = await api('POST', `/api/assets/${a.id}/reservations`, { start_date: s0, end_date: e0 });
-        close(); toast(r.status === 'confirmed' ? 'Reserved' : 'Submitted for IT approval'); refreshBadge();
-      } catch (err) { close(); toast(err.message, true); } // (someone may have just taken those dates: the calendar below reloads as it is now)
-      sel.on = false; sel.start = sel.end = '';
-      stateCache.clear(); await go2(st.month);
-      if (s0.slice(0, 7) === st.month) { st.day = s0; keepUrl(); paint(); }
-    });
   };
   paint();
   $('#calprev').onclick = () => go2(monthShift(st.month, -1));
@@ -1954,8 +2101,19 @@ async function viewCalendar() {
   $('#calgrid').onclick = async (e) => {
     const b = e.target.closest('[data-day]'); if (!b) return;
     st.day = b.dataset.day;
-    if (sel.on) await pickDay(st.day);
+    // A day that is already reserved (by someone else) opens the date sheet right away: no warning, no scrolling. If a range was being picked
+    // it is the end of that range. Your own reservation or hold is not "someone else's": that day just selects.
+    const i = Number(st.day.slice(8)) - 1;
+    const own = (A[0].holds || []).concat(A[0].reservations || []).some((x) => x.mine && x.start <= st.day && st.day <= x.end);
+    if (canReserve && st.day >= data.today && A[0].days[i] === 'reserved' && !own) {
+      const from = sel.on && sel.start && !sel.end && st.day > sel.start ? sel.start : st.day;
+      if (from !== st.day) sel.end = st.day;
+      keepUrl(); paint(); openRange(from, st.day, from === st.day); return;
+    }
+    let outcome = null;
+    if (sel.on) outcome = await pickDay(st.day);
     keepUrl(); paint();
+    if (outcome === 'conflict') { openRange(sel.start, sel.end, false); return; }
     const panel = $('#calpanel'); if (panel && panel.getBoundingClientRect().top > window.innerHeight - 120) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   };
   $('#calpanel').onclick = (e) => {
@@ -1963,7 +2121,7 @@ async function viewCalendar() {
     if (b.id === 'resv-start') { sel.on = true; sel.start = sel.end = ''; }
     else if (b.id === 'resv-cancel') { sel.on = false; sel.start = sel.end = ''; }
     else if (b.id === 'resv-clear') { sel.start = sel.end = ''; }
-    else if (b.id === 'resv-go') { if (sel.start) review(sel.start, sel.end || sel.start); return; }
+    else if (b.id === 'resv-go') { if (sel.start) openRange(sel.start, sel.end || sel.start, false); return; }
     else return;
     keepUrl(); paint();
   };
@@ -2147,27 +2305,35 @@ async function viewSettings() {
         <label class="check"><input type="checkbox" name="overdue_reminders" ${s.overdue_reminders ? 'checked' : ''}><span><strong>Email overdue reminders</strong><br><span class="small muted">Sent when an item passes its due date, then every 3 days.</span></span></label>
         <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label>
         <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
-      <div class="card pad"><div class="form-grid cols">
-        <div class="field"><span>Categories &amp; equipment types</span><a class="btn" href="#/catalog">${icon('tag')} Manage the equipment catalog</a><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
-        <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="8">${esc(s.locations.join('\n'))}</textarea></label></div></div>
+      <div class="card pad stack">
+        <div class="set-head"><div class="field"><span>Categories &amp; equipment types</span><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
+          <a class="btn" href="#/catalog?from=${encodeURIComponent('#/settings')}">${icon('tag')} Manage the equipment catalog</a></div>
+        <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="6">${esc(s.locations.join('\n'))}</textarea></label></div>
+      <div class="card pad"><h2 style="margin-bottom:4px">IT email</h2>
+        <p class="small muted" style="margin:0 0 12px">How emails from this app identify IT (for example waitlist notices). Passwords, app passwords and API keys are never entered here; they stay in the server's environment.</p>
+        <div class="form-grid cols"><label class="field"><span>Display name</span><input name="it_email_name" maxlength="80" required value="${esc(s.it_email_name)}"></label>
+        <label class="field"><span>IT contact / reply-to email</span><input name="it_contact_email" type="email" autocomplete="off" placeholder="e.g. it@nutricost.com" value="${esc(s.it_contact_email)}"></label></div>
+        <p class="small muted" style="margin:10px 0 0">Emails go out as <strong>${esc(s.mailEnvelope.from.name)} &lt;${esc(s.mailEnvelope.from.address)}&gt;</strong>${s.mailEnvelope.replyTo ? `; replies go to <strong>${esc(s.mailEnvelope.replyTo)}</strong>` : ''}. The From address is the server's verified sender; your contact address is used as Reply-To unless the server is set up to send from it.</p></div>
       <button class="btn primary lg block" id="save">Save settings</button>
     </form>
     <div class="section-title">Email notifications</div>
     <div class="card pad stack">
-      ${s.mailConfigured ? `<div class="banner info">${icon('check')}<div>Sending from <strong>${esc(s.mailFrom)}</strong> via Gmail / Google Workspace.</div></div>`
+      ${s.mailTestRecipient ? `<div class="banner warn">${icon('alert')}<div><strong>Email test mode:</strong> all outgoing email is being redirected to <strong>${esc(s.mailTestRecipient)}</strong> instead of the real recipients. Subjects start with “[DEV for …]” and show who each message was meant for. This is set by <span class="mono">MAIL_TEST_RECIPIENT</span> on the server, not here.</div></div>` : ''}
+      ${s.mailConfigured ? `<div class="banner info">${icon('check')}<div>Sending as <strong>${esc(s.mailEnvelope.from.name)} &lt;${esc(s.mailEnvelope.from.address)}&gt;</strong> via Gmail / Google Workspace.</div></div>`
         : `<div class="banner warn">${icon('alert')}<div><strong>Not configured.</strong> Emails are saved in the outbox below but not sent. Add your Google Workspace SMTP settings to the server's <span class="mono">.env</span> file (see README) and restart.</div></div>`}
       <div class="small muted">Links in emails point to <span class="mono">${esc(s.appUrl)}</span> (set with <span class="mono">APP_URL</span>).</div>
       <button class="btn" id="test">${icon('mail')} Send me a test email</button>
     </div>
-    <div class="card" style="margin-top:12px"><div class="card-head"><h2>Outbox</h2><span class="small muted">Last 100</span></div>
-      ${outbox.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>When</th><th>To</th><th>Subject</th><th>Status</th></tr></thead><tbody>${outbox.map((o) => `<tr><td class="small muted" style="white-space:nowrap">${fmtWhen(o.created_at)}</td><td class="small">${esc(o.to_addr)}</td><td>${esc(o.subject)}</td><td>${o.status === 'sent' ? pill('available', 'Sent') : o.status === 'failed' ? `<span title="${esc(o.error || '')}">${pill('lost', 'Failed')}</span>` : pill('retired', 'Not sent')}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty"><p>No emails yet.</p></div>`}
+    <div class="card" style="margin-top:12px"><div class="card-head"><h2>Outbox <span class="small muted">· development / debug record</span></h2><span class="small muted">Last 100</span></div>
+      <p class="small muted" style="margin:0 16px 10px">A record of what the app tried to send. A row here does <strong>not</strong> mean anyone received an email. <strong>Not sent</strong> = email is not configured, so nothing was delivered outside the app. <strong>Sent</strong> = the mail server accepted it. <strong>Failed</strong> = it was rejected (hover for the reason).</p>
+      ${outbox.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>When</th><th>To</th><th>Subject</th><th>Status</th></tr></thead><tbody>${outbox.map((o) => `<tr><td class="small muted" style="white-space:nowrap">${fmtWhen(o.created_at)}</td><td class="small">${esc(o.to_addr)}${o.delivered_to ? `<div class="muted">${o.status === 'sent' ? 'delivered to' : 'would go to'} ${esc(o.delivered_to)} (test mode)</div>` : ''}</td><td>${esc(o.subject)}</td><td>${o.status === 'sent' ? pill('available', 'Sent') : o.status === 'failed' ? `<span title="${esc(o.error || '')}">${pill('lost', 'Failed')}</span>` : `<span title="Email is not configured, so no email was delivered outside the app.">${pill('retired', 'Not sent')}</span>`}</td></tr>`).join('')}</tbody></table></div>` : `<div class="empty"><p>No emails yet.</p></div>`}
     </div>`;
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
-      locations: fd.get('locations').split('\n') };
-    busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); });
+      locations: fd.get('locations').split('\n'), it_email_name: fd.get('it_email_name'), it_contact_email: fd.get('it_contact_email') };
+    busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); route(true); });
   };
   $('#test').onclick = (e) => busy(e.currentTarget, async () => {
     const r = await api('POST', '/api/settings/test-email', {});
@@ -2185,7 +2351,14 @@ async function viewCatalog() {
   const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0 };
   // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
   // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
-  const hashFor = (id, all) => '#/catalog' + (id ? `?node=${id}${all ? '&all=1' : ''}` : '');
+  // Opened from Settings ("Manage the equipment catalog") the route carries `from=#/settings` (the same URL-backed `from` the calendar uses), and every
+  // catalog URL built below keeps it, so going deeper and coming back to the top still offers "‹ Settings". From the sidebar there is no `from`, so no such link.
+  const fromSettings = () => qs().get('from') === '#/settings';
+  const hashFor = (id, all) => {
+    const q = id ? [`node=${id}`, ...(all ? ['all=1'] : [])] : [];
+    if (fromSettings()) q.push(`from=${encodeURIComponent('#/settings')}`);
+    return '#/catalog' + (q.length ? '?' + q.join('&') : '');
+  };
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
       <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
@@ -2198,7 +2371,7 @@ async function viewCatalog() {
   const assetRow = (a, node) => {
     const rel = a.catalog_node_id !== node.id && a.catalog_path ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
     const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
-    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
   const render = () => {
@@ -2224,7 +2397,7 @@ async function viewCatalog() {
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
     $('#pagetitle').textContent = n ? n.name : 'Equipment catalog'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n && !st.all ? byId(n.parent_id) : null;
-    $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : '';
+    $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : fromSettings() ? backAnchor('#/settings', 'Settings') : '';
     $('#headact').innerHTML = `${n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
@@ -2248,7 +2421,7 @@ async function viewCatalog() {
     const p = qs(); const id = Number(p.get('node')); const prev = st.sel;
     st.sel = byId(id) ? id : null;
     st.all = !!st.sel && p.get('all') === '1';
-    if (p.get('node') && !st.sel) history.replaceState(null, '', '#/catalog'); // unknown/stale node in the URL: fall back to the root
+    if (p.get('node') && !st.sel) history.replaceState(null, '', hashFor(null)); // unknown/stale node in the URL: fall back to the root
     if (st.sel !== prev || st.assets === null) loadAssets(); else render();
   };
   const reload = async () => {

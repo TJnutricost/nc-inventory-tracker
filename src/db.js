@@ -17,6 +17,8 @@ const DEFAULT_SETTINGS = {
   default_loan_days: '0',      // 0 = no due date by default
   tag_prefix: 'NC-',
   overdue_reminders: '1',
+  it_email_name: 'Nutricost IT',   // display name on outgoing email (never a credential; those stay in the server environment)
+  it_contact_email: '',            // reply-to / IT contact address ('' = none)
   categories: JSON.stringify([
     'Laptop', 'Desktop', 'Monitor', 'Keyboard & Mouse', 'Headset', 'Dock / Adapter',
     'Phone', 'Tablet', 'Printer / Scanner', 'Networking', 'Appliance', 'Software License', 'Other'
@@ -33,6 +35,8 @@ function getSettings() {
     default_loan_days: Number(out.default_loan_days || 0),
     tag_prefix: out.tag_prefix || 'NC-',
     overdue_reminders: out.overdue_reminders === '1',
+    it_email_name: out.it_email_name || 'Nutricost IT',
+    it_contact_email: out.it_contact_email || '',
     categories: JSON.parse(out.categories || '[]'),
     locations: JSON.parse(out.locations || '[]'),
   };

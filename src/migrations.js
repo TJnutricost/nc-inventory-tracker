@@ -742,5 +742,70 @@ module.exports = [
         CREATE INDEX idx_reservations_employee ON reservations(employee_id, status);`);
     },
   },
+  {
+    // Phase 2 Slice 8 (Waitlist + availability holds).
+    //   waitlist_entries   one row per employee waiting for ONE physical asset over an inclusive range of calendar dates (same date
+    //                      semantics as reservations: YYYY-MM-DD strings, no times; Slice 8.1 will add optional times to both tables).
+    //                      FIFO order is (created_at, id). status:
+    //                        waiting    in the queue
+    //                        held       has the 24-hour priority hold on the whole range (hold_expires_at); it blocks every OTHER
+    //                                   employee from reserving those dates until it is confirmed, declined, left or expires
+    //                        fulfilled  the employee confirmed the hold; the reservation made from it points back via
+    //                                   reservations.waitlist_entry_id (pending or confirmed per the asset's approval setting)
+    //                        declined   the employee said they no longer need it      left     the employee left the waitlist
+    //                        removed    IT removed the entry                          expired  the hold ran out, or the dates passed
+    //                      hold_email_at is set (once, atomically) when the hold email is claimed, so repeated evaluation never re-sends.
+    //   reservations.waitlist_entry_id   the entry a reservation was created from (NULL for ordinary reservations). A PENDING reservation
+    //                      made from a hold keeps its place in line: nobody else is offered a hold on those dates while it awaits IT.
+    // Overlap/queue rules live in src/waitlist.js and run inside BEGIN IMMEDIATE transactions, like reservations.
+    id: 14,
+    name: 'waitlist_entries (waitlist + 24-hour availability holds); reservations.waitlist_entry_id',
+    up: (db) => {
+      db.exec(`
+        CREATE TABLE waitlist_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          asset_id INTEGER NOT NULL REFERENCES assets(id) ON DELETE RESTRICT,
+          employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+          start_date TEXT NOT NULL CHECK (start_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+          end_date TEXT NOT NULL CHECK (end_date GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
+          status TEXT NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting','held','fulfilled','declined','left','removed','expired')),
+          created_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          hold_started_at TEXT,
+          hold_expires_at TEXT,
+          hold_email_at TEXT,
+          closed_at TEXT,
+          closed_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+          updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+          CHECK (end_date >= start_date),
+          CHECK (status <> 'held' OR (hold_started_at IS NOT NULL AND hold_expires_at IS NOT NULL)),
+          CHECK (status IN ('waiting','held') OR closed_at IS NOT NULL)
+        );
+        CREATE INDEX idx_waitlist_asset ON waitlist_entries(asset_id, status, created_at);
+        CREATE INDEX idx_waitlist_employee ON waitlist_entries(employee_id, status);
+        ALTER TABLE reservations ADD COLUMN waitlist_entry_id INTEGER REFERENCES waitlist_entries(id) ON DELETE RESTRICT;`);
+    },
+  },
+  {
+    // Slice 8 follow-up (QA round 1).
+    //   waitlist_entries.queue_seq   the FIFO key. Strictly increasing across the table: a new entry takes MAX + 1, and an employee who
+    //                                CHANGES their requested dates takes a new MAX + 1 (they asked for something new, so they go to the back
+    //                                of the line for it). created_at stays "when they first joined" and is not the order any more (it has
+    //                                one-second resolution, which cannot order two things that happen in the same second). Existing rows
+    //                                keep their relative order (queue_seq = id, which is creation order).
+    //   waitlist_entries.queued_at   when the entry took its current place in line (join, or the last date change).
+    //   outbox.delivered_to          set when MAIL_TEST_RECIPIENT redirected the message: the address it was actually addressed to
+    //                                (to_addr always stays the INTENDED recipient). NULL = addressed to to_addr.
+    id: 15,
+    name: 'waitlist_entries.queue_seq/queued_at (FIFO key, reset on date change); outbox.delivered_to',
+    up: (db) => {
+      db.exec(`
+        ALTER TABLE waitlist_entries ADD COLUMN queue_seq INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE waitlist_entries ADD COLUMN queued_at TEXT;
+        UPDATE waitlist_entries SET queue_seq = id, queued_at = created_at;
+        CREATE INDEX idx_waitlist_queue ON waitlist_entries(asset_id, status, queue_seq);
+        ALTER TABLE outbox ADD COLUMN delivered_to TEXT;`);
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

@@ -134,7 +134,14 @@ function assertSafeDevDir(dataDir) {
 }
 
 // ---------- minimal HTTP boot/client (same shape as test/helpers.js) ----------
+// SEEDING NEVER SENDS EMAIL. Set before the app is ever loaded (and again in bootApp): with it, src/env.js does not read the developer's .env and
+// src/mailer.js never creates an SMTP transport, whatever SMTP_USER / SMTP_PASS / MAIL_FROM / MAIL_TEST_RECIPIENT are in the shell or .env.
+// (Just deleting SMTP_* here is not enough: loading the app re-reads .env and puts them back.) Invites and resets are still created and are
+// recorded in the outbox as "not sent".
+process.env.NC_NO_EXTERNAL_MAIL = '1';
+
 function bootApp(dataDir) {
+  process.env.NC_NO_EXTERNAL_MAIL = '1';
   process.env.DATA_DIR = dataDir;
   process.env.SESSION_SECRET = 'dev-seed-session-secret-not-for-production';
   process.env.APP_URL = DEV_APP_URL;

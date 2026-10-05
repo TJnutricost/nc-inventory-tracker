@@ -8,12 +8,13 @@ const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const sharp = require('sharp');
 const { db, DATA_DIR, getSettings, setSetting } = require('./db');
-const { notify, APP_URL, mailConfigured } = require('./mailer');
+const { notify, APP_URL, mailConfigured, mailEnvelope, testRecipient } = require('./mailer');
 const assignments = require('./assignments');
 const requestRules = require('./requests');
 const availabilityLib = require('./availability');
 const catalog = require('./catalog');
 const reservationRules = require('./reservations');
+const waitlistRules = require('./waitlist');
 const { cleanSerial, serialKey } = require('./serial');
 
 const app = express();
@@ -268,7 +269,8 @@ app.post('/api/login', wrap(async (req, res) => {
 app.post('/api/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
 
 app.get('/api/me', auth, (req, res) => {
-  res.json({ user: publicMe(req.user), settings: getSettings(), mailConfigured: mailConfigured() });
+  const { it_email_name, it_contact_email, ...shared } = getSettings(); // the IT email identity is IT's to see (Settings), not part of every employee's session
+  res.json({ user: publicMe(req.user), settings: req.user.role === 'admin' ? { ...shared, it_email_name, it_contact_email } : shared, mailConfigured: mailConfigured() });
 });
 app.post('/api/me/password', auth, wrap(async (req, res) => {
   const { current, password } = req.body;
@@ -827,15 +829,51 @@ app.post('/api/reservations/:id/approve', admin, (req, res) => {
 });
 app.post('/api/reservations/:id/decline', admin, (req, res) => {
   const r = reservationRules.decline(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
+  waitlistRules.dispatchHoldEmails(db); // (declining may have offered the dates to the next person in line)
   res.json(reservationById(r.id, req.user));
 });
 app.post('/api/reservations/:id/cancel', auth, (req, res) => {
   const r = reservationRules.cancel(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: req.user.role === 'admin' });
+  waitlistRules.dispatchHoldEmails(db);
   res.json(reservationById(r.id, req.user));
 });
 app.post('/api/reservations/:id/shorten', auth, (req, res) => {
   const r = reservationRules.shorten(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date });
+  waitlistRules.dispatchHoldEmails(db);
   res.json(reservationById(r.id, req.user));
+});
+
+// ---------- waitlist + availability holds (Phase 2, slice 8) ----------
+// Rules live in src/waitlist.js. There is deliberately NO route that asks, or lets anyone ask, a current reserver to give anything up.
+// An employee manages only their own entries; IT can see every entry and remove one, never reorder or answer for the employee.
+// "What would happen if I asked for these dates?" for the date sheet: reserve (all free), waitlist (blocked by a reservation / hold) or a refusal. Writes nothing.
+app.get('/api/assets/:id/range-check', auth, (req, res) => {
+  const asset = reservableAsset(req, req.params.id);
+  res.json(waitlistRules.rangeCheck(db, { assetId: asset.id, employeeId: req.user.employee_id, start: req.query.start_date, end: req.query.end_date, excludeEntryId: Number(req.query.entry_id) || 0 }));
+});
+app.get('/api/reservation-counts', auth, (req, res) => res.json(waitlistRules.counts(db, req.user)));
+app.put('/api/waitlist/:id', auth, (req, res) => {
+  const e = waitlistRules.updateDates(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date });
+  res.json(waitlistRules.get(db, e.id, req.user));
+});
+app.post('/api/assets/:id/waitlist', auth, (req, res) => {
+  const asset = reservableAsset(req, req.params.id);
+  const { entry } = waitlistRules.join(db, { assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date });
+  res.json(waitlistRules.get(db, entry.id, req.user));
+});
+app.get('/api/waitlist', auth, (req, res) => res.json(waitlistRules.list(db, req.user, { status: req.query.status })));
+app.get('/api/waitlist/:id', auth, (req, res) => res.json(waitlistRules.get(db, Number(req.params.id), req.user)));
+app.post('/api/waitlist/:id/confirm', auth, (req, res) => {
+  const { entry, reservation } = waitlistRules.confirmHold(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
+  res.json({ entry: waitlistRules.get(db, entry.id, req.user), reservation: reservationById(reservation.id, req.user) });
+});
+app.post('/api/waitlist/:id/decline', auth, (req, res) => {
+  const e = waitlistRules.declineHold(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
+  res.json(waitlistRules.get(db, e.id, req.user));
+});
+app.post('/api/waitlist/:id/cancel', auth, (req, res) => {
+  const e = waitlistRules.leave(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, isAdmin: req.user.role === 'admin' });
+  res.json(waitlistRules.get(db, e.id, req.user));
 });
 
 // ---------- equipment catalog ----------
@@ -1190,9 +1228,30 @@ app.get('/api/dashboard', auth, (req, res) => {
 });
 
 // ---------- settings, email, import/export ----------
-app.get('/api/settings', admin, (req, res) => res.json({ ...getSettings(), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null }));
+app.get('/api/settings', admin, (req, res) => res.json({ ...getSettings(), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null, mailEnvelope: mailEnvelope(), mailTestRecipient: testRecipient() }));
+// The IT email identity is just a display name and a contact address. Anything credential-shaped is refused outright: passwords, app
+// passwords, API keys and OAuth secrets belong in the server environment (SMTP_PASS etc.), never in the database or this screen.
+const CREDENTIAL_KEY = /pass(word)?|secret|token|api[_-]?key|smtp|credential|oauth/i;
+function itEmailSettings(b) {
+  const out = {};
+  if (b.it_email_name !== undefined) {
+    const v = typeof b.it_email_name === 'string' ? b.it_email_name.trim() : '';
+    if (!v || v.length > 80 || /[\x00-\x1f\x7f<>"]/.test(v)) throw httpError(400, 'The IT email display name is required (up to 80 characters, without quotes or angle brackets).');
+    out.it_email_name = v;
+  }
+  if (b.it_contact_email !== undefined) {
+    if (typeof b.it_contact_email !== 'string') throw httpError(400, 'The IT contact email must be an email address.');
+    const v = b.it_contact_email.trim().toLowerCase();
+    if (v && (v.length > 254 || !isEmail(v) || /[\s,;<>"]/.test(v))) throw httpError(400, 'The IT contact email is not a valid email address.');
+    out.it_contact_email = v; // '' clears it
+  }
+  return out;
+}
 app.put('/api/settings', admin, (req, res) => {
   const b = req.body;
+  if (Object.keys(b).some((k) => CREDENTIAL_KEY.test(k))) throw httpError(400, 'Email passwords, keys and secrets are not stored here. Set them in the server environment (see the README).');
+  const it = itEmailSettings(b); // validate everything new BEFORE anything is saved
+  for (const [k, v] of Object.entries(it)) setSetting(k, v);
   if (b.overdue_reminders !== undefined) setSetting('overdue_reminders', b.overdue_reminders ? '1' : '0');
   if (b.default_loan_days !== undefined) setSetting('default_loan_days', String(Math.max(0, parseInt(b.default_loan_days, 10) || 0)));
   if (b.tag_prefix !== undefined) setSetting('tag_prefix', String(b.tag_prefix).trim().slice(0, 10));
@@ -1206,7 +1265,7 @@ app.post('/api/settings/test-email', admin, wrap(async (req, res) => {
   res.json(last);
 }));
 app.get('/api/outbox', admin, (req, res) => {
-  res.json(db.prepare('SELECT id, to_addr, subject, status, error, created_at FROM outbox ORDER BY id DESC LIMIT 100').all());
+  res.json(db.prepare('SELECT id, to_addr, subject, status, error, delivered_to, created_at FROM outbox ORDER BY id DESC LIMIT 100').all());
 });
 app.get('/api/activity', admin, (req, res) => {
   res.json(db.prepare(`
@@ -1317,6 +1376,13 @@ function overdueSweep() {
 }
 setInterval(overdueSweep, 3600e3).unref();
 setTimeout(overdueSweep, 15e3).unref();
+
+// ---------- waitlist sweep ----------
+// Records holds that ran out, offers free dates to the next person in line (this is what notices a check-in or a changed asset setting, which
+// do not touch the waitlist directly) and sends any hold email still owed. Idempotent, so running it often is harmless.
+function waitlistSweep() { try { waitlistRules.sweep(db); } catch (e) { console.error('[waitlist:sweep]', e.message); } }
+setInterval(waitlistSweep, 60e3).unref();
+setTimeout(waitlistSweep, 20e3).unref();
 
 // ---------- static front-end ----------
 const PUB = path.join(__dirname, '..', 'public');

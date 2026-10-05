@@ -136,10 +136,12 @@ function resolveScope(db, { isAdmin, employeeId, nodeId, assetId }) {
 }
 
 // One asset's full calendar row (asset scope only).
-function assetRow(db, a, held, resv, { isAdmin, employeeId, today, win, canReserve }) {
+function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve }) {
   const mine = !!employeeId && held.some((h) => h.employee_id === employeeId);
   const seatsTotal = capacity(a);
-  const confirmed = resv.filter((r) => r.status === 'confirmed');
+  // What blocks a day: CONFIRMED reservations and ACTIVE waitlist holds (a hold keeps the dates for the person offered them for 24 hours).
+  const holds = wl.filter((w) => w.status === 'held' && !w.lapsed);
+  const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds];
   // The tag is shown only where the viewer could already open the asset (an admin always; an employee: available + shared, or theirs).
   const canOpen = isAdmin || mine || (!a.archived_at && a.status === 'available' && !!a.available_to_request);
   const periods = held.flatMap((h) => periodsFor(h, today).map((p) => {
@@ -164,7 +166,19 @@ function assetRow(db, a, held, resv, { isAdmin, employeeId, today, win, canReser
       if (isAdmin) return { ...base, id: r.id, requires_approval: !!r.requires_approval, holder: { id: r.employee_id, name: r.holder_name, department: r.holder_department || null } };
       return own ? { ...base, id: r.id } : base;
     }),
-    // Whether THIS viewer is offered "Reserve" here (the server re-checks everything when they submit).
+    // Active holds: everyone sees that those dates are held (anonymously); the held employee also gets their entry id and the deadline, IT the person.
+    holds: holds.map((w) => {
+      const own = !!employeeId && w.employee_id === employeeId;
+      const base = { start: w.start_date, end: w.end_date, mine: own };
+      if (isAdmin) return { ...base, id: w.id, hold_expires_at: w.hold_expires_at, holder: { id: w.employee_id, name: w.holder_name, department: w.holder_department || null } };
+      return own ? { ...base, id: w.id, hold_expires_at: w.hold_expires_at } : base;
+    }),
+    // The waitlist for this asset: IT sees everyone in line (FIFO), an employee only their own places.
+    waitlist: wl.filter((w) => !w.lapsed && (isAdmin || w.employee_id === employeeId)).map((w) => {
+      const base = { id: w.id, start: w.start_date, end: w.end_date, phase: w.status, mine: !!employeeId && w.employee_id === employeeId, created_at: w.created_at, hold_expires_at: w.status === 'held' ? w.hold_expires_at : null };
+      return isAdmin ? { ...base, holder: { id: w.employee_id, name: w.holder_name, department: w.holder_department || null } } : base;
+    }),
+    // Whether THIS viewer is offered "Reserve" (and, when the dates are taken, "Join waitlist") here (the server re-checks everything when they submit).
     reserve: { allowed: !!canReserve && reserveEligibility(a).ok, requires_approval: !!a.reservation_requires_approval },
   };
 }
@@ -244,12 +258,19 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
       WHERE r.status IN ('pending','confirmed') AND r.end_date >= ? AND r.asset_id IN (${assets.map(() => '?').join(',')}) ORDER BY r.start_date, r.id`).all(today, ...assets.map((a) => a.id));
     for (const r of rows) resv.get(r.asset_id).push(r);
   }
+  // people waiting for these assets, and who holds what (hold_expires_at is compared with the database clock, like findConflict does)
+  const wl = new Map(assets.map((a) => [a.id, []]));
+  if (assets.length) {
+    const rows = db.prepare(`SELECT w.*, (w.status = 'held' AND w.hold_expires_at <= datetime('now')) AS lapsed, e.name AS holder_name, e.department AS holder_department FROM waitlist_entries w JOIN employees e ON e.id = w.employee_id
+      WHERE w.status IN ('waiting','held') AND w.end_date >= ? AND w.asset_id IN (${assets.map(() => '?').join(',')}) ORDER BY w.queue_seq`).all(today, ...assets.map((a) => a.id));
+    for (const r of rows) wl.get(r.asset_id).push(r);
+  }
   const head = { scope, today, month: win.month, first: win.first, last: win.last };
 
   if (scope.type === 'asset') {
-    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), { isAdmin, employeeId, today, win, canReserve })) };
+    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve })) };
   }
-  const confirmedBy = new Map([...resv].map(([id, list]) => [id, list.filter((r) => r.status === 'confirmed')]));
+  const confirmedBy = new Map([...resv].map(([id, list]) => [id, [...list.filter((r) => r.status === 'confirmed'), ...wl.get(id).filter((w) => w.status === 'held' && !w.lapsed)]]));
   const events = isAdmin ? allCheckouts(assets, open, { today, win }) : [];
   // an employee looking at a catalog entry: the actual assets too (anonymous rows, same shape as the single-asset view)
   const listed = !isAdmin && scope.type === 'node' ? assets.slice(0, MAX_LIST) : null;
@@ -257,7 +278,7 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
     ...head, view: 'summary', total: assets.length,
     days: summaryDays(assets, open, confirmedBy, { isAdmin, today, win, events }),
     ...(isAdmin ? { events: events.slice(0, MAX_EVENTS), events_truncated: events.length > MAX_EVENTS } : {}),
-    ...(listed ? { assets: listed.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), { isAdmin, employeeId, today, win, canReserve: false })), assets_truncated: assets.length > MAX_LIST } : {}),
+    ...(listed ? { assets: listed.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve: false })), assets_truncated: assets.length > MAX_LIST } : {}),
   };
 }
 

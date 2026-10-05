@@ -8,6 +8,7 @@ const http = require('http');
 
 function bootApp() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-assets-test-'));
+  process.env.NC_NO_EXTERNAL_MAIL = '1'; // tests never read a developer's .env and never create a real SMTP transport (a test may inject a fake one)
   process.env.DATA_DIR = dir;
   process.env.SESSION_SECRET = 'test-secret-not-for-production';
   process.env.APP_URL = 'http://localhost';
