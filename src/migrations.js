@@ -817,5 +817,32 @@ module.exports = [
     name: 'catalog_nodes.search_keywords',
     up: (db) => { db.exec('ALTER TABLE catalog_nodes ADD COLUMN search_keywords TEXT;'); },
   },
+  {
+    // Phase 2 Slice 8.1 (Optional reservation times / partial-day availability, and partial fulfillment).
+    //   reservations.start_time / end_time, waitlist_entries.start_time / end_time
+    //       Optional wall-clock "HH:MM" (24-hour, no seconds) in the business's own time zone (APP_TIMEZONE), exactly like assignments.due_time.
+    //       Both columns are INDEPENDENTLY nullable; all four combinations are valid (no CHECK ties them together):
+    //         start_time NULL = picked up at the START of start_date      end_time NULL = returned at the END of end_date
+    //       NULL is meaningful ("no specific time"), so existing rows stay date-only: NOTHING is rewritten into synthetic midnight / end-of-day
+    //       values. Those only exist at comparison time (src/timeRange.js). Dates keep their meaning; a time applies to its own date only
+    //       (pickup to the first date, return to the last; days in between are full days). Ordering of a same-day range (end after start) is a
+    //       row-level rule SQLite cannot add to an existing table, so the application enforces it (src/timeRange.js checkOrder). Plain TEXT
+    //       with a format CHECK is provider-neutral: PostgreSQL can take it as TIME (or keep TEXT) without reinterpreting any value.
+    //   reservations.request_group / waitlist_entries.request_group
+    //       Unavailable time is waitlist time, so ONE request for a range can become reservation row(s) for the free time AND waitlist row(s) for the
+    //       unavailable time. Rows made from the same request carry the same opaque token, so they stay associated (the requested range is the union of
+    //       the group's rows). NULL for rows that are not part of a split request. Plain TEXT (a UUID): no FK, no table, provider-neutral.
+    id: 17,
+    name: 'reservations / waitlist_entries: optional start_time + end_time, request_group',
+    up: (db) => {
+      const fmt = (c) => `CHECK (${c} IS NULL OR (${c} GLOB '[0-2][0-9]:[0-5][0-9]' AND ${c} < '24:00'))`;
+      for (const t of ['reservations', 'waitlist_entries']) {
+        db.exec(`ALTER TABLE ${t} ADD COLUMN start_time TEXT ${fmt('start_time')};
+          ALTER TABLE ${t} ADD COLUMN end_time TEXT ${fmt('end_time')};
+          ALTER TABLE ${t} ADD COLUMN request_group TEXT;
+          CREATE INDEX idx_${t}_request_group ON ${t}(request_group);`);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

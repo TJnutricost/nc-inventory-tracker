@@ -14,6 +14,7 @@ const requestRules = require('./requests');
 const availabilityLib = require('./availability');
 const catalog = require('./catalog');
 const reservationRules = require('./reservations');
+const timeRange = require('./timeRange');
 const waitlistRules = require('./waitlist');
 const { cleanSerial, serialKey } = require('./serial');
 
@@ -270,7 +271,11 @@ app.post('/api/logout', (req, res) => req.session.destroy(() => res.json({ ok: t
 
 app.get('/api/me', auth, (req, res) => {
   const { it_email_name, it_contact_email, ...shared } = getSettings(); // the IT email identity is IT's to see (Settings), not part of every employee's session
-  res.json({ user: publicMe(req.user), settings: req.user.role === 'admin' ? { ...shared, it_email_name, it_contact_email } : shared, mailConfigured: mailConfigured() });
+  // the zone a new optional time's AM/PM default is read in (APP_TIMEZONE, else the server's own zone): display only
+  let appTimezone = process.env.APP_TIMEZONE || '';
+  try { new Intl.DateTimeFormat('en-US', { timeZone: appTimezone || undefined }); } catch { appTimezone = ''; }
+  appTimezone = appTimezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  res.json({ user: publicMe(req.user), settings: req.user.role === 'admin' ? { ...shared, it_email_name, it_contact_email } : shared, mailConfigured: mailConfigured(), appTimezone });
 });
 app.post('/api/me/password', auth, wrap(async (req, res) => {
   const { current, password } = req.body;
@@ -521,6 +526,10 @@ app.get('/api/assets/:id', auth, (req, res) => {
   const reservations = db.prepare(`${RESERVATION_SQL} WHERE r.asset_id = ? AND r.status IN ('pending','confirmed') AND r.end_date >= date('now') ORDER BY r.start_date, r.id`).all(a.id)
     .filter((r) => isAdmin || r.employee_id === req.user.employee_id).map((r) => reservationOut(r, req.user));
   const reserve = { allowed: !isAdmin && !!req.user.employee_id && reservationRules.reserveEligibility(a).ok, requires_approval: !!a.reservation_requires_approval };
+  // An employee's OWN open waitlist places for this asset (never anyone else's), and whether anything is scheduled from today on (display only: it changes no rule).
+  const waitlist = isAdmin ? [] : waitlistRules.list(db, req.user, { status: 'open' }).filter((w) => w.asset_id === a.id);
+  const upcoming = !!(db.prepare("SELECT 1 FROM reservations WHERE asset_id = ? AND status = 'confirmed' AND end_date >= date('now') LIMIT 1").get(a.id)
+    || db.prepare("SELECT 1 FROM waitlist_entries WHERE asset_id = ? AND status = 'held' AND hold_expires_at > datetime('now') LIMIT 1").get(a.id));
   const activity = isAdmin ? db.prepare(`
     SELECT ac.*, ${ACTOR_NAME} FROM activity ac ${ACTOR_JOIN}
     WHERE ac.asset_id = ? ORDER BY ac.id DESC LIMIT 100`).all(a.id) : [];
@@ -534,6 +543,8 @@ app.get('/api/assets/:id', auth, (req, res) => {
     photos,
     requests: requestsOut,
     reservations,
+    waitlist,
+    upcoming,
     reserve,
     activity,
   });
@@ -693,7 +704,9 @@ app.post('/api/assets/:id/checkin', admin, (req, res) => {
     refreshStatus(asset.id);
     if (clean(req.body.location)) db.prepare('UPDATE assets SET location = ? WHERE id = ?').run(clean(req.body.location), asset.id);
     requestRules.completeReturnRequests(db, { employeeId: target.employee_id, assetId: asset.id, actorAccountId: req.user.account_id, actorIsAdmin: true });
+    waitlistRules.evaluateAsset(db, asset.id); // (a return frees the time it was holding: the first eligible waitlisted employee is offered it, atomically)
   }).immediate();
+  waitlistRules.dispatchHoldEmails(db);
   log(asset.id, req.user.account_id, 'checked_in', `From ${target.user_name} · ${assignments.TYPE_LABEL[target.assignment_type]}${target.due_date ? ` · return was due ${assignments.returnBy(target.due_date, target.due_time)}` : ''}${condition ? ` · condition ${condition}` : ''}${req.body.notes ? ` · ${req.body.notes}` : ''}`, target.employee_id);
   notify.checkedIn({ name: target.user_name, email: target.user_email }, asset);
   res.json({ ok: true });
@@ -798,12 +811,14 @@ function reservationOut(r, user) {
   const mine = !!user.employee_id && r.employee_id === user.employee_id;
   const live = reservationRules.LIVE.includes(r.status) && r.end_date >= t;
   const lastDay = r.start_date > t ? r.start_date : t; // the earliest end date a shortening may pick
+  const admin = user.role === 'admin';
   return {
-    ...r, phase: reservationRules.phaseOf(r, t), mine,
-    can_cancel: live && (user.role === 'admin' || mine),
-    can_shorten: mine && r.status === 'confirmed' && r.end_date >= t && r.end_date > lastDay,
+    ...r, start_time: r.start_time || null, end_time: r.end_time || null, phase: reservationRules.phaseOf(r, t), mine,
+    can_cancel: live && (admin || mine),
+    // (slice 8.1) a shortening may move the end DATE earlier or only the end TIME earlier on the last day, so the server answers whether any room is left
+    can_shorten: mine && r.status === 'confirmed' && r.end_date >= t && timeRange.canShorten(r, lastDay),
     shorten_min: lastDay,
-    ...(user.role === 'admin' ? {} : { employee_department: undefined, decided_by_name: undefined }),
+    ...(admin ? {} : { employee_department: undefined, decided_by_name: undefined }),
   };
 }
 const reservationById = (id, user) => reservationOut(db.prepare(`${RESERVATION_SQL} WHERE r.id = ?`).get(id), user);
@@ -831,11 +846,12 @@ function reservableAsset(req, id) {
 }
 app.post('/api/assets/:id/reservations', auth, (req, res) => {
   const asset = reservableAsset(req, req.params.id);
+  // One request -> the free time reserved and the unavailable time waitlisted (src/reservations.js create). The answer says what each part became.
   const r = reservationRules.create(db, {
     assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id,
-    start: req.body.start_date, end: req.body.end_date,
+    start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time,
   });
-  res.json(reservationById(r.id, req.user));
+  res.json({ request_group: r.request_group, requested: r.requested, reserved: r.reserved.map((x) => reservationById(x.id, req.user)), waitlisted: r.waitlisted.map((w) => waitlistRules.get(db, w.id, req.user)) });
 });
 app.post('/api/reservations/:id/approve', admin, (req, res) => {
   const r = reservationRules.approve(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
@@ -852,7 +868,7 @@ app.post('/api/reservations/:id/cancel', auth, (req, res) => {
   res.json(reservationById(r.id, req.user));
 });
 app.post('/api/reservations/:id/shorten', auth, (req, res) => {
-  const r = reservationRules.shorten(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date });
+  const r = reservationRules.shorten(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date, newEndTime: req.body.end_time });
   waitlistRules.dispatchHoldEmails(db);
   res.json(reservationById(r.id, req.user));
 });
@@ -863,16 +879,16 @@ app.post('/api/reservations/:id/shorten', auth, (req, res) => {
 // "What would happen if I asked for these dates?" for the date sheet: reserve (all free), waitlist (blocked by a reservation / hold) or a refusal. Writes nothing.
 app.get('/api/assets/:id/range-check', auth, (req, res) => {
   const asset = reservableAsset(req, req.params.id);
-  res.json(waitlistRules.rangeCheck(db, { assetId: asset.id, employeeId: req.user.employee_id, start: req.query.start_date, end: req.query.end_date, excludeEntryId: Number(req.query.entry_id) || 0 }));
+  res.json(waitlistRules.rangeCheck(db, { assetId: asset.id, employeeId: req.user.employee_id, start: req.query.start_date, end: req.query.end_date, startTime: req.query.start_time, endTime: req.query.end_time, excludeEntryId: Number(req.query.entry_id) || 0 }));
 });
 app.get('/api/reservation-counts', auth, (req, res) => res.json(waitlistRules.counts(db, req.user)));
 app.put('/api/waitlist/:id', auth, (req, res) => {
-  const e = waitlistRules.updateDates(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date });
+  const e = waitlistRules.updateDates(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
   res.json(waitlistRules.get(db, e.id, req.user));
 });
 app.post('/api/assets/:id/waitlist', auth, (req, res) => {
   const asset = reservableAsset(req, req.params.id);
-  const { entry } = waitlistRules.join(db, { assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date });
+  const { entry } = waitlistRules.join(db, { assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
   res.json(waitlistRules.get(db, entry.id, req.user));
 });
 app.get('/api/waitlist', auth, (req, res) => res.json(waitlistRules.list(db, req.user, { status: req.query.status })));

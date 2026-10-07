@@ -133,6 +133,87 @@ const reqPill = (r) => pill(LIFE_CLASS[stateKey(r)] || 'open', statusLabel(r));
 const requestIcon = (r) => (r.type === 'return' ? 'in' : r.type === 'issue' ? 'alert' : 'box'); // equipment request = package (the inbox/tray glyph is kept free for a future Inbox)
 const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
 const fmtClock = (t) => { const m = /^(\d{2}):(\d{2})$/.exec(t || ''); if (!m) return ''; const h = Number(m[1]); return `${h % 12 || 12}:${m[2]} ${h < 12 ? 'AM' : 'PM'}`; };
+// ---- optional time control: Hour (1-12), Minutes and AM/PM, each quick to pick AND typeable; blank until the person starts one. No native time input
+// (it shows a default-looking time in some Chrome setups and makes people type AM/PM), no long list of every half hour.
+// The real value lives in a hidden input named `name` ('HH:MM' or ''); `data-bad="1"` there means something was started that is not a whole time yet.
+const HOURS = Array.from({ length: 12 }, (_, i) => String(i + 1));
+const MINUTES = Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, '0'));
+// hour text, minute text, 'AM' | 'PM' | '' -> { value: 'HH:MM' | '', bad }. All blank is a clean blank; anything started but not whole or valid is `bad`.
+// AM or PM for "right now" in the business's zone (APP_TIMEZONE; the server sends it): what a NEW time defaults to once the person starts it.
+function currentAmPm() {
+  let hour;
+  try { hour = Number(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: S.appTimezone || undefined }).format(new Date())); } catch { hour = new Date().getHours(); }
+  return hour % 24 < 12 ? 'AM' : 'PM';
+}
+function composeTime(h, m, ap) {
+  const hh = String(h || '').trim(); const mm = String(m || '').trim();
+  if (!hh && !mm && !ap) return { value: '', bad: false };
+  if (!/^\d{1,2}$/.test(hh) || Number(hh) < 1 || Number(hh) > 12) return { value: '', bad: true };
+  if (!/^\d{1,2}$/.test(mm) || Number(mm) > 59) return { value: '', bad: true };
+  if (ap !== 'AM' && ap !== 'PM') return { value: '', bad: true };
+  return { value: `${String((Number(hh) % 12) + (ap === 'PM' ? 12 : 0)).padStart(2, '0')}:${String(Number(mm)).padStart(2, '0')}`, bad: false };
+}
+const timeBox = (name, v = '', id = '') => {
+  const m = /^(\d{2}):(\d{2})$/.exec(v || ''); const h = m ? Number(m[1]) : null;
+  const part = (cls, label, ph, val, list) => `<div class="tpart"><input type="text" class="${cls}" inputmode="numeric" maxlength="2" autocomplete="off" role="combobox" aria-expanded="false" aria-label="${label}" placeholder="${ph}" value="${esc(val)}"><ul class="tbox-list" role="listbox" hidden>${list.map((x) => `<li role="option" data-v="${x}">${x}</li>`).join('')}</ul></div>`;
+  return `<div class="tbox" data-tbox="${name}" role="group" aria-label="${name === 'start_time' ? 'Pickup' : 'Return'} time">${part('th', 'Hour', 'Hr', m ? String(h % 12 || 12) : '', HOURS)}<span class="tcolon">:</span>${part('tm', 'Minutes', 'Min', m ? m[2] : '', MINUTES)}
+    <div class="tampm" role="group" aria-label="AM or PM"><button type="button" data-ap="AM" aria-pressed="${m && h < 12 ? 'true' : 'false'}">AM</button><button type="button" data-ap="PM" aria-pressed="${m && h >= 12 ? 'true' : 'false'}">PM</button></div>
+    <input type="hidden" name="${name}" ${id ? `id="${id}"` : ''} value="${esc(v)}" data-bad="0"></div>`;
+};
+// Wires every .tbox under `root`; `onChange(name)` runs when its value or its half-started state changes (the hidden input also gets a 'change' event).
+function wireTimeBoxes(root, onChange = () => {}) {
+  $$('.tbox', root).forEach((box) => {
+    const hid = $('input[type=hidden]', box); const th = $('.th', box); const tm = $('.tm', box); const ampm = $$('.tampm button', box);
+    const ap = () => { const on = ampm.find((b) => b.getAttribute('aria-pressed') === 'true'); return on ? on.dataset.ap : ''; };
+    const lists = $$('.tpart', box).map((part) => ({ input: $('input', part), list: $('.tbox-list', part) }));
+    const closeAll = () => lists.forEach(({ input, list }) => { list.hidden = true; input.setAttribute('aria-expanded', 'false'); $$('li.on', list).forEach((x) => x.classList.remove('on')); });
+    const openList = (l) => { closeAll(); l.list.hidden = false; l.input.setAttribute('aria-expanded', 'true'); };
+    let autoAp = false; // AM/PM was filled in by default (not chosen): taking the hour and minutes back out returns the whole time to blank
+    const setAp = (v) => ampm.forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.ap === v)));
+    const sync = () => {
+      if (!ap() && (th.value || tm.value)) { setAp(currentAmPm()); autoAp = true; }
+      else if (autoAp && !th.value && !tm.value) { setAp(''); autoAp = false; }
+      const { value, bad } = composeTime(th.value, tm.value, ap());
+      const changed = hid.value !== value || hid.dataset.bad !== (bad ? '1' : '0');
+      hid.value = value; hid.dataset.bad = bad ? '1' : '0';
+      th.classList.toggle('bad', bad && !!th.value && !composeTime(th.value, '0', 'AM').value); tm.classList.toggle('bad', bad && !!tm.value && !composeTime('1', tm.value, 'AM').value);
+      if (changed) { hid.dispatchEvent(new Event('change')); onChange(hid.name); }
+    };
+    // choosing an hour fills in :00 so the common case is two taps (hour, AM/PM)
+    const afterHour = () => { if (!tm.value && composeTime(th.value, '0', 'AM').value) tm.value = '00'; };
+    lists.forEach((l) => {
+      const isHour = l.input === th;
+      // entering a field selects what is in it, so typing replaces it (a filled-in "00" is overwritten, not appended to)
+      // (a list opens only when the person clicks the field or presses an arrow key: never on its own, e.g. when a sheet opens)
+      l.input.addEventListener('focus', () => { setTimeout(() => l.input.select(), 0); });
+      l.input.addEventListener('click', () => { openList(l); l.input.select(); });
+      l.input.addEventListener('input', () => {
+        l.input.value = l.input.value.replace(/\D/g, '').slice(0, 2);
+        if (isHour) { afterHour(); if (l.input.value.length === 2 || Number(l.input.value) > 1) { if (composeTime(th.value, '0', 'AM').value) tm.focus(); } }
+        sync();
+      });
+      l.input.addEventListener('blur', () => { setTimeout(() => { if (!box.contains(document.activeElement)) closeAll(); }, 120); if (!isHour && l.input.value.length === 1) { l.input.value = l.input.value.padStart(2, '0'); sync(); } });
+      l.list.addEventListener('mousedown', (e) => {
+        const li = e.target.closest('li'); if (!li) return; e.preventDefault();
+        l.input.value = li.dataset.v; if (isHour) afterHour(); closeAll(); sync(); if (isHour) tm.focus();
+      });
+      let at = -1;
+      l.input.addEventListener('keydown', (e) => {
+        const items = $$('li', l.list);
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault(); if (l.list.hidden) openList(l);
+          at = Math.max(0, Math.min(items.length - 1, at + (e.key === 'ArrowDown' ? 1 : -1))); items.forEach((x, i) => x.classList.toggle('on', i === at)); items[at].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter' && !l.list.hidden && at >= 0) { e.preventDefault(); l.input.value = items[at].dataset.v; at = -1; if (isHour) afterHour(); closeAll(); sync(); if (isHour) tm.focus(); }
+        else if (e.key === 'Escape' && !l.list.hidden) { e.preventDefault(); e.stopPropagation(); closeAll(); at = -1; }
+      });
+    });
+    ampm.forEach((b) => b.addEventListener('click', () => { autoAp = false; setAp(b.dataset.ap); closeAll(); sync(); }));
+    // a tap or click anywhere outside this control closes its lists (whatever focus did); the listener removes itself once the sheet is gone
+    const outside = (e) => { if (!box.isConnected) document.removeEventListener('mousedown', outside, true); else if (!box.contains(e.target)) closeAll(); };
+    document.addEventListener('mousedown', outside, true);
+    box.clear = () => { th.value = ''; tm.value = ''; autoAp = false; setAp(''); closeAll(); sync(); };
+  });
+}
 const typeText = (m) => `${esc(TYPE_LABEL[m.assignment_type] || TYPE_LABEL.permanent)}${m.assignment_type === 'checkout' && m.due_date ? ` · return by ${fmtDate(m.due_date)}${m.due_time ? ' ' + fmtClock(m.due_time) : ''}` : ''}`;
 const pill = (status, label) => `<span class="pill ${esc(status)}">${esc(label || STATUS_LABEL[status] || status)}</span>`;
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
@@ -155,12 +236,12 @@ function sheet(html, { onOpen, wide } = {}) {
   wrap.className = 'sheet-backdrop';
   wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" ${wide ? 'style="max-width:720px"' : ''}><div class="grab"></div>${html}</div>`;
   root.appendChild(wrap);
-  const close = () => { wrap.remove(); document.body.style.overflow = ''; };
+  const close = () => { wrap.remove(); document.body.style.overflow = root.children.length ? 'hidden' : ''; }; // (a sheet may sit on top of another)
   wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('[data-close]')) close(); });
   document.body.style.overflow = 'hidden';
   const el = $('.sheet', wrap);
   onOpen && onOpen(el, close);
-  const first = $('input:not([type=hidden]):not([type=checkbox]), select, textarea', el);
+  const first = $('input:not([type=hidden]):not([type=checkbox]):not(.th):not(.tm), select, textarea', el);
   if (first && window.matchMedia('(min-width: 700px)').matches) setTimeout(() => first.focus(), 50);
   return { el, close };
 }
@@ -451,7 +532,7 @@ async function route(silent) {
 }
 async function loadMe() {
   const r = await api('GET', '/api/me');
-  S.me = r.user; S.settings = r.settings; S.mailConfigured = r.mailConfigured;
+  S.me = r.user; S.settings = r.settings; S.mailConfigured = r.mailConfigured; S.appTimezone = r.appTimezone || '';
 }
 // Route-backed drill-down screens (Browse equipment, Equipment catalog) keep their state in the hash query (#/catalog?node=12).
 // A change that stays on the same screen is applied in place — no reload, no flicker — by the screen's own `S.soft.fn`; anything
@@ -723,8 +804,8 @@ async function viewBrowse() {
     const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
     const out = a.avail_state && a.avail_state !== 'available';
     const href = out ? calUrl({ asset: a.id, from: calendarSource() }) : `#/asset/${a.id}${srcQ('browse', { node: (cur() || {}).id })}`;
-    const state = !out ? statusPill(a) : a.avail_state === 'reserved' ? pill('reserved', 'Reserved') : pill('checked_out', 'Checked out');
-    const when = out ? (a.expected_back ? ` · back ${fmtDate(a.expected_back)}` : a.avail_state === 'reserved' ? ' · see when it is free' : '') : (a.location ? ' · ' + esc(a.location) : '');
+    const state = !out ? statusPill(a) : a.avail_state === 'reserved' ? pill('reserved', 'Reserved') : a.avail_state === 'partial' ? pill('reserved', 'Partly scheduled') : pill('checked_out', 'Checked out');
+    const when = out ? (a.expected_back ? ` · back ${fmtDate(a.expected_back)}` : ['reserved', 'partial'].includes(a.avail_state) ? ' · see when it is free' : '') : (a.location ? ' · ' + esc(a.location) : '');
     return `<li><a class="item" href="${href}">${thumbHtml(a.thumb, a.category)}
       <div class="grow"><div class="title truncate">${esc(a.name)}</div>
       <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${seats}${when}</div></div>${state}${icon('chev', 'chev')}</a></li>`;
@@ -782,7 +863,13 @@ async function viewAsset(id) {
   const cover = d.photos.find((p) => p.id === a.cover_photo_id) || d.photos[0];
   const photos = cover ? [cover, ...d.photos.filter((p) => p !== cover)] : [];
   const resv = d.reservations || []; // live reservations: IT sees all of them, an employee only their own
-
+  // The employee's OWN existing activity for this asset, up front: green = reserved for me, amber = waiting / not guaranteed (nobody else's identity is ever shown)
+  const mineResv = admin ? [] : resv.filter((r) => r.mine !== false && ['pending', 'confirmed'].includes(r.status));
+  const mineWl = admin ? [] : (d.waitlist || []);
+  const myActivity = mineResv.length || mineWl.length ? `<div class="my-activity">
+    ${mineResv.filter((r) => r.status === 'confirmed').length ? `<span class="rs-sched ok"><strong>Your reservation</strong>${mineResv.filter((r) => r.status === 'confirmed').map((r) => `<span>${esc(resvRange(r))}</span>`).join('')}</span>` : ''}
+    ${mineResv.filter((r) => r.status === 'pending').length ? `<span class="rs-sched wait"><strong>Your reservation request</strong>${mineResv.filter((r) => r.status === 'pending').map((r) => `<span>${esc(resvRange(r))} · waiting for IT approval</span>`).join('')}</span>` : ''}
+    ${mineWl.length ? `<span class="rs-sched wait"><strong>Your waitlist</strong>${mineWl.map((w) => `<span>${esc(resvRange({ start_date: w.start_date, start_time: w.start_time, end_date: w.end_date, end_time: w.end_time }))}${w.phase === 'held' ? ` · available for you until ${esc(w.hold_expires_text || fmtStamp(w.hold_expires_at))}` : ''}</span>`).join('')}</span>` : ''}</div>` : '';
   // ---- action buttons
   let actions = '';
   if (a.archived_at) {
@@ -829,12 +916,14 @@ async function viewAsset(id) {
     ['Reservations', admin && a.available_to_request ? (a.reservation_requires_approval ? 'Need IT approval' : 'Confirmed automatically') : ''], ['Warranty ends', a.warranty_expires ? `${fmtDate(a.warranty_expires)}${a.warranty_expires < localToday() ? ' <span class="pill lost plain">Expired</span>' : ''}` : '', true],
   ].filter(([, v]) => v);
 
+  const statusBadge = st === 'overdue' ? pill('overdue') : a.status === 'available' && d.upcoming && !admin ? pill('available', 'Available now') : statusPill(a);
   main().innerHTML = `<div class="asset-bar"><div class="asset-bar-top">${backLink(backTo.href, backTo.label, backTo.exact)}${calendarLink({ asset: a.id })}</div>
-      <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${st === 'overdue' ? pill('overdue') : statusPill(a)}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
+      <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${statusBadge}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
         ${canPhoto ? `<label class="add-ph">${icon('camera')}<span>Add photo</span><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}</div>`
         : canPhoto ? `<label class="no-photo"><div>${icon('camera')}<strong>Add a photo</strong><div class="small">Snap the device, its label, or any damage</div></div><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}
+      ${myActivity}
       ${actions}
       ${resv.length ? `<div class="card"><div class="card-head"><h2>${admin ? 'Reservations' : 'Your reservations'}</h2><span class="muted small">${resv.length}</span></div><ul class="list">${resv.map((r) => reservationItem(r, { admin, showAsset: false })).join('')}</ul></div>` : ''}
       ${d.holders.length ? `<div class="card"><div class="card-head"><h2>${multi ? 'Assigned to' : d.holders.every((h) => h.assignment_type === 'checkout') ? (admin ? 'Temporarily checked out to' : 'Temporarily checked out to you') : (admin ? 'Assigned to' : 'Assigned to you')}</h2></div><ul class="list">${d.holders.map((h) => `<li><div class="item">
@@ -1447,9 +1536,11 @@ function viewScan() {
 
 // ============================================================ requests
 async function viewRequests() {
-  const state = { tab: ['open', 'closed', 'reservations'].includes(qs().get('tab')) ? qs().get('tab') : 'open', f: qs().get('state') || '' };
+  // Employees get an "All" tab first, and it is their default; IT's tabs and default are unchanged.
+  const tabs = isAdmin() ? ['open', 'closed', 'reservations'] : ['all', 'open', 'closed', 'reservations'];
+  const state = { tab: tabs.includes(qs().get('tab')) ? qs().get('tab') : tabs[0], f: qs().get('state') || '' };
   main().innerHTML = `<div class="page-head"><h1>Requests</h1><button class="btn primary" id="new">${icon('plus')} ${isAdmin() ? 'New' : 'Request equipment'}</button></div>
-    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button><button data-v="reservations">Reservations</button></div>
+    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg">${isAdmin() ? '' : '<button data-v="all">All</button>'}<button data-v="open">Open</button><button data-v="closed">Closed</button><button data-v="reservations">Reservations</button></div>
       ${isAdmin() ? '<select id="st" aria-label="Filter by state" style="width:auto;min-height:40px;padding:6px 10px;font-size:15px"></select>' : ''}</div><div id="list"><div class="spinner"></div></div></div>`;
   $('#new').onclick = async () => {
     if (!isAdmin()) return requestEquipmentSheet();
@@ -1462,9 +1553,9 @@ async function viewRequests() {
   // Reservations (slice 7): a separate list, not a request type. IT sees every one (pending approvals first, with Approve / Decline);
   // an employee sees their own, with Cancel / Shorten. All rules come from the server.
   const syncResvLabel = (n) => { const b = $('#seg [data-v=reservations]'); if (b) b.innerHTML = `Reservations${n ? ` <span class="seg-count">${n}</span>` : ''}`; };
-  const renderReservations = async () => {
+  // The reservation + waitlist sections (their cards), shared by the Reservations tab and the All tab.
+  const reservationCards = async () => {
     const [rows, wl] = await Promise.all([api('GET', '/api/reservations'), api('GET', '/api/waitlist')]); // (waitlist entries live here too, not in a product of their own)
-    const list = $('#list'); if (!list) return;
     const adminV = isAdmin();
     const pending = rows.filter((r) => r.phase === 'pending');
     const live = rows.filter((r) => ['upcoming', 'active'].includes(r.phase));
@@ -1477,18 +1568,26 @@ async function viewRequests() {
     const section = (title, items, empty, draw = (r) => reservationItem(r, { admin: adminV, tab: 'reservations' })) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${items.length}</span></div>${items.length
       ? `<ul class="list">${items.map(draw).join('')}</ul>` : `<div class="empty">${icon('calendar')}<p>${empty}</p></div>`}</div>`;
     const drawWl = (w) => waitlistItem(w, { admin: adminV });
-    list.innerHTML = `<div class="stack">${adminV
+    const html = `${adminV
       ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Waitlist', activeWl, 'Nobody is on a waitlist.', drawWl) + section('Upcoming & active', live, 'No confirmed reservations ahead.')
-      : `${offered.length ? section('Available for you', offered, '', drawWl) : ''}${section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${queued.length ? section('Waitlist', queued, '', drawWl) : ''}`}${done.length ? section('Past & closed', done, '') : ''}${wlDone.length ? section('Past waitlist entries', wlDone, '', drawWl) : ''}</div>`;
-    wireReservationActions(list, rows, () => renderReservations().catch(fail));
-    wireWaitlistActions(list, wl, () => renderReservations().catch(fail));
+      : `${offered.length ? section('Available for you', offered, '', drawWl) : ''}${section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${queued.length ? section('Waitlist', queued, '', drawWl) : ''}`}${done.length ? section('Past & closed', done, '') : ''}${wlDone.length ? section('Past waitlist entries', wlDone, '', drawWl) : ''}`;
+    return { html, rows, wl };
+  };
+  const wireReservations = (list, { rows, wl }, reload) => { wireReservationActions(list, rows, reload); wireWaitlistActions(list, wl, reload); };
+  const renderReservations = async () => {
+    const data = await reservationCards();
+    const list = $('#list'); if (!list) return;
+    list.innerHTML = `<div class="stack">${data.html}</div>`;
+    wireReservations(list, data, () => renderReservations().catch(fail));
   };
   const render = async () => {
     $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.tab));
     const stSel = $('#st'); if (stSel) stSel.style.display = state.tab === 'reservations' ? 'none' : '';
     if (state.tab === 'reservations') return renderReservations();
     api('GET', '/api/reservation-counts').then((c) => syncResvLabel(c.attention)).catch(() => {});
-    const all = await api('GET', '/api/requests?status=' + state.tab);
+    // All (employees): their open and closed requests together, then their reservations and waitlist, in the same cards as the other tabs.
+    const all = state.tab === 'all' ? [...(await api('GET', '/api/requests?status=open')), ...(await api('GET', '/api/requests?status=closed'))] : await api('GET', '/api/requests?status=' + state.tab);
+    const extra = state.tab === 'all' ? await reservationCards() : null;
     const list = $('#list'); if (!list) return;
     // IT's state filter: the tab's states with how many requests are in each. (Client-side over the same list; the lifecycle comes from the server.)
     const countOf = (k) => all.filter((r) => stateKey(r) === k).length;
@@ -1497,7 +1596,7 @@ async function viewRequests() {
     const st = $('#st');
     if (st) st.innerHTML = `<option value="">All (${all.length})</option>${states.map((k) => `<option value="${k}"${state.f === k ? ' selected' : ''}>${LIFE_LABEL[k]} (${countOf(k)})</option>`).join('')}`;
     const rows = state.f ? all.filter((r) => stateKey(r) === state.f) : all;
-    if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${all.length ? `No ${LIFE_LABEL[state.f].toLowerCase()} requests.` : state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
+    if (!rows.length && !extra) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${all.length ? `No ${LIFE_LABEL[state.f].toLowerCase()} requests.` : state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
     const find = (id) => all.find((r) => r.id === Number(id));
     const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
     const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${r.asset_name && !r.catalog_path ? ` — ${esc(r.asset_name)}` : ''}`);
@@ -1587,7 +1686,8 @@ async function viewRequests() {
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
           <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
         </div></div></div>`;
-    }).join('')}</div>`;
+    }).join('')}${extra ? extra.html : ''}</div>`;
+    if (extra) wireReservations(list, extra, () => render().catch(fail));
     $$('[data-detail]', list).forEach((it) => {
       const open = () => openDetail(find(it.dataset.detail));
       it.onclick = (e) => { if (e.target.closest('a,button')) return; open(); };
@@ -1612,7 +1712,29 @@ function noteSheet(title, text, okLabel, placeholder, onOk, danger) {
 // shortened, conflicts); these helpers only draw a row and call the endpoints. Employees reach theirs under Requests > Reservations and on
 // the asset page; IT approves under Requests > Reservations.
 const isoAdd = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
-const resvRange = (r) => (r.start_date === r.end_date ? fmtDate(r.start_date) : `${fmtDate(r.start_date)} – ${fmtDate(r.end_date)}`);
+// A reservation / waitlist range in words, with its optional pickup / return times (the server sends plain HH:MM; fmtClock makes them 1:00 PM and never touches
+// a Date, so no browser time zone can move them). Same wording as src/timeRange.js `when`: "Oct 12, 2026 · 8:00 AM – 1:00 PM", "Oct 12, 2026 · Return by 1:00 PM",
+// "Oct 12, 2026 – Oct 14, 2026 · Pickup 8:00 AM", "Oct 12, 2026, 8:00 AM – Oct 14, 2026, 1:00 PM". `allDay` says "All day" for a single date-only day.
+const resvRange = (r, { allDay = false } = {}) => {
+  const st = r.start_time ? fmtClock(r.start_time) : ''; const et = r.end_time ? fmtClock(r.end_time) : '';
+  if (r.start_date === r.end_date) {
+    const d = fmtDate(r.start_date);
+    return st && et ? `${d} · ${st} – ${et}` : st ? `${d} · Pickup ${st}` : et ? `${d} · Return by ${et}` : allDay ? `${d} · All day` : d;
+  }
+  const a = fmtDate(r.start_date); const b = fmtDate(r.end_date);
+  return st && et ? `${a}, ${st} – ${b}, ${et}` : st ? `${a} – ${b} · Pickup ${st}` : et ? `${a} – ${b} · Return by ${et}` : `${a} – ${b}`;
+};
+// The same range as the calendar reports it (start / end keys), and only the times when it is a single day on the day being looked at.
+const calRange = (x, day) => {
+  const r = { start_date: x.start, end_date: x.end, start_time: x.start_time, end_time: x.end_time };
+  if (day && x.start === day && x.end === day) { const t = resvRange(r, { allDay: true }); return t.slice(t.indexOf(' · ') + 3); }
+  return resvRange(r);
+};
+// comparison keys, as src/timeRange.js: blank pickup = start of the day, blank return = the end of the day (internal only)
+const keyStart = (d, t) => `${d}T${t || '00:00'}`;
+const keyEnd = (d, t) => (t ? `${d}T${t}` : `${isoAdd(d, 1)}T00:00`);
+// days + duration for a list row: a multi-day range says how many days; a single day says its hours (or All day) and needs no count
+const resvWhen = (r) => (r.start_date === r.end_date ? resvRange(r, { allDay: true }) : `${resvRange(r)} · ${resvDays(r)} days`);
 const resvDays = (r) => Math.round((Date.parse(r.end_date + 'T00:00:00Z') - Date.parse(r.start_date + 'T00:00:00Z')) / 864e5) + 1;
 const RESV_LABEL = { pending: 'Waiting for approval', upcoming: 'Reserved', active: 'Reserved · now', past: 'Past', declined: 'Declined', cancelled: 'Cancelled' };
 const RESV_CLASS = { pending: 'open', upcoming: 'approved', active: 'approved', past: 'cancelled', declined: 'denied', cancelled: 'cancelled' };
@@ -1624,30 +1746,61 @@ function reservationItem(r, { admin: forAdmin, showAsset = true, tab = '' } = {}
   // (An employee still sees Cancel on their own pending request: that is them withdrawing it.)
   const itDeciding = forAdmin && r.phase === 'pending';
   if (itDeciding) acts.push(`<button class="btn sm primary" data-resv-approve="${r.id}">Approve</button><button class="btn sm danger" data-resv-decline="${r.id}">Decline</button>`);
-  if (r.can_cancel && !itDeciding) acts.push(`<button class="btn sm" data-resv-cancel="${r.id}">Cancel${forAdmin && !r.mine ? ' reservation' : ''}</button>`);
-  if (r.can_shorten) acts.push(`<button class="btn sm" data-resv-shorten="${r.id}">Shorten</button>`);
+  // An employee's card is a summary: it opens Reservation details (click anywhere), and its one action is "Edit reservation", the way in to Shorten / Cancel
+  // (cancelling is destructive, so it lives inside the details). IT's card keeps its own buttons.
+  if (!forAdmin) { if (r.can_cancel || r.can_shorten) acts.push(`<button class="btn sm" data-resv-edit="${r.id}">Edit reservation</button>`); }
+  else {
+    if (r.can_cancel && !itDeciding) acts.push(`<button class="btn sm" data-resv-cancel="${r.id}">Cancel${!r.mine ? ' reservation' : ''}</button>`);
+    if (r.can_shorten) acts.push(`<button class="btn sm" data-resv-shorten="${r.id}">Shorten</button>`);
+  }
   const who = forAdmin ? `${esc(r.employee_name)}${r.employee_department ? ' · ' + esc(r.employee_department) : ''}` : '';
-  const sub = [`${esc(resvRange(r))} · ${resvDays(r)} day${resvDays(r) === 1 ? '' : 's'}`, who, forAdmin && r.requires_approval ? 'approval required' : '', r.waitlist_entry_id ? 'from the waitlist' : '', showAsset ? `<span class="mono">${esc(r.asset_tag)}</span>` : ''].filter(Boolean).join(' · ');
-  return `<li class="resv"><div class="item" style="align-items:flex-start"><div class="thumb">${icon('calendar')}</div><div class="grow">
-    <div class="row spread" style="align-items:flex-start"><div>${asset}${asset ? '' : `<span class="title">${esc(resvRange(r))}</span>`}</div>${resvPill(r)}</div>
-    <div class="sub">${asset ? sub : [resvDays(r) + ' day' + (resvDays(r) === 1 ? '' : 's'), who, forAdmin && r.requires_approval ? 'approval required' : ''].filter(Boolean).join(' · ')}</div>
+  const sub = [esc(resvWhen(r)), who, forAdmin && r.requires_approval ? 'approval required' : '', r.waitlist_entry_id ? 'from the waitlist' : '', showAsset ? `<span class="mono">${esc(r.asset_tag)}</span>` : ''].filter(Boolean).join(' · ');
+  return `<li class="resv"><div class="item" ${forAdmin ? '' : `data-resv-detail="${r.id}" tabindex="0"`} style="align-items:flex-start${forAdmin ? '' : ';cursor:pointer'}"><div class="thumb">${icon('calendar')}</div><div class="grow">
+    <div class="row spread" style="align-items:flex-start"><div>${asset}${asset ? '' : `<span class="title">${esc(resvRange(r, { allDay: true }))}</span>`}</div>${resvPill(r)}</div>
+    <div class="sub">${asset ? sub : [r.start_date !== r.end_date ? resvDays(r) + ' days' : '', who, forAdmin && r.requires_approval ? 'approval required' : ''].filter(Boolean).join(' · ')}</div>
     ${r.decision_note ? `<div class="small muted" style="margin-top:4px">IT: ${esc(r.decision_note)}</div>` : ''}
     ${acts.length ? `<div class="row wrap" style="margin-top:8px;gap:8px">${acts.join('')}</div>` : ''}</div></div></li>`;
 }
+// Reservation details (employee): what is saved, and the way to manage it. Shorten reuses the existing sheet; Cancel is here, not on the card.
+// (There is deliberately no extend: more time is a new reservation, so it is checked against everyone else's.)
+function reservationSheet(r, { after, reload }) {
+  const at = (d, t, none) => `${esc(fmtDate(d))} · ${t ? esc(fmtClock(t)) : `<span class="muted">${none}</span>`}`;
+  const row = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+  const { el, close } = sheet(`<h2>Reservation details</h2>
+    <div class="kv" style="margin-top:8px">
+      ${row('Asset', `${esc(r.asset_name)}${r.asset_tag ? ` <span class="mono muted">${esc(r.asset_tag)}</span>` : ''}`)}
+      ${row('Status', `${resvPill(r)}${r.waitlist_entry_id ? ' <span class="muted small">from the waitlist</span>' : ''}`)}
+      ${row('Pickup', at(r.start_date, r.start_time, 'no pickup time'))}
+      ${row('Return', at(r.end_date, r.end_time, 'no return time'))}
+      ${r.decision_note ? row('IT note', esc(r.decision_note)) : ''}
+    </div>
+    ${r.can_shorten || r.can_cancel ? `<div class="row wrap" style="margin-top:14px;gap:8px">${r.can_shorten ? '<button type="button" class="btn" id="rd-shorten">Shorten reservation</button>' : ''}${r.can_cancel ? '<button type="button" class="btn danger" id="rd-cancel">Cancel reservation</button>' : ''}</div>` : ''}
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+  const sh = $('#rd-shorten', el); if (sh) sh.onclick = () => { close(); shortenSheet(r, reload); };
+  const ca = $('#rd-cancel', el); if (ca) ca.onclick = async () => {
+    close();
+    if (!(await confirmSheet(r.mine === false ? `Cancel ${r.employee_name}'s reservation?` : 'Cancel this reservation?', `${r.asset_name} · ${resvRange(r)}. The dates become available to others right away.`, 'Cancel reservation', true))) return;
+    try { await api('POST', `/api/reservations/${r.id}/cancel`, {}); after('Reservation cancelled'); } catch (e) { fail(e); reload(); }
+  };
+}
 // Shorten: the reservation's own days are shown on a calendar that is always visible (no pop-up date picker). Tap the new LAST day: days up to it are
-// kept, the days after it are released (green). Only the end can move earlier, never the start or later (the server enforces it).
+// kept, the days after it are released (green). Slice 8.1: an optional RETURN TIME on that day releases only the rest of it ("Oct 12 all day" -> "Oct 12, return
+// 1:00 PM"), so the current last day can be picked too. Only the end can move earlier, never the start or later (the server enforces it; this only keeps the button honest).
 function shortenSheet(r, done) {
-  const lastPick = isoAdd(r.end_date, -1); const first = r.shorten_min;
-  let end = lastPick; let month = lastPick.slice(0, 7);
+  const first = r.shorten_min;
+  const was = keyEnd(r.end_date, r.end_time); const began = keyStart(r.start_date, r.start_time);
+  let end = r.end_time || r.end_date <= first ? r.end_date : isoAdd(r.end_date, -1); let time = r.end_time || ''; // (a timed return opens AT its current value; a date-only one starts a day earlier with the time blank)
+  let month = end.slice(0, 7);
   const firstMonth = r.start_date.slice(0, 7); const lastMonth = r.end_date.slice(0, 7);
   const monthName = (m) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' }); };
   const shift = (m, n) => { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1 + n, 1)).toISOString().slice(0, 7); };
-  const { el, close } = sheet(`<h2>Shorten this reservation</h2><p class="muted small" style="margin-top:0">${esc(r.asset_name)} · ${esc(resvRange(r))}. Tap the new last day. To keep it longer, make a new reservation.</p>
+  const { el, close } = sheet(`<h2>Shorten this reservation</h2><p class="muted small" style="margin-top:0">${esc(r.asset_name)} · ${esc(resvRange(r))}. Tap the new last day, and add a return time if you are done earlier that day. To keep it longer, make a new reservation.</p>
     <form id="f"><div class="card cal-card" style="box-shadow:none">
       <div class="cal-nav"><button type="button" class="iconbtn" id="sc-prev" aria-label="Previous month">${icon('back')}</button><h2 id="sc-month" aria-live="polite"></h2><button type="button" class="iconbtn" id="sc-next" aria-label="Next month">${icon('chev')}</button></div>
       <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
       <div class="cal-grid" id="sc-grid"></div>
       <div class="cal-legend small muted"><span><i class="reserved"></i>Kept</span><span><i class="free"></i>Released</span></div></div>
+      <div class="field" style="margin-top:12px"><span>Return time <span class="muted">(optional)</span> <button type="button" class="tclear" id="sc-clear" hidden>Clear</button></span>${timeBox('end_time', r.end_time || '', 'sc-time')}</div>
       <p id="sc-sum" style="margin:12px 0 0"></p>
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Shorten</button></div></form>`);
   const paint = () => {
@@ -1656,7 +1809,7 @@ function shortenSheet(r, done) {
     const cells = Array.from({ length: lead }, () => '<span class="cal-day blank" aria-hidden="true"></span>');
     for (let d = 1; d <= days; d++) {
       const iso = `${month}-${String(d).padStart(2, '0')}`;
-      const inRes = iso >= r.start_date && iso <= r.end_date; const can = iso >= first && iso <= lastPick;
+      const inRes = iso >= r.start_date && iso <= r.end_date; const can = iso >= first && iso <= r.end_date;
       const cls = !inRes ? 'off' : iso === end ? 'edge' : iso < end ? 'inrange' : 'free';
       const label = !inRes ? 'not part of this reservation' : iso > end ? 'will be released' : iso === end ? 'new last day' : 'kept';
       cells.push(`<button type="button" class="cal-day ${cls}${can ? ' pick' : ''}" ${can ? `data-day="${iso}"` : 'disabled'} aria-label="${esc(fmtDate(iso))}: ${label}"><span class="d">${d}</span><span class="c"></span></button>`);
@@ -1664,22 +1817,31 @@ function shortenSheet(r, done) {
     $('#sc-grid', el).innerHTML = cells.join('');
     $('#sc-month', el).textContent = monthName(month);
     $('#sc-prev', el).disabled = month <= firstMonth; $('#sc-next', el).disabled = month >= lastMonth;
-    const n = Math.round((Date.parse(r.end_date + 'T00:00:00Z') - Date.parse(end + 'T00:00:00Z')) / 864e5);
-    $('#sc-sum', el).innerHTML = `New last day: <strong>${esc(fmtDate(end))}</strong> <span class="muted small">· ${n} day${n === 1 ? '' : 's'} released (${esc(fmtDate(isoAdd(end, 1)))}${n > 1 ? ' – ' + esc(fmtDate(r.end_date)) : ''})</span>`;
+    $('#sc-clear', el).hidden = !time && !bad;
+    const k = keyEnd(end, time); const ok = !bad && k < was && k > began;
+    $('#go', el).disabled = !ok;
+    const from = time ? `${fmtClock(time)} on ${fmtDate(end)}` : fmtDate(isoAdd(end, 1));
+    const to = r.end_time ? `${fmtClock(r.end_time)} on ${fmtDate(r.end_date)}` : `the end of ${fmtDate(r.end_date)}`;
+    $('#sc-sum', el).innerHTML = bad ? '<span class="muted small">Finish the return time (hour, minutes and AM or PM), or press Clear to leave it blank.</span>' : ok
+      ? `New return: <strong>${esc(fmtDate(end))}${time ? `, ${esc(fmtClock(time))}` : ''}</strong> <span class="muted small">· frees up from ${esc(from)} until ${esc(to)}</span>`
+      : `<span class="muted small">Choose an earlier return than ${esc(resvRange({ start_date: r.end_date, end_date: r.end_date, end_time: r.end_time }).replace(' · Return by ', ', '))}.</span>`;
   };
   $('#sc-grid', el).onclick = (e) => { const b = e.target.closest('[data-day]'); if (b) { end = b.dataset.day; paint(); } };
   $('#sc-prev', el).onclick = () => { month = shift(month, -1); paint(); };
   $('#sc-next', el).onclick = () => { month = shift(month, 1); paint(); };
+  let bad = false; // a half-typed time: value is '' but the field is not blank
+  wireTimeBoxes(el, () => { const h = $('#sc-time', el); time = h.value; bad = h.dataset.bad === '1'; paint(); });
+  $('#sc-clear', el).onclick = () => { $('[data-tbox]', el).clear(); };
   paint();
   // (the success message comes only after the server has finished: it names the range the reservation now has)
-  $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { const u = await api('POST', `/api/reservations/${r.id}/shorten`, { end_date: end }); close(); toast(`Reservation shortened to ${resvRange(u)}.`, false, 'ok'); done(); }); };
+  $('#f', el).onsubmit = (e) => { e.preventDefault(); busy($('#go', el), async () => { const u = await api('POST', `/api/reservations/${r.id}/shorten`, { end_date: end, end_time: time || null }); close(); toast(`Reservation shortened to ${resvRange(u)}.`, false, 'ok'); done(); }); };
 }
 // Wires every reservation button under `root` (rows = the reservations drawn there). `reload` redraws the screen afterwards.
 function wireReservationActions(root, rows, reload) {
   const find = (id) => rows.find((r) => r.id === Number(id));
   const each = (sel, key, fn) => $$(sel, root).forEach((b) => { b.onclick = (e) => { e.preventDefault(); fn(find(b.dataset[key]), b); }; });
   const after = (msg) => { toast(msg); refreshBadge(); reload(); };
-  each('[data-resv-approve]', 'resvApprove', (r, b) => busy(b, async () => { await api('POST', `/api/reservations/${r.id}/approve`, {}); after('Approved'); }));
+  each('[data-resv-approve]', 'resvApprove', (r, b) => busy(b, async () => { const u = await api('POST', `/api/reservations/${r.id}/approve`, {}); after('Approved'); }));
   each('[data-resv-decline]', 'resvDecline', (r) => noteSheet('Decline reservation', `${r.employee_name}'s request for ${r.asset_name} (${resvRange(r)}). Add a short reason (optional).`, 'Decline', 'e.g. Needed for a shoot that week',
     async (note) => { await api('POST', `/api/reservations/${r.id}/decline`, { note }); after('Declined'); }, true));
   each('[data-resv-cancel]', 'resvCancel', async (r) => {
@@ -1688,82 +1850,132 @@ function wireReservationActions(root, rows, reload) {
     try { await api('POST', `/api/reservations/${r.id}/cancel`, {}); after('Reservation cancelled'); } catch (e) { fail(e); reload(); }
   });
   each('[data-resv-shorten]', 'resvShorten', (r) => shortenSheet(r, () => { refreshBadge(); reload(); }));
+  // an employee's reservation card: click anywhere on it (not on a link or button) or press "Edit reservation" -> Reservation details
+  const details = (r) => reservationSheet(r, { after, reload: () => { refreshBadge(); reload(); } });
+  each('[data-resv-edit]', 'resvEdit', details);
+  $$('[data-resv-detail]', root).forEach((c) => {
+    const open = () => details(find(c.dataset.resvDetail));
+    c.onclick = (e) => { if (e.target.closest('a,button')) return; open(); };
+    c.onkeydown = (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === c) { e.preventDefault(); open(); } };
+  });
 }
 
 // ---- waitlist (slice 8): shown in the same Requests > Reservations list. First come, first served; nothing is ever reserved for you until
 // you confirm an offer, and nobody can ask a current reserver to give anything up. The server decides the phase and which buttons apply.
-const WL_LABEL = { waiting: 'Waitlisted', held: 'Available — confirm within 24 hours', confirmed: 'Confirmed', pending: 'Waiting for approval', declined: 'No longer needed', left: 'Left waitlist', removed: 'Removed by IT', expired: 'Expired', reservation_declined: 'Declined by IT', reservation_cancelled: 'Reservation cancelled' };
-const WL_CLASS = { waiting: 'in_review', held: 'open', confirmed: 'approved', pending: 'open', reservation_declined: 'denied' };
+const WL_LABEL = { waiting: 'Waitlisted', held: 'Available for you', confirmed: 'Confirmed', pending: 'Waiting for approval', declined: 'No longer needed', left: 'Left waitlist', removed: 'Removed by IT', expired: 'Expired', reservation_declined: 'Declined by IT', reservation_cancelled: 'Reservation cancelled', checked_out: 'Checked out' };
+const WL_CLASS = { waiting: 'open', held: 'open', confirmed: 'approved', checked_out: 'approved', pending: 'open', reservation_declined: 'denied' };
 const ordinal = (n) => `${n}${[, 'st', 'nd', 'rd'][(n % 100 >> 3) ^ 1 && n % 10] || 'th'}`;
 function waitlistItem(w, { admin: forAdmin }) {
-  const days = resvDays(w);
-  const asset = forAdmin ? `<a href="#/asset/${w.asset_id}${srcQ('requests', { tab: 'reservations' })}" class="title">${esc(w.asset_name)}</a>` : `<span class="title">${esc(w.asset_name)}</span>`;
-  const sub = [`${esc(resvRange(w))} · ${days} day${days === 1 ? '' : 's'}`, forAdmin ? `${esc(w.employee_name)}${w.employee_department ? ' · ' + esc(w.employee_department) : ''}` : '',
+  // The employee's own title opens the same "Edit waitlist dates" sheet as the Edit dates button (wireWaitlistActions handles every [data-wl-edit]); a held offer cannot be edited, so it stays plain.
+  const asset = forAdmin ? `<a href="#/asset/${w.asset_id}${srcQ('requests', { tab: 'reservations' })}" class="title">${esc(w.asset_name)}</a>` : w.can_edit ? `<a href="#" class="title" data-wl-edit="${w.id}">${esc(w.asset_name)}</a>` : `<span class="title">${esc(w.asset_name)}</span>`;
+  const sub = [esc(resvWhen(w)), forAdmin ? `${esc(w.employee_name)}${w.employee_department ? ' · ' + esc(w.employee_department) : ''}` : '',
     w.position && w.phase === 'waiting' ? `${ordinal(w.position)} in line` : '', `${w.phase === 'waiting' ? 'in line since' : 'joined'} ${fmtWhen(w.phase === 'waiting' ? w.queued_at : w.created_at)}`, `<span class="mono">${esc(w.asset_tag)}</span>`].filter(Boolean).join(' · ');
   const acts = [];
   if (w.can_confirm) acts.push(`<button class="btn sm primary" data-wl-confirm="${w.id}">Yes, I still need it</button><button class="btn sm" data-wl-decline="${w.id}">I don't need it</button>`);
   else if (w.can_leave) acts.push(`${w.can_edit ? `<button class="btn sm" data-wl-edit="${w.id}">Edit dates</button>` : ''}<button class="btn sm" data-wl-cancel="${w.id}">Leave waitlist</button>`);
   if (w.can_remove) acts.push(`<button class="btn sm danger" data-wl-remove="${w.id}">Remove</button>`);
-  const hold = w.hold_expires_at ? `<div class="small" style="margin-top:4px"><strong>${forAdmin ? 'Held until' : 'Held for you until'} ${esc(fmtStamp(w.hold_expires_at))}.</strong> ${forAdmin ? 'If they do not answer, the next person in line is offered it.' : 'Confirm that you still need it, or let it go so the next person can have it.'}</div>` : '';
-  return `<li class="resv"><div class="item" style="align-items:flex-start"><div class="thumb">${icon('calendar')}</div><div class="grow">
+  const hold = w.hold_expires_at ? `<div class="small" style="margin-top:4px"><strong>${forAdmin ? 'Offered until' : 'Available for you until'} ${esc(w.hold_expires_text || fmtStamp(w.hold_expires_at))}.</strong> ${forAdmin ? 'If they do not answer, the next person in line is offered it.' : 'Confirm that you still need it, or let it go so the next person can have it.'}</div>` : '';
+  const cardClick = !forAdmin && w.can_edit ? ` data-wl-card="${w.id}" tabindex="0"` : ''; // (an offer being held cannot be edited, so that card is not a click target)
+  return `<li class="resv"><div class="item"${cardClick} style="align-items:flex-start${cardClick ? ';cursor:pointer' : ''}"><div class="thumb">${icon('calendar')}</div><div class="grow">
     <div class="row spread" style="align-items:flex-start"><div>${asset}</div>${pill(WL_CLASS[w.phase] || 'cancelled', WL_LABEL[w.phase] || w.phase)}</div>
     <div class="sub">${sub}</div>${hold}
     ${acts.length ? `<div class="row wrap" style="margin-top:8px;gap:8px">${acts.join('')}</div>` : ''}</div></div></li>`;
 }
 // ONE date sheet for everything that asks for a range of one item's dates: reserve it, join its waitlist, or change the dates of a waitlist
-// entry (`entry`). It never decides anything itself: as the dates change it asks the server (GET /api/assets/:id/range-check) what that range
-// means, so the button always says what will really happen: all free -> Reserve; blocked by a reservation -> Join waitlist; otherwise a reason.
-// `reservedDay` = it was opened by tapping a day that is already reserved (the intro says so). Dates are plain calendar days, both included.
-function rangeSheet({ asset, start, end, entry = null, reservedDay = false, today = localToday(), onDone }) {
+// entry (`entry`). It never decides anything itself: as the dates or times change it asks the server (GET /api/assets/:id/range-check) what that range
+// means, so the button always says what will really happen. Unavailable time is waitlist time, so there are exactly three answers:
+//   all of it free        -> Reserve                      (the amber notice never appears)
+//   part of it free       -> an amber notice that says what will be reserved and what will be waitlisted, and ONE Continue button
+//   none of it free       -> an amber notice and Join waitlist (there is no way to reserve unavailable time)
+// Pickup and return TIMES are optional and independent (blank = the whole first / last day).
+// `reservedDay` = it was opened by tapping a day that is already 'reserved' (or 'partial' = only part of it is taken); `scheduledHtml` = what is on that day
+// (the calendar's own blocks: the asset's schedule, the viewer's own reservation, the viewer's own waitlist), so the sheet says what is there.
+// The time fields are `timeBox`es (type a time, or pick a common one; blank on open). Typing something that is not a whole time is never silently treated
+// as "no time": the sheet says to finish it or clear it, and Continue stays off. Dates are plain calendar days, both included.
+function rangeSheet({ asset, start, end, entry = null, reservedDay = false, scheduledHtml = '', today = localToday(), onDone }) {
   const edit = !!entry;
+  const t0 = entry && entry.start_time || ''; const t1 = entry && entry.end_time || '';
+  const timeField = (name, label, v) => `<div class="field"><span>${label} <span class="muted">(optional)</span> <button type="button" class="tclear" data-clear="${name}" ${v ? '' : 'hidden'}>Clear</button></span>${timeBox(name, v)}</div>`;
+  const what = scheduledHtml;
+  const intro = edit ? 'Change the days you are waiting for.'
+    : reservedDay === 'partial' ? `<strong>${esc(fmtDate(start))} is partly scheduled.</strong>${what} Choose the time you need. We will reserve what is available and waitlist the rest.`
+      : reservedDay ? `<strong>${esc(fmtDate(start))} is already scheduled.</strong>${what} Choose the time you need. Any time that is taken goes on the waitlist.`
+        : 'Choose the whole range you need. Both days are included. Add a pickup or return time only if you need one.';
   const { el, close } = sheet(`<h2 id="rs-title">${edit ? 'Edit waitlist dates' : 'Choose your dates'}</h2>
-    <p class="muted small" style="margin-top:0"><strong>${esc(asset.name)}</strong>${asset.tag ? ` <span class="mono">${esc(asset.tag)}</span>` : ''}. ${edit ? 'Change the days you are waiting for.' : reservedDay ? `<strong>${esc(fmtDate(start))} is already reserved.</strong> Choose the whole range you need. If any of it is reserved you can join the waitlist; if all of it is free you can reserve it.` : 'Choose the whole range you need. Both days are included.'}</p>
-    <form class="form-grid" id="f"><div class="form-grid cols"><label class="field"><span>First day</span><input type="date" name="start_date" required min="${esc(today)}" value="${esc(start)}"></label>
-      <label class="field"><span>Last day</span><input type="date" name="end_date" required min="${esc(start >= today ? start : today)}" value="${esc(end)}"></label></div>
+    <p class="muted small" style="margin-top:0"><strong>${esc(asset.name)}</strong>${asset.tag ? ` <span class="mono">${esc(asset.tag)}</span>` : ''}. ${intro}</p>
+    <form class="form-grid" id="f"><div class="rs-leg"><div class="rs-h">Pickup</div><div class="form-grid cols"><label class="field"><span>Start date</span><input type="date" name="start_date" required min="${esc(today)}" value="${esc(start)}"></label>
+      ${timeField('start_time', 'Pickup time', t0)}</div></div>
+      <div class="rs-leg"><div class="rs-h">Return</div><div class="form-grid cols"><label class="field"><span>End date</span><input type="date" name="end_date" required min="${esc(start >= today ? start : today)}" value="${esc(end)}"></label>
+      ${timeField('end_time', 'Return time', t1)}</div></div>
       <div id="rs-note"></div>
       ${edit ? `<div class="banner warn">${icon('alert')}<div class="grow small"><strong>Changing your dates updates your place in line.</strong> You move behind anyone already waiting for the new dates.</div></div>` : ''}
       <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go" disabled>${edit ? 'Save new dates' : 'Continue'}</button></div></form>`);
   const f = $('#f', el); let tok = 0; let out = null;
+  const timesOk = () => (f.start_date.value && f.end_date.value && f.start_date.value === f.end_date.value && f.start_time.value && f.end_time.value ? f.end_time.value > f.start_time.value : true);
+  const partial = (n) => f[n].dataset.bad === '1'; // typed, but not a whole time (yet): the value is ''
+  const syncClear = () => $$('[data-clear]', el).forEach((b) => { b.hidden = !f[b.dataset.clear].value && !partial(b.dataset.clear); });
+  const note = (kind, html) => { $('#rs-note', el).innerHTML = !html ? '' : `<div class="banner ${kind}">${icon(kind === 'warn' ? 'alert' : 'calendar')}<div class="grow small">${html}</div></div>`; };
   const paint = (r) => {
     out = r && r.outcome ? r : null;
     const o = out && out.outcome; const needs = out && out.requires_approval;
-    const same = edit && f.start_date.value === entry.start_date && f.end_date.value === entry.end_date;
-    let kind = 'info'; let text = 'Checking those dates…'; let label = edit ? 'Save new dates' : 'Continue'; let ok = false; let title = edit ? 'Edit waitlist dates' : 'Choose your dates';
-    if (o === 'reserve') {
-      if (edit) { text = 'All of these days are free right now, so there is nothing to wait for. Pick dates that are reserved to stay on the waitlist, or leave the waitlist and reserve these days from the calendar.'; kind = 'warn'; }
-      else { title = needs ? 'Request this reservation?' : 'Reserve this item?'; text = `All of these days are free. ${needs ? 'IT must approve this reservation. It does not hold the dates until they do.' : 'This reservation is confirmed right away.'}`; label = needs ? 'Submit for approval' : 'Reserve'; ok = true; }
+    const same = edit && f.start_date.value === entry.start_date && f.end_date.value === entry.end_date && f.start_time.value === t0 && f.end_time.value === t1;
+    let kind = 'info'; let html = 'Checking those dates…'; let label = edit ? 'Save new dates' : 'Continue'; let ok = false; let title = edit ? 'Edit waitlist dates' : 'Choose your dates';
+    if (o === 'reserve' || o === 'partial') {
+      if (edit) { html = 'Some or all of this time is free right now, so it cannot be waitlisted. Choose time that is already scheduled to stay on the waitlist, or leave the waitlist and reserve from the calendar.'; kind = 'warn'; }
+      else if (o === 'reserve') {
+        title = needs ? 'Request this reservation?' : 'Reserve this item?';
+        html = `All of this time is free. ${needs ? 'IT must approve this reservation. It does not hold the dates until they do.' : 'This reservation is confirmed right away.'}`;
+        label = needs ? 'Submit for approval' : 'Reserve'; ok = true;
+      } else {
+        title = 'Part of this time is unavailable'; kind = 'warn'; ok = true; label = needs ? 'Submit for approval' : 'Continue';
+        // deliberately brief: no live breakdown while the person is still choosing times; the exact result is shown once it is saved
+        html = `Part of this time is unavailable. Available time will be reserved, and overlapping time will be added to the waitlist.${needs ? ' IT approves reservations for this item.' : ''}`;
+      }
     } else if (o === 'waitlist') {
-      title = edit ? 'Edit waitlist dates' : 'Join the waitlist';
-      text = `${esc(out.message)} If the whole range opens up you will be offered it for 24 hours (first come, first served). The current reservation is not affected.`;
-      label = edit ? 'Save new dates' : 'Join waitlist'; ok = !same;
-      if (same) text = 'These are your current dates. Change them to update your waitlist entry.';
-    } else if (o) { text = esc(out.message); kind = 'warn'; }
-    if (!o) { text = 'Checking those dates…'; }
+      title = edit ? 'Edit waitlist dates' : 'Join the waitlist'; kind = 'warn';
+      html = edit ? '' : `<strong>All of this time is already scheduled.</strong> ${esc(out.message)} Join the waitlist and, if the whole range opens up, you will be offered it (first come, first served) and given a limited time to confirm: up to 24 hours, less if it starts soon. Nobody's reservation is affected.`;
+      label = edit ? 'Save new dates' : 'Join waitlist'; ok = !same; // (editing: the amber "changing your dates updates your place in line" warning is the one that matters; unchanged dates simply leave Save off)
+    } else if (o) { html = esc(out.message); kind = 'warn'; }
     $('#rs-title', el).textContent = title;
-    $('#rs-note', el).innerHTML = `<div class="banner ${kind}">${icon(kind === 'warn' ? 'alert' : 'calendar')}<div class="grow small">${o === 'waitlist' || o === 'reserve' ? text : esc(text)}</div></div>`;
+    note(kind, html);
     const go = $('#go', el); go.textContent = label; go.disabled = !ok;
   };
   const check = async () => {
-    const my = ++tok; const s0 = f.start_date.value; const e0 = f.end_date.value;
-    if (!s0 || !e0) { out = null; $('#go', el).disabled = true; $('#rs-note', el).innerHTML = `<div class="banner warn">${icon('alert')}<div class="grow small">Choose a first day and a last day.</div></div>`; return; }
+    const my = ++tok; const s0 = f.start_date.value; const e0 = f.end_date.value; syncClear();
+    if (!s0 || !e0) { out = null; $('#go', el).disabled = true; note('warn', 'Choose a start date and an end date.'); return; }
+    const half = ['start_time', 'end_time'].find(partial);
+    if (half) { out = null; $('#go', el).disabled = true; note('warn', `Finish the ${half === 'start_time' ? 'pickup' : 'return'} time (hour, minutes and AM or PM), or press Clear to leave it blank.`); return; }
+    if (!timesOk()) { out = null; $('#go', el).disabled = true; note('warn', 'The return time must be after the pickup time.'); return; }
     paint(null);
-    try { const r = await api('GET', `/api/assets/${asset.id}/range-check?start_date=${encodeURIComponent(s0)}&end_date=${encodeURIComponent(e0)}${edit ? '&entry_id=' + entry.id : ''}`); if (my === tok) paint(r); }
+    const q = `start_date=${encodeURIComponent(s0)}&end_date=${encodeURIComponent(e0)}${f.start_time.value ? '&start_time=' + encodeURIComponent(f.start_time.value) : ''}${f.end_time.value ? '&end_time=' + encodeURIComponent(f.end_time.value) : ''}${edit ? '&entry_id=' + entry.id : ''}`;
+    try { const r = await api('GET', `/api/assets/${asset.id}/range-check?${q}`); if (my === tok) paint(r); }
     catch (e) { if (my === tok) paint({ outcome: 'unavailable', message: e.message }); }
   };
   f.start_date.onchange = () => { if (f.end_date.value < f.start_date.value) f.end_date.value = f.start_date.value; f.end_date.min = f.start_date.value; check(); };
   f.end_date.onchange = check;
-  f.onsubmit = (e) => {
-    e.preventDefault(); if (!out) return;
-    const body = { start_date: f.start_date.value, end_date: f.end_date.value }; const o = out.outcome;
-    busy($('#go', el), async () => {
+  // re-check whenever a time's value OR its half-typed state changes (typing fires no change event until the time is whole)
+  wireTimeBoxes(el, () => check());
+  $$('[data-clear]', el).forEach((b) => { b.onclick = (e) => { e.preventDefault(); $(`[data-tbox="${b.dataset.clear}"]`, el).clear(); }; });
+  // `kind`: 'reserve' (all or part free) | 'waitlist' (none free) | 'edit'. The request is re-decided by the server when it arrives.
+  const send = (kind, btn) => {
+    if (!out) return;
+    const body = { start_date: f.start_date.value, end_date: f.end_date.value, start_time: f.start_time.value || null, end_time: f.end_time.value || null };
+    busy(btn, async () => {
       try {
-        if (o === 'reserve' && !edit) { const r = await api('POST', `/api/assets/${asset.id}/reservations`, body); close(); toast(r.status === 'confirmed' ? 'Reserved' : 'Submitted for IT approval'); }
-        else if (o === 'waitlist' && !edit) { await api('POST', `/api/assets/${asset.id}/waitlist`, body); close(); toast('You are on the waitlist'); }
-        else if (o === 'waitlist' && edit) { await api('PUT', `/api/waitlist/${entry.id}`, body); close(); toast('Dates updated. You are now behind anyone already waiting for those dates.'); }
-        else return;
+        if (kind === 'reserve') {
+          const r = await api('POST', `/api/assets/${asset.id}/reservations`, body); close();
+          const pend = r.reserved.some((x) => x.status === 'pending');
+          toast(r.waitlisted.length ? `${pend ? 'Your reservation request was sent to IT' : 'Your reservation is confirmed'}. The rest is on your waitlist.` : pend ? 'Submitted for IT approval.' : 'Reserved.');
+        }
+        else if (kind === 'waitlist') { await api('POST', `/api/assets/${asset.id}/waitlist`, body); close(); toast('You are on the waitlist.'); }
+        else { await api('PUT', `/api/waitlist/${entry.id}`, body); close(); toast('Dates updated. You are now behind anyone already waiting for those dates.'); }
       } catch (err) { fail(err); check(); return; } // (someone may have just changed things: the sheet re-asks the server)
       refreshBadge(); if (onDone) await onDone(body);
     });
+  };
+  f.onsubmit = (e) => {
+    e.preventDefault(); if (!out || ['start_time', 'end_time'].some(partial)) return; const o = out.outcome;
+    if ((o === 'reserve' || o === 'partial') && !edit) send('reserve', $('#go', el)); else if (o === 'waitlist') send(edit ? 'edit' : 'waitlist', $('#go', el));
   };
   check();
 }
@@ -1776,7 +1988,14 @@ function wireWaitlistActions(root, rows, reload) {
   each('[data-wl-decline]', 'wlDecline', async (w) => {
     if (await confirmSheet("You don't need it?", `${w.asset_name} · ${resvRange(w)}. It will be offered to the next person in line.`, "I don't need it", true)) call(`/api/waitlist/${w.id}/decline`, 'Released. Thanks for letting us know');
   });
-  each('[data-wl-edit]', 'wlEdit', (w) => rangeSheet({ asset: { id: w.asset_id, name: w.asset_name, tag: w.asset_tag }, start: w.start_date, end: w.end_date, entry: w, onDone: reload }));
+  const editWl = (w) => rangeSheet({ asset: { id: w.asset_id, name: w.asset_name, tag: w.asset_tag }, start: w.start_date, end: w.end_date, entry: w, onDone: reload });
+  each('[data-wl-edit]', 'wlEdit', editWl);
+  // the card itself opens the same Edit waitlist dates sheet (links and buttons inside it keep their own jobs)
+  $$('[data-wl-card]', root).forEach((c) => {
+    const open = () => editWl(find(c.dataset.wlCard));
+    c.onclick = (e) => { if (e.target.closest('a,button')) return; open(); };
+    c.onkeydown = (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === c) { e.preventDefault(); open(); } };
+  });
   each('[data-wl-cancel]', 'wlCancel', async (w) => {
     if (await confirmSheet('Leave the waitlist?', `${w.asset_name} · ${resvRange(w)}. You will lose your place in line.`, 'Leave waitlist', true)) call(`/api/waitlist/${w.id}/cancel`, 'You left the waitlist');
   });
@@ -1895,15 +2114,15 @@ async function viewCalendar() {
     if (day < data.today) return { day, cls: 'past', text: '', label: `${fmtDate(day)}: past` };
     if (!isSummary()) {
       const s = A[0].days[i];
-      const cls = { available: 'free', expected: 'expected', occupied: 'busy', reserved: 'reserved' }[s] || 'off';
+      const cls = { available: 'free', expected: 'expected', occupied: 'busy', reserved: 'reserved', partial: 'partial' }[s] || 'off';
       return { day, cls, text: '', label: `${fmtDate(day)}: ${DAY_WORD[s]}` };
     }
     const c = data.days[i]; const n = c.available; const e = c.expected; const total = data.total;
-    const cls = !total ? 'off' : n === total ? 'free' : n > 0 ? 'mixed' : e > 0 ? 'expected' : 'busy';
+    const cls = !total ? 'off' : n === total ? 'free' : n > 0 || c.partial > 0 ? 'mixed' : e > 0 ? 'expected' : 'busy';
     // "36" = available that day; "+2" = two more are expected back by then (a due date, not a guarantee)
     return { day, cls, text: total ? `${n}${e ? `<em>+${e}</em>` : ''}` : '', label: `${fmtDate(day)}: ${n} of ${total} available${e ? `, ${e} more expected back` : ''}` };
   };
-  const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', reserved: 'reserved', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
+  const DAY_WORD = { available: 'available', expected: 'expected back (not guaranteed)', occupied: 'unavailable', reserved: 'reserved', partial: 'partially scheduled', repair: 'in repair', ineligible: 'not lendable', archived: 'archived', past: 'past' };
 
   const periodsOn = (a, day, kind) => a.periods.filter((x) => x.kind === kind && x.start <= day && (!x.end || day <= x.end));
   const clock = (t) => (t ? ` ${fmtClock(t)}` : '');
@@ -1922,18 +2141,20 @@ async function viewCalendar() {
       const ends = periodsOn(a, day, 'expected').map((x) => addDaysStr(x.start, -1));
       parts.push(`Due back ${ends.length ? 'by ' + fmtDate(ends.sort()[0]) : 'before then'} — not guaranteed`);
       if (adminV) parts.push(...periodsOn(a, day, 'expected').map(who).filter(Boolean));
-    } else if (s === 'reserved') {
-      for (const x of (a.reservations || []).filter((r) => r.status === 'confirmed' && r.start <= day && day <= r.end)) {
-        parts.push(`Reserved ${x.start === x.end ? fmtDate(x.start) : fmtDate(x.start) + ' – ' + fmtDate(x.end)}${x.mine && !adminV ? ' · by you' : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
-      }
-      // dates held for someone from the waitlist (a 24-hour offer): taken for everyone else, whoever the person is
-      for (const x of (a.holds || []).filter((h) => h.start <= day && day <= h.end)) {
-        parts.push(x.mine ? `Held for you until ${fmtStamp(x.hold_expires_at)}` : `On hold for a waitlisted team${adminV && x.hold_expires_at ? ' until ' + fmtStamp(x.hold_expires_at) : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
-      }
+    } else if (s === 'reserved' || s === 'partial') { /* listed below, with every other entry on this day */
     } else parts.push(DAY_WORD[s].replace(/^./, (c) => c.toUpperCase()));
+    // Every confirmed reservation and active hold on this day, with its hours. Overlapping ones are all listed (a day can hold several, and the calendar is not a lock).
+    for (const x of (a.reservations || []).filter((r) => r.status === 'confirmed' && r.start <= day && day <= r.end)) {
+      parts.push(`Reserved: ${esc(calRange(x, day))}${x.mine && !adminV ? ' · by you' : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
+    }
+    // time held for someone from the waitlist (an offer that expires): scheduled for that team, whoever the person is
+    for (const x of (a.holds || []).filter((h) => h.start <= day && day <= h.end)) {
+      const t = esc(calRange(x, day));
+      parts.push(x.mine ? `Available for you: ${t} until ${x.hold_expires_text || fmtStamp(x.hold_expires_at)}` : `On hold for a waitlisted team: ${t}${adminV && x.hold_expires_at ? ' until ' + (x.hold_expires_text || fmtStamp(x.hold_expires_at)) : ''}${adminV && x.holder ? ' · ' + who(x) : ''}`);
+    }
     // a request still waiting for IT does not hold the day; its owner (and IT) is reminded of it here
     for (const x of (a.reservations || []).filter((r) => r.status === 'pending' && r.start <= day && day <= r.end)) {
-      parts.push(`${adminV ? 'Pending request' : 'Your request'} ${x.start === x.end ? fmtDate(x.start) : fmtDate(x.start) + ' – ' + fmtDate(x.end)} is waiting for IT approval${adminV && x.holder ? ' · ' + who(x) : ''}`);
+      parts.push(`${adminV ? 'Pending request' : 'Your request'} ${esc(calRange(x))} is waiting for IT approval${adminV && x.holder ? ' · ' + who(x) : ''}`);
     }
     return parts;
   };
@@ -1955,11 +2176,11 @@ async function viewCalendar() {
   // A catalog subtree / everything: counts only. Never the assets themselves.
   const countRows = (c) => {
     if (isAdmin()) { // schedulable pool only (permanently assigned equipment is not part of this calendar): available · checked out · repair
-      const rows = [[c.available, 'available', 'available'], [c.checked_out, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved'], [c.off, 'in repair or not lendable', 'off']];
-      return rows.filter(([n, , k]) => n || !['expected', 'reserved'].includes(k));
+      const rows = [[c.available, 'available', 'available'], [c.checked_out, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved'], [c.partial, 'partially scheduled', 'partial'], [c.off, 'in repair or not lendable', 'off']];
+      return rows.filter(([n, , k]) => n || !['expected', 'reserved', 'partial'].includes(k));
     }
-    const rows = [[c.available, 'available', 'available'], [c.unavailable, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved']];
-    return rows.filter(([n, , k]) => n || !['expected', 'reserved'].includes(k));
+    const rows = [[c.available, 'available', 'available'], [c.unavailable, 'checked out', 'occupied'], [c.expected, 'expected back', 'expected'], [c.reserved, 'reserved', 'reserved'], [c.partial, 'partially scheduled', 'partial']];
+    return rows.filter(([n, , k]) => n || !['expected', 'reserved', 'partial'].includes(k));
   };
   const summaryPanel = (day, i) => {
     const c = data.days[i]; const adminV = isAdmin();
@@ -1970,7 +2191,7 @@ async function viewCalendar() {
   // Employee, catalog-entry calendar: the actual assets for the selected day, grouped by state (the server already left out permanent
   // assignments, items not available to request, and everything outside this entry's subtree). A row opens that asset's own calendar on the
   // same day, with Back returning here; there is deliberately no Reserve button in the list.
-  const GROUPS = [['available', 'Available'], ['reserved', 'Reserved'], ['occupied', 'Checked out'], ['expected', 'Expected back']];
+  const GROUPS = [['available', 'Available'], ['reserved', 'Reserved'], ['partial', 'Partially scheduled'], ['occupied', 'Checked out'], ['expected', 'Expected back']];
   const calHere = () => calUrl({ node: want.node, month: st.month === today0.slice(0, 7) ? '' : st.month, day: st.day === defaultDay() ? '' : st.day, from: want.from });
   const assetsHtml = (day, i) => {
     if (!data.assets || !data.assets.length) return '';
@@ -2003,7 +2224,7 @@ async function viewCalendar() {
     const a = A[0]; const needs = a.reserve.requires_approval;
     if (!sel.on) {
       return `<div class="card pad cal-reserve"><button class="btn primary lg block" id="resv-start">${icon('calendar')} Reserve this asset</button>
-        <p class="small muted" style="margin:10px 0 0">You will pick a start and an end date on the calendar. ${needs ? 'IT approves reservations for this item.' : 'Reservations for this item are confirmed right away.'} Need a day that is already reserved? Tap it to join the waitlist.</p></div>`;
+        <p class="small muted" style="margin:10px 0 0">You will pick a start and an end date on the calendar, then add a pickup or return time if you need one. ${needs ? 'IT approves reservations for this item.' : 'Reservations for this item are confirmed right away.'} Need a day that is already reserved? Tap it to join the waitlist.</p></div>`;
     }
     const e0 = sel.end || sel.start;
     return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Reserve ${esc(a.name)}</h3>
@@ -2012,22 +2233,36 @@ async function viewCalendar() {
       <div class="row wrap" style="gap:8px;margin-top:12px"><button class="btn" id="resv-cancel">Cancel</button>${sel.start ? '<button class="btn" id="resv-clear">Clear dates</button>' : ''}<button class="btn primary" id="resv-go" ${sel.start ? '' : 'disabled'}>${needs ? 'Review request' : 'Review & reserve'}</button></div></div>`;
   };
   // Waitlist (slice 8). Offered when the day you are looking at is reserved by someone else (or held for another team). Joining changes nothing
-  // for the current reserver; if the whole range you ask for frees up you get a 24-hour offer, first come, first served.
-  const wlStatus = (w) => (w.phase === 'held' ? `held for you until ${fmtStamp(w.hold_expires_at)}` : 'waitlisted');
+  // for the current reserver; if time you ask for frees up you get an offer with a limited time to confirm, first come, first served.
+  const wlStatus = (w) => (w.phase === 'held' ? `available for you until ${w.hold_expires_text || fmtStamp(w.hold_expires_at)}` : 'waitlisted');
   const waitlistPanel = () => {
     const mineWl = (A[0].waitlist || []).filter((w) => w.mine);
     if (!mineWl.length) return '';
-    return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Your waitlist</h3><div class="stack" style="gap:6px">${mineWl.map((w) => `<div class="small"><strong>${esc(rangeText(w.start, w.end))}</strong> · ${esc(wlStatus(w))}</div>`).join('')}<a class="small" href="#/requests?tab=reservations">${mineWl.some((w) => w.phase === 'held') ? 'Confirm or let go of your hold' : 'Edit dates or leave the waitlist'} →</a></div></div>`;
+    return `<div class="card pad cal-reserve"><h3 style="margin:0 0 6px">Your waitlist</h3><div class="stack" style="gap:6px">${mineWl.map((w) => `<div class="small"><strong>${esc(resvRange({ start_date: w.start, start_time: w.start_time, end_date: w.end, end_time: w.end_time }))}</strong> · ${esc(wlStatus(w))}</div>`).join('')}<a class="small" href="#/requests?tab=reservations">${mineWl.some((w) => w.phase === 'held') ? 'Confirm or let go of your hold' : 'Edit dates or leave the waitlist'} →</a></div></div>`;
   };
   // IT: everyone in line for this asset, oldest first. (Informational: IT may remove an entry from Requests > Reservations, never reorder one.)
   const queueHtml = () => {
     const q = isAdmin() && A[0] && A[0].waitlist ? A[0].waitlist : [];
     if (!q.length) return '';
     return `<div class="card"><div class="card-head"><h2>Waitlist</h2><span class="muted small">${q.length}</span></div><ul class="list">${q.map((w, n) => `<li><a class="item" href="#/requests?tab=reservations"><div class="grow"><div class="title truncate">${n + 1}. ${esc(w.holder.name)}${w.holder.department ? ' · ' + esc(w.holder.department) : ''}</div>
-      <div class="sub">${esc(rangeText(w.start, w.end))} · ${w.phase === 'held' ? `held until ${esc(fmtStamp(w.hold_expires_at))}` : 'waiting'} · joined ${esc(fmtWhen(w.created_at))}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>`;
+      <div class="sub">${esc(resvRange({ start_date: w.start, start_time: w.start_time, end_date: w.end, end_time: w.end_time }))} · ${w.phase === 'held' ? `offered until ${esc(w.hold_expires_text || fmtStamp(w.hold_expires_at))}` : 'waiting'} · joined ${esc(fmtWhen(w.created_at))}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>`;
   };
   // The one date sheet (see rangeSheet): reserve, or join the waitlist when the range is reserved. Afterwards the calendar reloads as it is now.
-  const openRange = (s0, e0, reservedDay) => rangeSheet({ asset: A[0], start: s0, end: e0, reservedDay, today: data.today, onDone: async () => {
+  // What a day holds, in the words the sheet uses: the asset's own schedule, then THIS viewer's reservation / offer, then their waitlist (IT: everyone's waitlist).
+  const dayHtml = (day) => {
+    const a = A[0]; const i = Number(day.slice(8)) - 1;
+    const lines = detail(a, day, i);
+    const mineRe = / · by you$|^Available for you:|^Your request/;
+    const strip = (l) => l.replace(/^Reserved: /, '').replace(/ · by you$/, '');
+    const wl = (a.waitlist || []).filter((w) => w.phase !== 'held' && w.start <= day && day <= w.end)
+      .map((w) => `${esc(calRange(w, day))}${isAdmin() && w.holder ? ' · ' + esc(w.holder.name) : ''}`);
+    // neutral = what the asset already has; green = reserved for ME; amber = still waiting, not guaranteed
+    return [['Current asset reservation', lines.filter((l) => !mineRe.test(l)).map(strip), ''], ['Your reservation', lines.filter((l) => mineRe.test(l)).map(strip), ' ok'], [isAdmin() ? 'Waitlist' : 'Your waitlist', wl, ' wait']]
+      .filter(([, l]) => l.length).map(([h, l, c]) => `<span class="rs-sched${c}"><strong>${h}</strong>${l.map((x) => `<span>${x}</span>`).join('')}</span>`).join('');
+  };
+  // Read-only: the same detail for someone who cannot reserve here (IT, or an item that is not reservable).
+  const daySheet = (day) => sheet(`<h2>${esc(dayTitle(day))}</h2><p class="muted small" style="margin-top:0"><strong>${esc(A[0].name)}</strong>${A[0].tag ? ` <span class="mono">${esc(A[0].tag)}</span>` : ''}</p>${dayHtml(day)}<div class="sheet-actions"><button type="button" class="btn primary" data-close>Close</button></div>`);
+  const openRange = (s0, e0, reservedDay) => rangeSheet({ asset: A[0], start: s0, end: e0, reservedDay, scheduledHtml: reservedDay ? dayHtml(s0) : '', today: data.today, onDone: async () => {
     sel.on = false; sel.start = sel.end = ''; stateCache.clear(); await go2(st.month);
     if (s0.slice(0, 7) === st.month) { st.day = s0; keepUrl(); paint(); }
   } });
@@ -2044,7 +2279,7 @@ async function viewCalendar() {
     const range = sel.on && sel.start ? [sel.start, sel.end || sel.start] : null;
     for (let i = 0; i < monthDays; i++) {
       const c = cellInfo(i);
-      const pick = sel.on && c.day >= data.today ? (['free', 'expected'].includes(c.cls) ? ' pick' : ' nopick') : '';
+      const pick = sel.on && c.day >= data.today ? (['off', 'past'].includes(c.cls) ? ' nopick' : ' pick') : '';
       const inR = range && c.day >= range[0] && c.day <= range[1];
       const edge = range && (c.day === range[0] || c.day === range[1]);
       cells.push(`<button type="button" class="cal-day ${c.cls}${pick}${inR ? ' inrange' : ''}${edge ? ' edge' : ''}${c.day === st.day ? ' sel' : ''}${c.day === data.today ? ' today' : ''}" data-day="${c.day}" aria-label="${esc(c.label)}${inR ? ', selected' : ''}" aria-pressed="${c.day === st.day}"><span class="d">${i + 1}</span><span class="c">${c.text}</span></button>`);
@@ -2067,10 +2302,10 @@ async function viewCalendar() {
         <div class="cal-nav"><button type="button" class="iconbtn" id="calprev" aria-label="Previous month">${icon('back')}</button><h2 id="calmonth" aria-live="polite"></h2><button type="button" class="iconbtn" id="calnext" aria-label="Next month">${icon('chev')}</button></div>
         <div class="cal-wd" aria-hidden="true">${['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((d) => `<span>${d}</span>`).join('')}</div>
         <div class="cal-grid" id="calgrid"></div>
-        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="reserved"></i>Reserved</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
+        <div class="cal-legend small muted"><span><i class="free"></i>Available</span>${isSummary() ? '<span><i class="mixed"></i>Some available</span>' : ''}<span><i class="expected"></i>Expected back</span><span><i class="reserved"></i>Reserved</span><span><i class="partial"></i>Partly scheduled</span><span><i class="busy"></i>Unavailable</span>${isAdmin() ? '<span><i class="off"></i>Repair / not lendable</span>' : ''}</div>
       </div>
       <div id="calpanel"></div>
-      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Confirmed reservations hold their dates, and so do dates held for someone from the waitlist; a request still waiting for IT approval does not.</p>
+      <p class="small muted">Based on what is checked out right now. A due date is when something is expected back, not a booking, so those days are shown as <em>expected</em>, never as guaranteed${isSummary() ? ' (a “+2” on a day means two more are expected back by then)' : ''}. ${isAdmin() && isSummary() ? 'Permanently assigned equipment is not part of this calendar. ' : ''}Confirmed reservations and dates held for someone from the waitlist show as reserved, or as partly scheduled when only part of the day is taken. That time is unavailable: ask for it and it goes on the waitlist, while any free time in your request is reserved. People waiting are not shown on the grid, only in the waitlist lists. A request still waiting for IT approval does not count.</p>
     </div>`;
   const go2 = async (month) => {
     st.month = month; st.day = '';
@@ -2081,46 +2316,51 @@ async function viewCalendar() {
   };
   // ---- picking a range (single-asset calendar only)
   const stateOf = (d) => { const days = stateCache.get(d.slice(0, 7)); return days ? days[Number(d.slice(8)) - 1] : null; };
-  const takeable = (s0) => s0 === 'available' || s0 === 'expected'; // what the server accepts: expected-back days may be reserved, occupied/reserved ones may not
+  const takeable = (s0) => ['available', 'expected', 'partial', 'reserved', 'occupied'].includes(s0); // anything lendable can be ASKED for (the server reserves what is free and waitlists the rest)
   const ensureMonths = async (s0, e0) => {
     for (let m = s0.slice(0, 7); m <= e0.slice(0, 7); m = monthShift(m, 1)) {
       if (!stateCache.has(m)) stateCache.set(m, (await api('GET', `/api/availability?asset=${want.asset}&month=${m}`)).assets[0].days);
     }
   };
-  const firstTaken = (s0, e0) => { for (let d = s0; d <= e0; d = addDaysStr(d, 1)) if (!takeable(stateOf(d))) return d; return null; };
+  const hasReserved = (s0, e0) => { for (let d = s0; d <= e0; d = addDaysStr(d, 1)) if (stateOf(d) === 'reserved') return true; return false; };
   const pickDay = async (day) => {
     if (day < data.today) return;
-    if (!takeable(stateOf(day))) { toast(`${fmtDate(day)} isn't free to reserve.`, true); return; }
+    if (!takeable(stateOf(day))) { toast(`${fmtDate(day)} can't be reserved.`, true); return; }
     if (!sel.start || sel.end || day < sel.start) { sel.start = day; sel.end = ''; return; }
     if (day === sel.start) { sel.end = day; return; }
     try { await ensureMonths(sel.start, day); } catch (e) { fail(e); return; }
-    const taken = firstTaken(sel.start, day);
-    if (taken) { // a reserved day inside the range: that is a waitlist question, not an error (the sheet explains); anything else is just taken
-      if (stateOf(taken) === 'reserved') { sel.end = day; return 'conflict'; }
-      toast(`${fmtDate(taken)} is already taken, so that range won't work. Pick a shorter one.`, true); return;
-    }
     sel.end = day;
+    if (hasReserved(sel.start, day)) return 'conflict'; // a reserved day inside the range: open the sheet at once (it says what is reserved and what is free)
   };
   paint();
   $('#calprev').onclick = () => go2(monthShift(st.month, -1));
   $('#calnext').onclick = () => go2(monthShift(st.month, 1));
+  // Tapping a day must never feel dead: when it opens no sheet, bring the day's detail panel into view and flash it so the eye lands on what is scheduled.
+  const revealPanel = (day) => {
+    const panel = $('#calpanel'); if (!panel) return;
+    const k = A[0] ? A[0].days[Number(day.slice(8)) - 1] : null;
+    if (!isSummary() && !['reserved', 'partial', 'occupied', 'expected'].includes(k) && panel.getBoundingClientRect().top <= window.innerHeight - 120) return;
+    panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    panel.classList.remove('flash'); void panel.offsetWidth; panel.classList.add('flash');
+  };
   $('#calgrid').onclick = async (e) => {
     const b = e.target.closest('[data-day]'); if (!b) return;
     st.day = b.dataset.day;
-    // A day that is already reserved (by someone else) opens the date sheet right away: no warning, no scrolling. If a range was being picked
-    // it is the end of that range. Your own reservation or hold is not "someone else's": that day just selects.
-    const i = Number(st.day.slice(8)) - 1;
-    const own = (A[0].holds || []).concat(A[0].reservations || []).some((x) => x.mine && x.start <= st.day && st.day <= x.end);
-    if (canReserve && st.day >= data.today && A[0].days[i] === 'reserved' && !own) {
+    // ANY scheduled or partly scheduled day opens the date sheet right away, whoever holds it (yours, someone else's, IT's view): it lists what is on the
+    // day (the asset's schedule, your own reservation, your own waitlist). If a range was being picked it is the end of that range. Someone who cannot
+    // reserve here gets the same detail, read-only.
+    const i = isSummary() ? -1 : Number(st.day.slice(8)) - 1;
+    if (!isSummary() && st.day >= data.today && ['reserved', 'partial'].includes(A[0].days[i])) {
+      if (!canReserve) { keepUrl(); paint(); daySheet(st.day); return; }
       const from = sel.on && sel.start && !sel.end && st.day > sel.start ? sel.start : st.day;
       if (from !== st.day) sel.end = st.day;
-      keepUrl(); paint(); openRange(from, st.day, from === st.day); return;
+      keepUrl(); paint(); openRange(from, st.day, from === st.day ? A[0].days[i] : false); return;
     }
     let outcome = null;
     if (sel.on) outcome = await pickDay(st.day);
     keepUrl(); paint();
     if (outcome === 'conflict') { openRange(sel.start, sel.end, false); return; }
-    const panel = $('#calpanel'); if (panel && panel.getBoundingClientRect().top > window.innerHeight - 120) panel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    revealPanel(b.dataset.day);
   };
   $('#calpanel').onclick = (e) => {
     const b = e.target.closest('button'); if (!b || !canReserve) return;

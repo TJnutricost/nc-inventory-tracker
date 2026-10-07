@@ -160,7 +160,7 @@ test('repair, retired, lost and disposed are unavailable on every future day, an
   for (const a of [repair, retired, lost, disposed, arch]) db.prepare('UPDATE assets SET catalog_node_id = ? WHERE id = ?').run(bucket.id, a.id);
   const sum = await ok(admin, `?node=${bucket.id}`);
   assert.equal(sum.total, 4, 'archived assets are not part of node/global scopes');
-  assert.deepEqual(sum.days[todayIdx], { available: 0, expected: 0, checked_out: 0, reserved: 0, off: 4 });
+  assert.deepEqual(sum.days[todayIdx], { available: 0, expected: 0, checked_out: 0, reserved: 0, partial: 0, off: 4 });
 });
 
 test('a multi-seat license is available while any seat is free, occupied only when every seat is taken', async () => {
@@ -304,26 +304,26 @@ test('a catalog subtree answers with per-day counts; an employee also gets the s
     assert.ok(!JSON.stringify(body).includes('Sum permanent'), 'permanent assignments are never listed');
   }
   // employee: counts + the assets themselves (anonymous), each with its own day states
-  assert.deepEqual(emp.days[todayIdx], { available: 2, expected: 0, unavailable: 1, reserved: 0, off: 0 }, 'today');
+  assert.deepEqual(emp.days[todayIdx], { available: 2, expected: 0, unavailable: 1, reserved: 0, partial: 0, off: 0 }, 'today');
   assert.deepEqual(emp.assets.map((a) => a.name).sort(), ['Sum free 1', 'Sum free 2', 'Sum loaned']);
   const row = (n) => emp.assets.find((a) => a.name === n);
   assert.deepEqual([row('Sum free 1').days[todayIdx], row('Sum loaned').days[todayIdx]], ['available', 'occupied']);
   assert.equal(emp.assets_truncated, false);
   assert.ok(!JSON.stringify(emp).includes('Summary Holder'), 'no holder');
   // admin: counts + temporary checkouts, no asset rows (unchanged)
-  assert.deepEqual(adm.days[todayIdx], { available: 2, expected: 0, checked_out: 1, reserved: 0, off: 0 });
+  assert.deepEqual(adm.days[todayIdx], { available: 2, expected: 0, checked_out: 1, reserved: 0, partial: 0, off: 0 });
   assert.equal(adm.assets, undefined);
   assert.deepEqual(adm.events.map((e) => e.name), ['Sum loaned']);
   // after the loan's due date the loaned laptop is only "expected back"
   const later = plus(5);
   const m = await ok(me.client, `?node=${root.id}&month=${later.slice(0, 7)}`);
-  assert.deepEqual(m.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, unavailable: 0, reserved: 0, off: 0 });
+  assert.deepEqual(m.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, unavailable: 0, reserved: 0, partial: 0, off: 0 });
   assert.equal(m.assets.find((a) => a.name === 'Sum loaned').days[Number(later.slice(8)) - 1], 'expected');
   const am = await ok(admin, `?node=${root.id}&month=${later.slice(0, 7)}`);
-  assert.deepEqual(am.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, checked_out: 0, reserved: 0, off: 0 }, 'admin: the loan is back-expected, so not "checked out" that day');
+  assert.deepEqual(am.days[Number(later.slice(8)) - 1], { available: 2, expected: 1, checked_out: 0, reserved: 0, partial: 0, off: 0 }, 'admin: the loan is back-expected, so not "checked out" that day');
   // earlier days carry no counts
   const first = (await ok(me.client, `?node=${root.id}`)).days[0];
-  if (TODAY.slice(8) > '01') assert.deepEqual(first, { available: 0, expected: 0, unavailable: 0, reserved: 0, off: 0 });
+  if (TODAY.slice(8) > '01') assert.deepEqual(first, { available: 0, expected: 0, unavailable: 0, reserved: 0, partial: 0, off: 0 });
 });
 
 test('an employee catalog-entry calendar lists only that entry\'s subtree, in the shared pool, not permanently assigned, with reserved and checked-out states; the global calendar stays closed to them', async () => {
@@ -347,7 +347,7 @@ test('an employee catalog-entry calendar lists only that entry\'s subtree, in th
   const state = (n) => body.assets.find((x) => x.name === n).days[idx];
   assert.deepEqual([state('Bridge free'), state('Bridge reserved'), state('Bridge out')], ['available', 'reserved', 'occupied']);
   assert.equal(body.total, 3);
-  assert.deepEqual(body.days[idx], { available: 1, expected: 0, unavailable: 1, reserved: 1, off: 0 }, 'counts and rows agree');
+  assert.deepEqual(body.days[idx], { available: 1, expected: 0, unavailable: 1, reserved: 1, partial: 0, off: 0 }, 'counts and rows agree');
   // narrower entry => narrower list
   assert.deepEqual((await ok(me.client, `?node=${nik.id}`)).assets.map((x) => x.name), ['Bridge out']);
   // rows carry no holder and the reservation is anonymous (only "mine")
@@ -468,14 +468,14 @@ test('permanent assignments are not in the broad admin calendar at all: not in t
   const month = await ok(admin, `?node=${n.id}&month=${TODAY.slice(0, 7)}`);
   assert.equal(month.total, 5, '7 assets, 2 permanently assigned: the schedulable pool is 5');
   // today: t1, t2 and the overdue one are out; one in repair; one free. Nothing about permanent assignments.
-  assert.deepEqual(month.days[todayIdx], { available: 1, expected: 0, checked_out: 3, reserved: 0, off: 1 });
-  assert.deepEqual(Object.keys(month.days[todayIdx]).sort(), ['available', 'checked_out', 'expected', 'off', 'reserved'], 'no unavailable and no permanent figure');
+  assert.deepEqual(month.days[todayIdx], { available: 1, expected: 0, checked_out: 3, reserved: 0, partial: 0, off: 1 });
+  assert.deepEqual(Object.keys(month.days[todayIdx]).sort(), ['available', 'checked_out', 'expected', 'off', 'partial', 'reserved'], 'no unavailable and no permanent figure');
   assert.equal(month.days[todayIdx].checked_out, month.events.filter((e) => e.start <= TODAY && (e.overdue || TODAY <= e.end)).length, 'the count IS the list');
   assert.ok(!month.events.some((e) => [p1.id, p2.id].includes(e.asset_id)));
   assert.ok(!JSON.stringify(month).includes('Pl perm'));
   // three days on (the month may roll over, so ask for that month): t1 is due back (expected), t2 and the overdue one are still out
   const d3 = plus(3); const m3 = await ok(admin, `?node=${n.id}&month=${d3.slice(0, 7)}`);
-  assert.deepEqual(m3.days[Number(d3.slice(8)) - 1], { available: 1, expected: 1, checked_out: 2, reserved: 0, off: 1 });
+  assert.deepEqual(m3.days[Number(d3.slice(8)) - 1], { available: 1, expected: 1, checked_out: 2, reserved: 0, partial: 0, off: 1 });
   // the global calendar's total drops by exactly the permanently assigned assets, too
   const before = (await ok(admin)).total;
   const extra = await newAsset('Pl global perm');
@@ -497,7 +497,7 @@ test('the admin Checked out count is not limited by the events list cap, and emp
   const a = await newAsset('Cap loan', { catalog_node_id: n.id });
   await checkout(a, h, { assignment_type: 'checkout', due_date: plus(2) });
   const emp = await ok(me.client, `?node=${n.id}`);
-  assert.deepEqual(Object.keys(emp.days[todayIdx]).sort(), ['available', 'expected', 'off', 'reserved', 'unavailable']);
+  assert.deepEqual(Object.keys(emp.days[todayIdx]).sort(), ["available", "expected", "off", "partial", "reserved", "unavailable"]);
   assert.equal((await ok(admin, `?node=${n.id}`)).days[todayIdx].checked_out, 1);
 });
 
@@ -652,7 +652,7 @@ test('front end: the selected-day panel follows the scope — asset detail for o
   assert.match(summary, /\$\{adminV \? eventsHtml\(day\) : assetsHtml\(day, i\)\}/, 'IT: temporary checkouts; employee: the entry\'s assets for the day');
   assert.match(summary, /Temporary checkouts/);
   const list = summary.slice(summary.indexOf('const GROUPS ='), summary.indexOf('// Admin, broad scope'));
-  assert.match(list, /\[\['available', 'Available'\], \['reserved', 'Reserved'\], \['occupied', 'Checked out'\], \['expected', 'Expected back'\]\]/, 'grouped: available first, then reserved, checked out');
+  assert.match(list, /\[\['available', 'Available'\], \['reserved', 'Reserved'\], \['partial', 'Partially scheduled'\], \['occupied', 'Checked out'\], \['expected', 'Expected back'\]\]/, 'grouped: available first, then reserved, partially scheduled, checked out');
   assert.match(list, /calUrl\(\{ asset: a\.id, month: [^}]*day, from \}\)/, 'a row opens that asset\'s calendar on the same day, with Back to this calendar');
   assert.doesNotMatch(list, /<button|resv-|Reserve this/, 'no Reserve control beside the assets: reserving happens on the asset\'s own calendar');
   assert.doesNotMatch(summary.slice(summary.indexOf('const summaryPanel '), summary.indexOf('const GROUPS =')), /<button|resv-|Reserve this/, 'the counts panel carries no reservation controls');
