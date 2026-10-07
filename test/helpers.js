@@ -82,4 +82,9 @@ async function setupAdmin(server, overrides = {}) {
   return { client: c, admin };
 }
 
-module.exports = { bootApp, startServer, stopServer, makeClient, setupAdmin };
+// POST /api/assets/:id/reservations answers { request_group, requested, reserved: [...], waitlisted: [...] }: one request can become reservation(s) for the free
+// time AND waitlist entries for the unavailable time. Most tests only want "the reservation", so this lets them keep treating the answer as the FIRST
+// reservation (its fields at the top) with the whole answer under `.group`. A refusal passes through untouched.
+const asReservation = (res) => (res.status === 200 && res.body && res.body.reserved ? { ...res, body: { ...res.body.reserved[0], group: res.body } } : res);
+
+module.exports = { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation };

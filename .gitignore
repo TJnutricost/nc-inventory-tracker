@@ -3,3 +3,4 @@ data
 data-dev
 .env
 *.log
+data-qa

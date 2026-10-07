@@ -58,7 +58,7 @@ before(async () => {
   const r = await owner.client.post(`/api/assets/${t.xt5a.id}/reservations`, { start_date: TODAY, end_date: plus(2) });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal((await waiter.client.post(`/api/assets/${t.xt5a.id}/waitlist`, { start_date: TODAY, end_date: plus(2) })).status, 200);
-  assert.equal((await owner.client.post(`/api/reservations/${r.body.id}/cancel`, {})).status, 200);
+  assert.equal((await owner.client.post(`/api/reservations/${r.body.reserved[0].id}/cancel`, {})).status, 200);
   assert.equal(db.prepare("SELECT status FROM waitlist_entries WHERE asset_id = ?").get(t.xt5a.id).status, 'held');
 });
 after(() => stopServer(server));
@@ -232,7 +232,7 @@ test('migration 16 adds catalog_nodes.search_keywords as an empty column for eve
   const d = new Database(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'nc-srch-mig-')), 'assets.db'));
   runMigrations(d, all.filter((m) => m.id <= 15));
   d.prepare("INSERT INTO catalog_nodes (parent_id, name, name_key) VALUES (NULL, 'Camera', 'camera')").run();
-  assert.deepEqual(runMigrations(d, all), [16]);
+  assert.deepEqual(runMigrations(d, all.filter((m) => m.id <= 16)), [16]);
   assert.equal(d.prepare('SELECT search_keywords k FROM catalog_nodes').get().k, null);
 });
 test('front end: Browse rows keep their state and open the calendar when not available now; the catalog gets a search and a Search keywords editor', () => {
@@ -240,7 +240,7 @@ test('front end: Browse rows keep their state and open the calendar when not ava
   const browse = src.slice(src.indexOf('async function viewBrowse()'), src.indexOf('// ============================================================ asset detail'));
   assert.match(browse, /const out = a\.avail_state && a\.avail_state !== 'available';/);
   assert.match(browse, /const href = out \? calUrl\(\{ asset: a\.id, from: calendarSource\(\) \}\)/);
-  assert.match(browse, /pill\('reserved', 'Reserved'\) : pill\('checked_out', 'Checked out'\)/);
+  assert.match(browse, /pill\('reserved', 'Reserved'\) : a\.avail_state === 'partial' \? pill\('reserved', 'Partly scheduled'\) : pill\('checked_out', 'Checked out'\)/);
   assert.match(browse, /back \$\{fmtDate\(a\.expected_back\)\}/);
   // the request-this-item pickers still ask for what is available right now
   assert.equal((src.match(/available=1|available: '1'/g) || []).length, 3);

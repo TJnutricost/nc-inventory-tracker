@@ -6,7 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation } = require('./helpers');
 
 let server, db, admin;
 before(async () => {
@@ -37,7 +37,7 @@ async function makeLogin(name, { selfCheckout = true } = {}) {
   return { client, id: created.body.id, name };
 }
 const checkout = async (asset, who, extra = {}) => { const r = await admin.post(`/api/assets/${asset.id}/checkout`, { employee_id: who.id, ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body.assignment; };
-const reserve = (who, asset, start, end) => who.client.post(`/api/assets/${asset.id}/reservations`, { start_date: start, end_date: end });
+const reserve = async (who, asset, start, end) => asReservation(await who.client.post(`/api/assets/${asset.id}/reservations`, { start_date: start, end_date: end }));
 async function okReserve(who, asset, start, end) { const r = await reserve(who, asset, start, end); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; }
 const cal = (who, q = '') => who.get('/api/availability' + q);
 const month = (d) => d.slice(0, 7);
@@ -183,7 +183,7 @@ test('equipment ASSIGNED to an employee stays theirs when it is not available to
 });
 
 // ---------------------------------------------------------------- automatic reservations
-test('a valid reservation on an asset that does not need approval is confirmed immediately and blocks those dates (inclusive of both ends)', async () => {
+test('a valid reservation on an asset that does not need approval is confirmed immediately and shows those dates as reserved (inclusive of both ends)', async () => {
   const a = await newAsset('Auto camera');
   const me = await makeLogin('Auto Reserver'); const other = await makeLogin('Auto Other');
   const start = plus(10); const end = plus(12);
@@ -195,16 +195,24 @@ test('a valid reservation on an asset that does not need approval is confirmed i
   const states = []; for (const d of around) states.push(await stateOn(other, a, d));
   assert.deepEqual(states, ['available', 'reserved', 'reserved', 'reserved', 'available']);
   assert.equal(db.prepare("SELECT COUNT(*) c FROM activity WHERE asset_id = ? AND action = 'reserved'").get(a.id).c, 1);
-  // another employee cannot take any overlapping range ...
-  for (const [s, e] of [[start, end], [plus(9), start], [end, plus(14)], [plus(11), plus(11)], [plus(5), plus(20)]]) {
-    const x = await reserve(other, a, s, e);
+  // Unavailable time is waitlist time: a request wholly inside the reserved days cannot be reserved (the waitlist is its endpoint) ...
+  let n = 0;
+  for (const [s, e] of [[start, end], [plus(11), plus(11)]]) {
+    const x = await reserve(await makeLogin(`Auto Overlap ${++n}`), a, s, e);
     assert.equal(x.status, 409, `${s}..${e}`);
-    assert.match(x.body.error, /already reserved/i);
+    assert.match(x.body.error, /already reserved.*waitlist/i);
   }
-  // ... but the day before and the day after are fine, and adjacent ranges can both be confirmed
-  await okReserve(other, a, plus(8), plus(9));
-  await okReserve(other, a, plus(13), plus(15));
-  assert.equal((await reserve(me, a, plus(11), plus(11))).status, 409, 'and not even the owner twice');
+  // ... a range that only partly overlaps is cut: the free days are reserved and the taken days are waitlisted, from ONE request
+  const mix = await makeLogin('Auto Partial');
+  const cut = await mix.client.post(`/api/assets/${a.id}/reservations`, { start_date: plus(9), end_date: start });
+  assert.equal(cut.status, 200, JSON.stringify(cut.body));
+  assert.deepEqual(cut.body.reserved.map((r) => [r.start_date, r.end_date, r.status]), [[plus(9), plus(9), 'confirmed']]);
+  assert.deepEqual(cut.body.waitlisted.map((w) => [w.start_date, w.end_date, w.phase]), [[start, start, 'waiting']]);
+  // ... a range nothing else touches is simply reserved, with nothing waitlisted
+  const clean = await mix.client.post(`/api/assets/${a.id}/reservations`, { start_date: plus(40), end_date: plus(41) });
+  assert.equal(clean.status, 200); assert.equal(clean.body.waitlisted.length, 0); assert.equal(clean.body.reserved.length, 1);
+  // ... and the same employee still cannot double-book themselves
+  assert.equal((await reserve(me, a, plus(11), plus(11))).status, 409, 'not even the owner twice');
 });
 
 test('a confirmed reservation shows up in the single-asset calendar (reserved days, anonymous for employees, with the holder for IT) and in broad counts as a figure, never a list', async () => {
@@ -225,9 +233,9 @@ test('a confirmed reservation shows up in the single-asset calendar (reserved da
   assert.equal(adminView.reservations[0].holder.name, 'Cal Reserver');
   // broad scope: a count, no reservations list, no controls
   const emp = (await cal(other.client, `?node=${n.id}&month=${m}`)).body;
-  assert.deepEqual(emp.days[idx], { available: 1, expected: 0, unavailable: 0, reserved: 1, off: 0 });
+  assert.deepEqual(emp.days[idx], { available: 1, expected: 0, unavailable: 0, reserved: 1, partial: 0, off: 0 });
   const adm = (await cal(admin, `?node=${n.id}&month=${m}`)).body;
-  assert.deepEqual(adm.days[idx], { available: 1, expected: 0, checked_out: 0, reserved: 1, off: 0 });
+  assert.deepEqual(adm.days[idx], { available: 1, expected: 0, checked_out: 0, reserved: 1, partial: 0, off: 0 });
   for (const body of [emp, adm]) {
     assert.equal(body.view, 'summary');
     assert.equal(body.reservations, undefined, 'no reservation list at this level');
@@ -287,27 +295,25 @@ test('approval-required: the reservation is PENDING, does not block anyone, and 
   assert.equal((await admin.post(`/api/reservations/${r.id}/approve`, {})).status, 400, 'cannot be approved twice');
 });
 
-test('approval re-checks the WHOLE range at approval time: a conflict prevents approval cleanly, and an existing confirmed reservation is never overridden', async () => {
+test('approval re-checks eligibility, the person, the start date AND the whole range at approval time: time that has since been taken is refused', async () => {
   const a = await newAsset('Recheck camera', { reservation_requires_approval: true });
   const first = await makeLogin('Recheck First'); const second = await makeLogin('Recheck Second');
   const p1 = await okReserve(first, a, plus(30), plus(32));
-  const p2 = await okReserve(second, a, plus(31), plus(33)); // overlaps p1; both are pending, so both are accepted at submission
+  const p2 = await okReserve(second, a, plus(31), plus(33)); // overlaps p1; both are pending (a pending request holds nothing), so both are accepted at submission
   assert.equal((await admin.post(`/api/reservations/${p1.id}/approve`, {})).status, 200);
-  const clash = await admin.post(`/api/reservations/${p2.id}/approve`, {});
-  assert.equal(clash.status, 409);
-  assert.match(clash.body.error, /can't approve.*already reserved/i);
-  assert.equal(db.prepare('SELECT status FROM reservations WHERE id = ?').get(p2.id).status, 'pending', 'it stays pending for IT to decline');
-  assert.equal(db.prepare('SELECT status FROM reservations WHERE id = ?').get(p1.id).status, 'confirmed', 'the confirmed one is untouched');
-  assert.equal((await admin.post(`/api/reservations/${p2.id}/decline`, { note: 'Dates taken' })).status, 200);
-  assert.equal((await admin.post(`/api/reservations/${p2.id}/approve`, {})).status, 400, 'a declined one cannot be approved');
-  // a checkout that now occupies the dates also blocks approval
+  const both = await admin.post(`/api/reservations/${p2.id}/approve`, {});
+  assert.equal(both.status, 409, 'the first approval took that time');
+  assert.match(both.body.error, /Can't approve: It is already reserved/);
+  assert.equal(db.prepare("SELECT status FROM reservations WHERE id = ?").get(p2.id).status, 'pending', 'it stays pending, for IT to decline');
+  assert.equal((await admin.post(`/api/reservations/${p1.id}/approve`, {})).status, 400, 'an approved one cannot be approved twice');
+  // a checkout that occupies the time stops approval too
   const loaned = await newAsset('Recheck loaned camera', { reservation_requires_approval: true });
   const p3 = await okReserve(second, loaned, plus(40), plus(41));
   const holder = await makeLogin('Recheck Holder');
-  await checkout(loaned, holder, { assignment_type: 'checkout', due_date: plus(41) }); // a PENDING reservation never blocks this
+  await checkout(loaned, holder, { assignment_type: 'checkout', due_date: plus(41) });
   const out = await admin.post(`/api/reservations/${p3.id}/approve`, {});
   assert.equal(out.status, 409);
-  assert.match(out.body.error, /checked out/i);
+  assert.match(out.body.error, /checked out until/i);
   // a start date that has already passed cannot be approved
   const old = db.prepare("INSERT INTO reservations (asset_id, employee_id, start_date, end_date, status, requires_approval) VALUES (?, ?, ?, ?, 'pending', 1)").run(a.id, second.id, plus(-2), plus(2)).lastInsertRowid;
   assert.equal((await admin.post(`/api/reservations/${old}/approve`, {})).status, 409);
@@ -356,32 +362,34 @@ test('what cannot be reserved: not-requestable, archived, repair/retired/lost/di
   assert.throws(() => rules.create(db, { assetId: off.id, employeeId: me.id, actorAccountId: null, start: plus(5), end: plus(6) }), /not found/i);
 });
 
-test('a permanent assignment blocks every day; a temporary checkout blocks through its due date (inclusive) but the days AFTER it may be reserved; overdue blocks everything', async () => {
-  const me = await makeLogin('Occupied Reserver'); const holder = await makeLogin('Occupied Holder');
-  const perm = await newAsset('Occ permanent');
-  await checkout(perm, holder, { assignment_type: 'permanent' });
-  const r1 = await reserve(me, perm, plus(5), plus(6));
-  assert.equal(r1.status, 409, 'a permanently held asset is occupied on every day (it is also left out of every broad calendar)');
-  assert.match(r1.body.error, /checked out/i);
+test('a permanent assignment, a temporary checkout through its due date (inclusive) and an overdue one make their time unavailable (waitlist time); the days AFTER a due date are only "expected back", so they can be reserved', async () => {
+  const holder = await makeLogin('Occupied Holder');
   const rules = require('../src/reservations');
-  assert.throws(() => rules.create(db, { assetId: perm.id, employeeId: me.id, actorAccountId: null, start: plus(5), end: plus(6) }), /checked out/i);
+  let k = 0; const people = []; for (let i = 0; i < 6; i++) people.push(await makeLogin(`Occupied Reserver ${i}`));
+  const create = (asset, s, e) => rules.create(db, { assetId: asset.id, employeeId: people[k++].id, actorAccountId: null, start: s, end: e });
+  const perm = await newAsset('Occ permanent');
+  await checkout(perm, holder, { assignment_type: 'checkout', due_date: plus(1) });
+  db.prepare("UPDATE assignments SET assignment_type = 'permanent', due_date = NULL, due_time = NULL WHERE asset_id = ?").run(perm.id);
+  const r1 = await reserve(people[5], perm, plus(5), plus(6));
+  assert.equal(r1.status, 409, 'a permanently held asset has no free time: nothing can be reserved, only waitlisted');
+  assert.match(r1.body.error, /waitlist/i);
 
   const loan = await newAsset('Occ loan');
   await checkout(loan, holder, { assignment_type: 'checkout', due_date: plus(5) });
-  const row = db.prepare("SELECT * FROM assets WHERE id = ?").get(loan.id);
-  const create = (s, e) => { try { return rules.create(db, { assetId: loan.id, employeeId: me.id, actorAccountId: null, start: s, end: e }); } catch (e2) { return e2; } };
-  void row;
-  assert.equal(create(plus(2), plus(3)).status, 409, 'while it is out');
-  assert.equal(create(plus(5), plus(7)).status, 409, 'the due date itself is still out');
-  const after = create(plus(6), plus(8));
-  assert.equal(after.status, 'confirmed', 'the day after the due date is only "expected back", so it can be reserved');
-  assert.equal(await stateOn(me, loan, plus(6)), 'reserved', 'and the calendar says reserved there, not expected');
-  assert.equal(await stateOn(admin, loan, plus(5)), 'occupied', 'but a physical checkout still wins on its own days');
+  assert.throws(() => create(loan, plus(2), plus(3)), (e) => e.status === 409, 'while it is out: nothing free');
+  const through = create(loan, plus(5), plus(7)); // the due date itself is still out: that day is waitlisted, the rest reserved
+  assert.deepEqual(through.reserved.map((r) => [r.start_date, r.end_date]), [[plus(6), plus(7)]]);
+  assert.deepEqual(through.waitlisted.map((w) => [w.start_date, w.end_date]), [[plus(5), plus(5)]]);
+  const after = create(loan, plus(9), plus(10));
+  assert.equal(after.reserved[0].status, 'confirmed');
+  assert.equal(after.waitlisted.length, 0, 'the day after the due date is only "expected back": nothing is waitlisted');
+  assert.equal(await stateOn(people[0], loan, plus(9)), 'reserved', 'and the calendar says reserved there, not expected');
+  assert.equal(await stateOn(admin, loan, plus(5)), 'occupied', 'a physical checkout still wins on its own days');
 
   const late = await newAsset('Occ overdue');
   await checkout(late, holder, { assignment_type: 'checkout', due_date: plus(3) });
   db.prepare('UPDATE assignments SET due_date = ? WHERE asset_id = ?').run(plus(-2), late.id);
-  assert.throws(() => rules.create(db, { assetId: late.id, employeeId: me.id, actorAccountId: null, start: plus(10), end: plus(11) }), /checked out/i);
+  assert.throws(() => create(late, plus(10), plus(11)), (e) => e.status === 409, 'overdue: still out, return date unknown, so nothing is free');
 });
 
 test('Reserve does NOT depend on the self-checkout permission (that governs "Check out now" only); the asset\'s own eligibility still does', async () => {
@@ -419,7 +427,7 @@ test('Reserve does NOT depend on the self-checkout permission (that governs "Che
   // the rule is in the module too, not only the routes
   const rules = require('../src/reservations');
   const other = await makeLogin('Module Caller', { selfCheckout: false });
-  assert.equal(rules.create(db, { assetId: auto.id, employeeId: other.id, actorAccountId: null, start: plus(20), end: plus(21) }).status, 'confirmed');
+  assert.equal(rules.create(db, { assetId: auto.id, employeeId: other.id, actorAccountId: null, start: plus(20), end: plus(21) }).reserved[0].status, 'confirmed');
 });
 
 // ---------------------------------------------------------------- managing reservations
@@ -477,7 +485,7 @@ test('an employee can shorten the END of their own confirmed reservation; never 
   assert.equal(await stateOn(other, a, plus(13)), 'available', 'the removed days are free at once');
   await okReserve(other, a, plus(13), plus(14));
   // not extend, not same, not before the start, not invalid
-  for (const [end, re] of [[plus(13), /only shorten/i], [plus(12), /already the end/i], [plus(9), /can't be before the start/i], ['nope', /valid end date/i], [undefined, /valid end date/i]]) {
+  for (const [end, re] of [[plus(13), /only shorten/i], [plus(12), /already the end/i], [plus(9), /can't be before the start/i], ['nope', /valid end date/i], [undefined, /already the end/i]]) {
     const x = await me.client.post(`/api/reservations/${r.id}/shorten`, { end_date: end });
     assert.equal(x.status, 400, String(end));
     assert.match(x.body.error, re);
@@ -600,13 +608,16 @@ test('every reservation write runs inside one IMMEDIATE transaction that re-read
   }
   const assign = fs.readFileSync(path.join(__dirname, '..', 'src', 'assignments.js'), 'utf8');
   assert.match(assign, /FROM reservations WHERE asset_id = \? AND status = 'confirmed'/, 'checkout checks reservations inside its own immediate transaction');
-  // sequential proof of the invariant: two confirmed reservations can never overlap through the API
+  // two simultaneous overlapping requests are serialized: the second always sees the first, so exactly one of them gets the contested days (the other
+  // is cut: its free days reserved, the contested days waitlisted), whichever got there first
   return (async () => {
     const a = await newAsset('Race camera');
     const x = await makeLogin('Race X'); const y = await makeLogin('Race Y');
-    const results = await Promise.all([reserve(x, a, plus(100), plus(103)), reserve(y, a, plus(102), plus(105))]);
-    assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
-    assert.equal(db.prepare("SELECT COUNT(*) c FROM reservations WHERE asset_id = ? AND status = 'confirmed'").get(a.id).c, 1);
+    const results = await Promise.all([x.client.post(`/api/assets/${a.id}/reservations`, { start_date: plus(100), end_date: plus(103) }), y.client.post(`/api/assets/${a.id}/reservations`, { start_date: plus(102), end_date: plus(105) })]);
+    assert.deepEqual(results.map((r) => r.status), [200, 200]);
+    assert.deepEqual(results.map((r) => r.body.waitlisted.length).sort(), [0, 1], 'exactly one request had to wait for the contested days');
+    const confirmed = db.prepare("SELECT start_date, end_date FROM reservations WHERE asset_id = ? AND status = 'confirmed' ORDER BY start_date").all(a.id);
+    for (let i = 1; i < confirmed.length; i++) assert.ok(confirmed[i - 1].end_date < confirmed[i].start_date, 'no two confirmed reservations ever share a day');
   })();
 });
 
@@ -620,7 +631,8 @@ test('front end: Reserve and the reservation tools exist only where they belong'
   assert.match(view, /A\[0\]\.reserve && A\[0\]\.reserve\.allowed/);
   // the reservation POST now lives in the ONE shared date sheet (rangeSheet); the calendar reaches it only through its canReserve-gated handlers
   assert.match(src.slice(src.indexOf('function rangeSheet('), src.indexOf('function wireWaitlistActions(')), /\/reservations`/);
-  assert.match(view, /canReserve && st\.day >= data\.today && A\[0\]\.days\[i\] === 'reserved'/);
+  assert.match(view, /!isSummary\(\) && st\.day >= data\.today && \['reserved', 'partial'\]\.includes\(A\[0\]\.days\[i\]\)/);
+  assert.match(view, /if \(!canReserve\) \{ keepUrl\(\); paint\(\); daySheet\(st\.day\); return; \}/, 'reserving stays canReserve-gated: others get the read-only detail');
   assert.match(view, /const canReserve = !isSummary\(\) && !!\(A\[0\] && A\[0\]\.reserve && A\[0\]\.reserve\.allowed\)/);
   assert.doesNotMatch(view, /toast\([^)]*is reserved/, 'tapping a reserved day opens the sheet; there is no warning toast');
 });
@@ -677,7 +689,11 @@ test('an employee can reserve FUTURE days of an item someone else has out right 
   assert.equal((await cal(me.client, `?asset=${camera.id}`)).status, 200);
   assert.equal((await cal(me.client, `?asset=${camera.id}`)).body.assets[0].reserve.allowed, true);
   const during = await reserve(me, camera, plus(3), plus(7));
-  assert.equal(during.status, 409, 'not on days it is out');
+  assert.equal(during.status, 200, 'days it is out can be asked for too: the days after the return are reserved, the days it is out are waitlisted');
+  assert.deepEqual(during.body.group.reserved.map((r) => [r.start_date, r.end_date]), [[plus(6), plus(7)]]);
+  assert.deepEqual(during.body.group.waitlisted.map((w) => [w.start_date, w.end_date]), [[plus(3), plus(5)]]);
+  assert.equal((await me.client.post(`/api/reservations/${during.body.id}/cancel`, {})).status, 200);
+  assert.equal((await me.client.post(`/api/waitlist/${during.body.group.waitlisted[0].id}/cancel`, {})).status, 200);
   const after = await reserve(me, camera, plus(6), plus(8));
   assert.equal(after.status, 200, JSON.stringify(after.body));
   assert.equal(after.body.status, 'confirmed');
@@ -715,8 +731,13 @@ test('front end: a pending reservation offers IT only Approve (primary, no icon)
   const live = buttons(ctx.reservationItem({ ...row, phase: 'upcoming', status: 'confirmed', can_cancel: true, mine: false }, { admin: true }));
   assert.deepEqual(live.map((b) => b.label), ['Cancel reservation']);
   // the employee's own pending request can still be withdrawn; their confirmed one can be cancelled and shortened
-  assert.deepEqual(buttons(ctx.reservationItem({ ...row, phase: 'pending', status: 'pending', can_cancel: true, mine: true }, { admin: false })).map((b) => b.label), ['Cancel']);
-  assert.deepEqual(buttons(ctx.reservationItem({ ...row, phase: 'upcoming', status: 'confirmed', can_cancel: true, can_shorten: true, mine: true }, { admin: false })).map((b) => b.label), ['Cancel', 'Shorten']);
+  // the employee's card is a summary: one "Edit reservation" action (the way into Shorten / Cancel inside Reservation details), never a Cancel on the card itself
+  assert.deepEqual(buttons(ctx.reservationItem({ ...row, phase: 'pending', status: 'pending', can_cancel: true, mine: true }, { admin: false })).map((b) => [b.act, b.label]), [['data-resv-edit', 'Edit reservation']]);
+  const mineCard = ctx.reservationItem({ ...row, phase: 'upcoming', status: 'confirmed', can_cancel: true, can_shorten: true, mine: true }, { admin: false });
+  assert.deepEqual(buttons(mineCard).map((b) => [b.act, b.label]), [['data-resv-edit', 'Edit reservation']]);
+  assert.doesNotMatch(mineCard, /Cancel|Shorten|data-resv-cancel|data-resv-shorten/, 'no destructive action on the summary card');
+  assert.match(mineCard, /data-resv-detail="\d+" tabindex="0"/, 'the whole card opens Reservation details');
+  assert.equal(buttons(ctx.reservationItem({ ...row, phase: 'past', status: 'confirmed', can_cancel: false, can_shorten: false, mine: true }, { admin: false })).length, 0, 'a past reservation has nothing to edit (the card still opens its details)');
   // and the server enforces the same split (IT declines a pending reservation; it cannot cancel it)
   assert.match(fs.readFileSync(path.join(__dirname, '..', 'src', 'reservations.js'), 'utf8'), /if \(!LIVE\.includes\(r\.status\)\) throw httpError\(400, 'This reservation is already closed\.'\)/);
 });

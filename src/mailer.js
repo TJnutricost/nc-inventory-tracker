@@ -1,6 +1,7 @@
 const nodemailer = require('nodemailer');
 const addressparser = require('nodemailer/lib/addressparser');
 const { db, getSettings } = require('./db');
+const T = require('./timeRange');
 
 const APP_URL = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
 // The authenticated / provider-verified sender. Credentials (SMTP_USER / SMTP_PASS / MAIL_FROM) live ONLY in the environment, never in the
@@ -112,13 +113,11 @@ function adminEmails() {
   return db.prepare("SELECT login_email FROM accounts WHERE role='admin' AND active=1").all().map((r) => r.login_email);
 }
 
-const rangeText = (s, e) => (s === e ? fmtDate(s) : `${fmtDate(s)} to ${fmtDate(e)}`);
+// A reservation / waitlist range in words, with its pickup / return times when it has them ("Oct 12, 2026 · 8:00 AM – 1:00 PM", "Oct 12, 2026 to Oct 14, 2026 ·
+// Return by 1:00 PM"). A date-only single day reads "· All day". The times are wall-clock (APP_TIMEZONE) as entered: never converted, so no zone can shift them.
+const rangeText = (row) => T.when(row, { allDay: true });
 // A stored UTC timestamp ('YYYY-MM-DD HH:MM:SS') for a person: in APP_TIMEZONE if set (an IANA name such as America/Denver), else the server's zone.
-function fmtDateTime(ts) {
-  const d = new Date(String(ts).replace(' ', 'T') + 'Z');
-  const opts = { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short' };
-  try { return d.toLocaleString('en-US', { ...opts, timeZone: process.env.APP_TIMEZONE || undefined }); } catch { return d.toLocaleString('en-US', { ...opts, timeZone: 'UTC' }); }
-}
+const fmtDateTime = T.fmtStamp;
 const fmtDate = (d) => (d ? new Date(d + (d.length === 10 ? 'T12:00:00' : 'Z')).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : '');
 
 // Fire-and-forget wrappers so a mail problem never breaks a request
@@ -185,21 +184,41 @@ const notify = {
         { url: `${APP_URL}/#/home`, label: 'Open IT Assets' })));
   },
   // Waitlist (slice 8). Targeted notices only: the current reserver is told, informationally, that another team is waiting; the next person in
-  // line is told the item is theirs to confirm for 24 hours. Neither email asks anyone to give anything up.
+  // line is told the item is theirs to confirm until a stated time. Neither email asks anyone to give anything up.
   waitlistJoined(blocker, waiter, asset, entry, resv, { updated = false } = {}) {
     fire(send(blocker.email, `Another team is waiting for ${asset.name} (${asset.tag})`,
       layout('Another team is waiting for this equipment', `<p>Hi ${esc(blocker.name)}, just so you know: <strong>${esc(waiter.name)}</strong>${waiter.department ? ` (${esc(waiter.department)})` : ''} ${updated ? 'changed their waitlist request, and it now overlaps the item you have reserved.' : 'joined the waitlist for the item you have reserved.'}</p>${assetLine(asset)}
-        <p><strong>Your reservation:</strong> ${esc(rangeText(resv.start_date, resv.end_date))}<br><strong>They are waiting for:</strong> ${esc(rangeText(entry.start_date, entry.end_date))}</p>
+        <p><strong>Your reservation:</strong> ${esc(rangeText(resv))}<br><strong>They are waiting for:</strong> ${esc(rangeText(entry))}</p>
         <p><strong>No action is needed.</strong> Your reservation is unchanged. If you would like to coordinate with them, you can reach out to ${esc(waiter.name)}${waiter.email ? ` at ${esc(waiter.email)}` : ''}; otherwise, carry on as planned.</p>`,
         { url: `${APP_URL}/#/requests?tab=reservations`, label: 'View my reservations' })));
   },
   waitlistHold(user, asset, entry) {
     const needsApproval = !!asset.reservation_requires_approval;
-    fire(send(user.email, `Available for you: ${asset.name} (${asset.tag}) — please confirm within 24 hours`,
+    const until = fmtDateTime(entry.hold_expires_at);
+    fire(send(user.email, `Available for you until ${until}: ${asset.name} (${asset.tag})`,
       layout('The equipment you were waiting for is available', `<p>Hi ${esc(user.name)}, good news: the item you were waiting for is free for your dates, and we are holding it for you.</p>${assetLine(asset)}
-        <p><strong>Your dates:</strong> ${esc(rangeText(entry.start_date, entry.end_date))}<br><strong>Held for you until:</strong> ${esc(fmtDateTime(entry.hold_expires_at))}</p>
-        <p><strong>Do you still need it?</strong> Open the app and choose <strong>Confirm</strong> to ${needsApproval ? 'send your reservation to IT for approval' : 'reserve it'}, or <strong>Decline</strong> if you no longer need it. If you don't answer by then, the hold is released and the next person in line is offered the item.</p>`,
+        <p><strong>Your dates:</strong> ${esc(rangeText(entry))}<br><strong>Available for you until:</strong> ${esc(until)}</p>
+        <p><strong>Do you still need it?</strong> Open the app and choose <strong>Confirm</strong> before ${esc(until)} to ${needsApproval ? 'send your reservation to IT for approval' : 'reserve it'}, or <strong>Decline</strong> if you no longer need it. If you don't answer by then, the offer is released and the next person in line is offered the item. (The sooner the time starts, the shorter the window to answer.)</p>`,
         { url: `${APP_URL}/#/requests?tab=reservations`, label: 'Confirm or decline' })));
+  },
+  // Submission confirmation to the person who asked (slice 8.1). One request can become reserved time, waitlisted time, or both (unavailable time is
+  // waitlist time): `requested` is what they asked for, `reserved` the reservation rows made (confirmed, or pending IT approval per their status) and
+  // `waitlisted` the waitlist rows made. Each is a row with start_date / start_time / end_date / end_time.
+  requestRecorded(user, asset, { requested, reserved = [], waitlisted = [] }) {
+    const pending = reserved.length > 0 && reserved[0].status === 'pending';
+    const [subject, title, lead] = !waitlisted.length
+      ? (pending
+        ? [`Reservation request received: ${asset.name} (${asset.tag})`, 'Your reservation request was received', 'your reservation request was sent to IT for approval. It does not hold the time until IT approves it.']
+        : [`Reservation recorded: ${asset.name} (${asset.tag})`, 'Your reservation is recorded', 'your reservation is confirmed.'])
+      : !reserved.length
+        ? [`You're on the waitlist: ${asset.name} (${asset.tag})`, 'You are on the waitlist', "that time is already scheduled, so you're on the waitlist. If it opens up, you will be offered it (first come, first served) and given a limited time to confirm: up to 24 hours, less if it starts soon."]
+        : [`Part of your reservation is confirmed: ${asset.name} (${asset.tag})`, 'Part reserved, part waitlisted', `part of the time you asked for was available and part was not. ${pending ? 'The available time was sent to IT for approval (it does not hold the time until IT approves it), and the' : 'The available time is reserved, and the'} unavailable time is on the waitlist.`];
+    const lines = (rows) => rows.map((r) => esc(rangeText(r))).join('<br>');
+    fire(send(user.email, subject,
+      layout(title, `<p>Hi ${esc(user.name)}, ${lead}</p>${assetLine(asset)}
+        <p><strong>Requested:</strong> ${esc(rangeText(requested))}${reserved.length ? `<br><strong>${pending ? 'Sent to IT for approval' : 'Reserved'}:</strong> ${lines(reserved)}` : ''}${waitlisted.length ? `<br><strong>Waitlisted:</strong> ${lines(waitlisted)}` : ''}</p>
+        ${waitlisted.length ? `<p style="background:#fef3c7;border-radius:8px;padding:10px 12px">Availability for the waitlisted portion is not guaranteed. We'll notify you if it becomes available.</p>` : ''}`,
+        { url: `${APP_URL}/#/requests?tab=reservations`, label: 'View my reservations' })));
   },
   test(to) {
     return send(to, 'Nutricost IT Assets — test email', layout('Email is working', '<p>If you can read this, email notifications are configured correctly.</p>'));

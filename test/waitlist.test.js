@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation } = require('./helpers');
 
 let server, db, admin, waitlist, mailer;
 before(async () => {
@@ -34,7 +34,7 @@ async function makeLogin(name) {
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   return { client, id: created.body.id, name, email };
 }
-const reserve = (who, asset, start, end) => who.client.post(`/api/assets/${asset.id}/reservations`, { start_date: start, end_date: end });
+const reserve = async (who, asset, start, end) => asReservation(await who.client.post(`/api/assets/${asset.id}/reservations`, { start_date: start, end_date: end }));
 async function okReserve(who, asset, start, end) { const r = await reserve(who, asset, start, end); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; }
 const joinWl = (who, asset, start, end) => who.client.post(`/api/assets/${asset.id}/waitlist`, { start_date: start, end_date: end });
 async function okJoin(who, asset, start, end) { const r = await joinWl(who, asset, start, end); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; }
@@ -60,7 +60,7 @@ async function stage({ approval = false } = {}) {
 }
 
 // ---------------------------------------------------------------- joining
-test('joining: allowed only when a confirmed reservation blocks the dates, with clear refusals otherwise', async () => {
+test('joining: allowed only when ALL of the requested time is unavailable, with clear refusals otherwise', async () => {
   const { asset, owner, w1 } = await stage();
   const e = await okJoin(w1, asset, plus(10), plus(12));
   assert.equal(e.phase, 'waiting');
@@ -68,9 +68,12 @@ test('joining: allowed only when a confirmed reservation blocks the dates, with 
   assert.equal(e.position, 1);
   assert.equal(e.asset_name, asset.name);
   assert.deepEqual([e.start_date, e.end_date], [plus(10), plus(12)]);
-  // a partial overlap also counts as "unavailable"
+  // part of the time free: that is a reservation (the free time is reserved, the rest waitlisted), not a join
   const w3 = await makeLogin('Part Overlap');
-  assert.equal((await joinWl(w3, asset, plus(12), plus(15))).status, 200);
+  const mixed = await joinWl(w3, asset, plus(12), plus(15));
+  assert.equal(mixed.status, 409);
+  assert.match(mixed.body.error, /part of that time is available/i);
+  assert.equal((await joinWl(w3, asset, plus(12), plus(12))).status, 200, 'the one taken day is a pure waitlist request');
   // free dates -> reserve instead
   const free = await joinWl(w1, asset, plus(20), plus(21));
   assert.equal(free.status, 409);
@@ -83,12 +86,11 @@ test('joining: allowed only when a confirmed reservation blocks the dates, with 
   assert.equal((await joinWl(w1, asset, plus(-3), plus(-1))).status, 400);
   assert.equal((await joinWl(w1, asset, 'soon', plus(12))).status, 400);
   assert.equal((await joinWl(w1, asset, plus(12), plus(10))).status, 400);
-  // an item that is only checked out (nobody reserved it) has no waitlist
+  // an item that is checked out is unavailable too: its time is waitlist time even though nobody reserved it
   const out = await newAsset('Checked out only');
   const holder = await makeLogin('Holder');
   assert.equal((await admin.post(`/api/assets/${out.id}/checkout`, { employee_id: holder.id })).status, 200);
-  const none = await joinWl(w1, out, plus(1), plus(3));
-  assert.equal(none.status, 409);
+  assert.equal((await joinWl(w1, out, plus(1), plus(3))).status, 200);
   // an item that is not in the shared pool does not exist for employees
   const hidden = await newAsset('Not shared', { available_to_request: false });
   assert.equal((await joinWl(w1, hidden, plus(1), plus(2))).status, 404);
@@ -121,7 +123,7 @@ test('the current reserver is untouched by someone joining, and there is no way 
 });
 
 // ---------------------------------------------------------------- holds
-test('when the dates free up the next person is offered a 24-hour hold; nothing is reserved automatically', async () => {
+test('when the dates free up the next person is offered a hold (24 hours for something days away); nothing is reserved automatically', async () => {
   const { asset, owner, w1, w2, resv } = await stage();
   const e1 = await okJoin(w1, asset, plus(10), plus(12));
   const e2 = await okJoin(w2, asset, plus(10), plus(12));
@@ -137,24 +139,27 @@ test('when the dates free up the next person is offered a 24-hour hold; nothing 
   assert.equal(db.prepare("SELECT COUNT(*) c FROM reservations WHERE asset_id = ? AND status IN ('pending','confirmed')").get(asset.id).c, 0, 'no reservation was created');
 });
 
-test('an active hold blocks everyone else (and the held person\'s own plain reserve points at Confirm); the calendar shows the days as taken', async () => {
+test('an active hold makes its exact time unavailable: others are cut around it (free time reserved, held time waitlisted), the held person\'s own plain reserve points at Confirm; the calendar shows the days as held', async () => {
   const { asset, owner, w1, w2, resv } = await stage();
   const e1 = await okJoin(w1, asset, plus(10), plus(12));
   await owner.client.post(`/api/reservations/${resv.id}/cancel`, {});
   const outsider = await makeLogin('Out Sider');
-  const blocked = await reserve(outsider, asset, plus(11), plus(11));
-  assert.equal(blocked.status, 409);
-  assert.match(blocked.body.error, /hold/i);
-  assert.equal((await reserve(w2, asset, plus(12), plus(14))).status, 409, 'partial overlap is blocked too');
+  const refused = await reserve(outsider, asset, plus(11), plus(11));
+  assert.equal(refused.status, 409, 'a hold is the next person\'s priority: that time is unavailable, so it can only be waitlisted');
+  assert.match(refused.body.error, /priority hold/i);
+  const partial = await reserve(w2, asset, plus(12), plus(14));
+  assert.equal(partial.status, 200, 'the part outside the hold is reserved');
+  assert.deepEqual(partial.body.group.reserved.map((r) => [r.start_date, r.end_date]), [[plus(13), plus(14)]]);
+  assert.deepEqual(partial.body.group.waitlisted.map((x) => [x.start_date, x.end_date]), [[plus(12), plus(12)]], 'and the held day waits');
   const own = await reserve(w1, asset, plus(10), plus(12));
   assert.equal(own.status, 409);
   assert.match(own.body.error, /confirm/i);
-  assert.equal((await reserve(outsider, asset, plus(13), plus(14))).status, 200, 'dates outside the hold are still free');
+  assert.equal((await reserve(outsider, asset, plus(15), plus(16))).status, 200, 'dates outside the hold are simply reserved');
   // the calendar: held days are taken for everyone; only the held person gets their entry id and deadline, and nobody else learns who holds
   const m = plus(10).slice(0, 7);
   const asOutsider = (await outsider.client.get(`/api/availability?asset=${asset.id}&month=${m}`)).body.assets[0];
   assert.equal(asOutsider.days[Number(plus(11).slice(8)) - 1], 'reserved');
-  assert.deepEqual(asOutsider.holds.map((x) => ({ ...x })), [{ start: plus(10), end: plus(12), mine: false }]);
+  assert.deepEqual(asOutsider.holds.map((x) => ({ ...x })), [{ start: plus(10), start_time: null, end: plus(12), end_time: null, mine: false }]);
   assert.deepEqual(asOutsider.waitlist, []);
   const asHolder = (await w1.client.get(`/api/availability?asset=${asset.id}&month=${m}`)).body.assets[0];
   assert.equal(asHolder.holds[0].mine, true);
@@ -163,7 +168,7 @@ test('an active hold blocks everyone else (and the held person\'s own plain rese
   assert.equal(asHolder.waitlist.length, 1);
   const asAdmin = (await admin.get(`/api/availability?asset=${asset.id}&month=${m}`)).body.assets[0];
   assert.equal(asAdmin.holds[0].holder.name, 'Wade One');
-  assert.equal(asAdmin.waitlist.length, 1);
+  assert.equal(asAdmin.waitlist.length, 2, 'the holder and the person waitlisted behind the held day');
   assert.equal(asAdmin.reserve.allowed, false, 'IT does not reserve from the calendar');
 });
 
@@ -258,14 +263,14 @@ test('the sweep alone moves the queue past an expired hold', async () => {
   assert.equal(await phaseOf(w2, e2.id), 'held');
 });
 
-test('an older entry whose whole range is still blocked does not hold up a younger one whose range is free', async () => {
+test('an older entry that is still wholly blocked does not hold up a younger one whose range is free', async () => {
   const asset = await newAsset(`Projector ${++seq}`);
   const o1 = await makeLogin('Owner One'); const o2 = await makeLogin('Owner Two');
   const old = await makeLogin('Older Waiter'); const young = await makeLogin('Younger Waiter');
   const r1 = await okReserve(o1, asset, plus(10), plus(12));
   await okReserve(o2, asset, plus(13), plus(14));
-  const eOld = await okJoin(old, asset, plus(10), plus(14)); // blocked by both
-  const eYoung = await okJoin(young, asset, plus(10), plus(12)); // blocked only by owner one
+  const eOld = await okJoin(old, asset, plus(13), plus(14)); // blocked by owner two
+  const eYoung = await okJoin(young, asset, plus(10), plus(12)); // blocked by owner one
   await o1.client.post(`/api/reservations/${r1.id}/cancel`, {});
   assert.equal(await phaseOf(old, eOld.id), 'waiting', 'still blocked by owner two');
   assert.equal(await phaseOf(young, eYoung.id), 'held');
@@ -277,7 +282,7 @@ test('overlapping entries are served in FIFO order, and entries for different da
   const a = await makeLogin('First A'); const b = await makeLogin('Second B'); const c = await makeLogin('Third C');
   const big = await okReserve(o, asset, plus(10), plus(20));
   const eA = await okJoin(a, asset, plus(10), plus(12));
-  const eB = await okJoin(b, asset, plus(11), plus(13)); // overlaps A, younger
+  const eB = await okJoin(b, asset, plus(11), plus(12)); // inside A's range, younger
   const eC = await okJoin(c, asset, plus(16), plus(18)); // independent
   await o.client.post(`/api/reservations/${big.id}/cancel`, {});
   assert.equal(await phaseOf(a, eA.id), 'held');
@@ -376,7 +381,7 @@ test('IT sees the whole line with names, hold deadlines and FIFO position; can r
 // ---------------------------------------------------------------- emails
 test('joining emails the current reserver once, informationally, with no release request; hold emails go to the held person only', async () => {
   const { asset, owner, w1, resv } = await stage();
-  const second = await okReserve(owner, asset, plus(14), plus(15)); // a second reservation by the same person must not double the email
+  const second = await okReserve(owner, asset, plus(13), plus(15)); // a second, adjacent reservation by the same person must not double the email
   const before = mailsTo(owner, 'Another team%').length;
   const e1 = await okJoin(w1, asset, plus(10), plus(15));
   const mails = mailsTo(owner, 'Another team%');
@@ -390,11 +395,10 @@ test('joining emails the current reserver once, informationally, with no release
   assert.equal(mailsTo(w1, 'Available for you%').length, 0);
   // the hold email
   await owner.client.post(`/api/reservations/${resv.id}/cancel`, {});
-  assert.equal(await phaseOf(w1, e1.id), 'waiting', 'the whole range is needed, and the second reservation still blocks part of it');
-  assert.equal(mailsTo(w1, 'Available for you%').length, 0);
-  await owner.client.post(`/api/reservations/${second.id}/cancel`, {});
-  assert.equal(await phaseOf(w1, e1.id), 'held');
+  assert.equal(await phaseOf(w1, e1.id), 'held', 'the freed part (the first reservation\'s days) is offered; the second reservation still blocks the rest');
   assert.equal(mailsTo(w1, 'Available for you%').length, 1);
+  await owner.client.post(`/api/reservations/${second.id}/cancel`, {});
+  assert.equal(mailsTo(w1, 'Available for you%').length, 2, 'and the rest is offered when it frees (one email per held piece)');
   assert.equal(mailsTo(owner, 'Available for you%').length, 0, 'the former reserver gets no hold email');
 });
 
@@ -410,10 +414,11 @@ test('the hold email carries asset, tag, dates, expiry and the confirm instructi
   assert.match(mails[0].subject, new RegExp(asset.tag));
   assert.match(b, new RegExp(asset.name));
   assert.match(b, new RegExp(`Tag ${asset.tag}`));
-  assert.match(b, /Held for you until/);
+  assert.match(b, /Available for you until/);
   assert.match(b, /Confirm/);
   assert.match(b, /Decline/);
-  assert.match(b, /24 hours|next person in line/);
+  assert.match(b, /next person in line/);
+  assert.doesNotMatch(b, /24 hours|24-hour/, 'the window is stated as a time, not a fixed 24 hours');
   assert.match(b, /#\/requests\?tab=reservations/);
   assert.equal(mails[0].status, 'logged'); // (no SMTP in tests)
   // a fresh hold (after an expiry) is a new event and does get its own email
@@ -601,18 +606,25 @@ test('range-check tells the date sheet what a range means (reserve / waitlist / 
   const before = count();
   const free = (await check(w1, asset, plus(20), plus(21))).body;
   assert.equal(free.outcome, 'reserve');
+  assert.deepEqual([free.reserved.length, free.waitlisted.length], [1, 0], 'nothing else scheduled: all of it is reserved');
   assert.equal(free.requires_approval, false);
+  assert.equal(free.overlap, undefined, 'there is no "warn and record anyway" any more');
   const taken = (await check(w1, asset, plus(10), plus(10))).body;
-  assert.equal(taken.outcome, 'waitlist', 'tapping a reserved day: the range is a waitlist question');
+  assert.equal(taken.outcome, 'waitlist', 'tapping a reserved day: all of it is unavailable, so it is a waitlist question');
+  assert.deepEqual([taken.reserved.length, taken.waitlisted.length], [0, 1]);
   assert.match(taken.message, /already reserved/i);
-  assert.equal((await check(w1, asset, plus(9), plus(13))).body.outcome, 'waitlist', 'a range that merely touches a reservation is a conflict too');
+  const cut = (await check(w1, asset, plus(9), plus(13))).body;
+  assert.equal(cut.outcome, 'partial', 'a range that only partly overlaps is cut around the reservation');
+  assert.deepEqual(cut.reserved.map((r) => [r.start_date, r.end_date]), [[plus(9), plus(9)], [plus(13), plus(13)]]);
+  assert.deepEqual(cut.waitlisted.map((r) => [r.start_date, r.end_date]), [[plus(10), plus(12)]]);
   assert.equal((await check(w1, asset, plus(12), plus(10))).body.outcome, 'invalid');
   assert.equal((await check(w1, asset, plus(-2), plus(1))).body.outcome, 'invalid');
   assert.equal((await check(w1, asset, 'x', 'y')).body.outcome, 'invalid');
   assert.equal((await check(owner, asset, plus(11), plus(11))).body.outcome, 'own_reservation');
   const out = await newAsset('Only checked out');
   assert.equal((await admin.post(`/api/assets/${out.id}/checkout`, { employee_id: (await makeLogin('Borrower')).id })).status, 200);
-  assert.equal((await check(w1, out, plus(1), plus(2))).body.outcome, 'blocked');
+  const onlyOut = (await check(w1, out, plus(1), plus(2))).body;
+  assert.equal(onlyOut.outcome, 'waitlist', 'nobody has reserved it, but it is checked out: unavailable time is waitlist time');
   const hidden = await newAsset('Not shared', { available_to_request: false });
   assert.equal((await check(w1, hidden, plus(1), plus(2))).status, 404);
   const appr = await newAsset('Needs approval', { reservation_requires_approval: true });
@@ -622,18 +634,21 @@ test('range-check tells the date sheet what a range means (reserve / waitlist / 
   assert.deepEqual(count(), { r: before.r, w: before.w + 1 }, 'only the one real join was written');
 });
 
-test('tapping a reserved date can never create a reservation: a conflicting range is refused with 409 and only the waitlist call changes anything', async () => {
+test('tapping a reserved date: reserved time is never double-booked; a range that only partly overlaps is cut; joining the waitlist is the only call that creates no reservation', async () => {
   const { asset, w1 } = await stage();
   const n = () => db.prepare("SELECT COUNT(*) c FROM reservations WHERE asset_id = ?").get(asset.id).c;
   const before = n();
-  for (const [s0, e0] of [[plus(10), plus(10)], [plus(11), plus(13)], [plus(9), plus(10)]]) {
-    const r = await reserve(w1, asset, s0, e0);
-    assert.equal(r.status, 409, `${s0}..${e0}`);
-  }
-  assert.equal(n(), before);
+  const rival = await makeLogin('Tap Rival 1');
+  assert.equal((await reserve(rival, asset, plus(10), plus(10))).status, 409, 'wholly reserved: refused (join the waitlist instead)');
+  const r2 = await reserve(await makeLogin('Tap Rival 2'), asset, plus(11), plus(13));
+  assert.deepEqual([r2.body.group.reserved.map((x) => x.start_date), r2.body.group.waitlisted.map((x) => x.start_date)], [[plus(13)], [plus(11)]]);
+  const r3 = await reserve(await makeLogin('Tap Rival 3'), asset, plus(9), plus(10));
+  assert.deepEqual([r3.body.group.reserved.map((x) => x.start_date), r3.body.group.waitlisted.map((x) => x.start_date)], [[plus(9)], [plus(10)]]);
+  assert.equal(n(), before + 2, 'only the free days were reserved');
+  const mid = n();
   const e = await okJoin(w1, asset, plus(10), plus(10));
   assert.equal(e.phase, 'waiting');
-  assert.equal(n(), before, 'joining the waitlist is not a reservation');
+  assert.equal(n(), mid, 'joining the waitlist is not a reservation');
 });
 
 test('Edit dates: the owner changes a waiting entry; the new range is validated on the server exactly like joining', async () => {
@@ -818,10 +833,9 @@ test('without MAIL_TEST_RECIPIENT nothing is redirected or prefixed; an invalid 
     sent.length = 0;
     await okJoin(w1, asset, plus(10), plus(12));
     await tick();
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].to, owner.email);
-    assert.doesNotMatch(sent[0].subject, /DEV/);
-    assert.doesNotMatch(sent[0].html, /DEV TEST MODE/);
+    assert.equal(sent.length, 2, 'the reserver is told, and the person who joined gets their own confirmation');
+    assert.equal(sent.filter((m) => m.to === owner.email).length, 1);
+    for (const m of sent) { assert.doesNotMatch(m.subject, /DEV/); assert.doesNotMatch(m.html, /DEV TEST MODE/); }
     assert.equal(db.prepare("SELECT delivered_to d FROM outbox WHERE to_addr = ? AND subject LIKE 'Another team%'").get(owner.email).d, null);
     // a typo must never leak test mail to real people
     process.env.MAIL_TEST_RECIPIENT = 'not an address';
@@ -876,7 +890,7 @@ test('a refused late confirm still sends the next person their hold email right 
 test('Edit dates emails only a current reserver the NEW range newly overlaps; those already told are not told again; a mail failure changes nothing', async () => {
   const { asset, owner, w1 } = await stage(); // owner holds +10..+12
   const second = await makeLogin('Second Owner');
-  await okReserve(second, asset, plus(20), plus(22));
+  await okReserve(second, asset, plus(13), plus(22)); // directly after the owner's, so the widened range below is wholly unavailable
   const e = await okJoin(w1, asset, plus(10), plus(12));
   assert.equal(mailsTo(owner, 'Another team%').length, 1, 'told when the entry was created');
   assert.equal(mailsTo(second, 'Another team%').length, 0, 'not overlapped yet');
@@ -898,7 +912,7 @@ test('Edit dates emails only a current reserver the NEW range newly overlaps; th
   const { notify } = mailer; const saved = notify.waitlistJoined;
   notify.waitlistJoined = () => { throw new Error('boom'); };
   try {
-    const third = await makeLogin('Third Owner'); await okReserve(third, asset, plus(30), plus(31));
+    const third = await makeLogin('Third Owner'); await okReserve(third, asset, plus(23), plus(31));
     assert.equal((await w1.client.put(`/api/waitlist/${e.id}`, { start_date: plus(11), end_date: plus(31) })).status, 200);
     assert.equal((await entryOf(w1, e.id)).end_date, plus(31));
   } finally { notify.waitlistJoined = saved; }

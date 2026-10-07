@@ -6,13 +6,16 @@
 //
 // Slice 7: a checkout may not bypass someone else's CONFIRMED reservation. A temporary checkout runs from today to its return date and a
 // permanent assignment has no end, so either is refused (409) when another employee holds a confirmed reservation inside that span. The
-// person who owns the reservation is not blocked by their own. A non-admin (self-checkout) may only take an asset IT made
+// person who owns the reservation is not blocked by their own. Slice 8.1: the span is time-aware (return date AND time vs the reservation's pickup
+// time), so returning at noon does not clash with a pickup at 1:00 PM the same day. This is a guard on physical possession, not a reservation
+// request, so it is still a refusal. A non-admin (self-checkout) may only take an asset IT made
 // `available_to_request`. IT can still assign any asset, after cancelling a conflicting reservation.
 //
 // Capacity: physical assets hold 1 (license_seats is NULL/≤1); multi-seat assets/licenses use license_seats. The
 // count check and the INSERT run inside one BEGIN IMMEDIATE transaction, so two writers (even in separate
 // processes) can't both pass the check. The partial unique index idx_assign_active_unique additionally stops the
 // same employee holding the same asset twice; it is deliberately NOT a per-asset unique, which would break seats.
+const T = require('./timeRange');
 const ASSIGNMENT_TYPES = ['permanent', 'checkout'];
 const TYPE_LABEL = { permanent: 'Permanent', checkout: 'Temporary checkout' };
 
@@ -61,12 +64,29 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
     if (asset.archived_at) throw httpError(400, 'This asset is archived and can\'t be checked out.');
     if (['retired', 'lost', 'maintenance', 'disposed'].includes(asset.status)) throw httpError(400, `This asset is marked ${asset.status} and can't be checked out.`);
     if (!actorIsAdmin && !asset.available_to_request) throw httpError(404, 'Asset not found'); // not in the employee-facing pool
-    const reserved = db.prepare(`SELECT start_date, end_date FROM reservations WHERE asset_id = ? AND status = 'confirmed' AND employee_id <> ?
-      AND end_date >= date('now') AND (? IS NULL OR start_date <= ?) ORDER BY start_date LIMIT 1`).get(assetId, employeeId, due, due);
+    // Slice 8.1: time-aware. A checkout is out from now until its return date AND time (a permanent one has no end); it clashes only with a confirmed
+    // reservation of someone else that starts before then. Returning at 12:00 on the day another team picks up at 1:00 PM is fine.
+    const today = db.prepare("SELECT date('now') d").get().d;
+    const out = { sk: `${today}T00:00`, ek: due ? T.endKey(due, time) : '9999-12-31T99:99' };
+    const reserved = db.prepare(`SELECT * FROM reservations WHERE asset_id = ? AND status = 'confirmed' AND employee_id <> ?
+      AND end_date >= ? AND (? IS NULL OR start_date <= ?) ORDER BY start_date, start_time, id`).all(assetId, employeeId, today, due, due).find((r) => T.overlaps(out, T.keysOf(r)));
     if (reserved) {
-      const range = reserved.start_date === reserved.end_date ? reserved.start_date : `${reserved.start_date} to ${reserved.end_date}`;
+      const range = reserved.start_time || reserved.end_time ? T.when(reserved) : reserved.start_date === reserved.end_date ? reserved.start_date : `${reserved.start_date} to ${reserved.end_date}`;
       throw httpError(409, `This item is reserved ${range}, so it can't be checked out through then.${actorIsAdmin ? ' Cancel the reservation first, or choose an earlier return date.' : ' Choose an earlier return date, or reserve it for later.'}`);
     }
+
+    // A waitlist HOLD is someone's priority for its exact interval (a merely waiting entry is only demand and never blocks). Another employee may not check the
+    // asset out across a held interval; the hold's own employee may, and that physical checkout is their acceptance of the offer, so it closes the hold below.
+    // Only the held interval counts: a checkout that is back before the hold starts is not blocked by it.
+    const holds = db.prepare(`SELECT * FROM waitlist_entries WHERE asset_id = ? AND status = 'held' AND hold_expires_at > datetime('now')
+      AND (? IS NULL OR start_date <= ?) AND end_date >= ? ORDER BY start_date, start_time, id`).all(assetId, due, due, today).filter((h) => T.overlaps(out, T.keysOf(h)));
+    const others = holds.find((h) => h.employee_id !== employeeId);
+    if (others) {
+      throw httpError(409, `This item is being held for another employee ${T.when(others)}, so it can't be checked out through then.${actorIsAdmin ? ' Choose a return before the hold starts, or wait for the offer to be answered.' : ' Choose an earlier return date, or reserve it for later.'}`);
+    }
+    const pendingHold = db.prepare(`SELECT * FROM reservations WHERE asset_id = ? AND status = 'pending' AND waitlist_entry_id IS NOT NULL AND employee_id <> ?
+      AND end_date >= ? AND (? IS NULL OR start_date <= ?)`).all(assetId, employeeId, today, due, due).find((r) => T.overlaps(out, T.keysOf(r)));
+    if (pendingHold) throw httpError(409, `This item is being held for another employee ${T.when(pendingHold)} (waiting for IT approval), so it can't be checked out through then.`);
 
     const open = db.prepare(`SELECT s.employee_id, e.name FROM assignments s JOIN employees e ON e.id = s.employee_id
       WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);
@@ -78,6 +98,13 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
 
     const info = db.prepare(`INSERT INTO assignments (asset_id, employee_id, assignment_type, checked_out_by, due_date, due_time, notes, condition_out)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(assetId, employeeId, assignmentType, actorAccountId, due, time, clean(notes), cond || asset.condition);
+    // The hold owner is physically taking the item: that accepts their availability offer, so resolve it now (no email confirmation needed afterwards).
+    for (const h of holds) {
+      if (db.prepare("UPDATE waitlist_entries SET status = 'fulfilled', closed_at = datetime('now'), closed_by = ?, updated_at = datetime('now') WHERE id = ? AND status = 'held'").run(actorAccountId ?? null, h.id).changes) {
+        db.prepare('INSERT INTO activity (asset_id, actor_id, subject_user_id, action, details) VALUES (?, ?, ?, ?, ?)')
+          .run(assetId, actorAccountId, employeeId, 'waitlist_checked_out', `${T.when(h)} · checked out in person, so the availability offer is accepted`);
+      }
+    }
     if (cond) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(cond, assetId);
     refreshStatus(db, assetId);
     db.prepare('INSERT INTO activity (asset_id, actor_id, subject_user_id, action, details) VALUES (?, ?, ?, ?, ?)')

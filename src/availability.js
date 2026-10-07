@@ -23,9 +23,13 @@
 //               and including its due date, or a checkout whose due date has PASSED (overdue: still out, return date unknown).
 //   expected    every seat is taken today but the temporary checkouts holding them are due back before that day. This is the
 //               conservative middle state: a due date is a promise, not a booking, so these days are never called "available".
-//   reserved    a CONFIRMED reservation covers the day (src/reservations.js) and nothing physically occupies the asset that day. It wins over
-//               available / expected; an occupying assignment (permanent, checked out through its due date, overdue) wins over it.
+//   reserved    a CONFIRMED reservation (or an active waitlist hold) covers ALL 24 hours of the day and nothing physically occupies the asset that day.
+//               It wins over available / expected; an occupying assignment (permanent, checked out through its due date, overdue) wins over it.
 //               Pending (waiting-for-approval) reservations never change a day. Reservations exist for single-seat assets only.
+//   partial     (slice 8.1) a confirmed reservation / hold covers only PART of the day (it has a pickup or return time that cuts the day), and nothing
+//               covers all of it: "Partially scheduled". Several partial entries (even overlapping ones) are all listed; together they may still not
+//               fill the day, and the day is never called available. (Whether a requested time really clashes is decided by the exact times in
+//               src/timeRange.js, not by this per-day label.)
 //   repair      status 'maintenance'. No end date is stored, so it is unavailable for every future day.
 //   ineligible  status retired / lost / disposed (or archived, shown as 'archived'): not lendable, for every future day.
 // Seats: a multi-seat asset (license_seats > 1) is available while ANY seat is free; the day is occupied only when all are taken.
@@ -36,6 +40,7 @@
 // is not `available_to_request`, so hidden equipment can't show up in their totals. Asset records stay
 // governed by the existing visibility contract (GET /api/assets/:id is unchanged). Admins additionally get each period's holder.
 const catalog = require('./catalog');
+const T = require('./timeRange');
 const { capacity } = require('./assignments');
 
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
@@ -79,10 +84,17 @@ function dayState(asset, openAssignments, date, today, reservations = []) {
   if (NOT_LENDABLE.includes(asset.status)) return 'ineligible';
   if (asset.status === 'maintenance') return 'repair';
   const seats = capacity(asset);
-  const reserved = reservations.some((r) => r.start_date <= date && date <= r.end_date); // confirmed ones only (the caller passes just those)
-  if (openAssignments.length < seats) return reserved ? 'reserved' : 'available'; // a seat nobody holds
+  // confirmed ones only (the caller passes just those): does one cover the whole day, or only part of it (a pickup / return time cuts it)?
+  let cover = null;
+  for (const r of reservations) {
+    const c = T.coverageOfDay(r, date);
+    if (c === 'full') { cover = 'full'; break; }
+    if (c) cover = 'partial';
+  }
+  const booked = cover === 'full' ? 'reserved' : cover === 'partial' ? 'partial' : null;
+  if (openAssignments.length < seats) return booked || 'available'; // a seat nobody holds
   const holding = openAssignments.filter((a) => a.assignment_type === 'permanent' || !a.due_date || a.due_date < today || a.due_date >= date).length;
-  return holding >= seats ? 'occupied' : reserved ? 'reserved' : 'expected';
+  return holding >= seats ? 'occupied' : booked || 'expected';
 }
 
 // Can this asset take reservations at all? { ok } or { ok: false, reason, hidden } (hidden = an employee must not even learn it exists).
@@ -139,7 +151,7 @@ function resolveScope(db, { isAdmin, employeeId, nodeId, assetId }) {
 function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve }) {
   const mine = !!employeeId && held.some((h) => h.employee_id === employeeId);
   const seatsTotal = capacity(a);
-  // What blocks a day: CONFIRMED reservations and ACTIVE waitlist holds (a hold keeps the dates for the person offered them for 24 hours).
+  // What blocks a day: CONFIRMED reservations and ACTIVE waitlist holds (a hold keeps the time for the person offered it until it expires).
   const holds = wl.filter((w) => w.status === 'held' && !w.lapsed);
   const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds];
   // The tag is shown only where the viewer could already open the asset (an admin always; an employee: available + shared, or theirs).
@@ -162,20 +174,20 @@ function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canR
     // one is shown to IT and to its owner only. `id` is given only where the viewer may act on it.
     reservations: resv.filter((r) => isAdmin || r.status === 'confirmed' || r.employee_id === employeeId).map((r) => {
       const own = !!employeeId && r.employee_id === employeeId;
-      const base = { start: r.start_date, end: r.end_date, status: r.status, mine: own };
+      const base = { start: r.start_date, start_time: r.start_time || null, end: r.end_date, end_time: r.end_time || null, status: r.status, mine: own };
       if (isAdmin) return { ...base, id: r.id, requires_approval: !!r.requires_approval, holder: { id: r.employee_id, name: r.holder_name, department: r.holder_department || null } };
       return own ? { ...base, id: r.id } : base;
     }),
     // Active holds: everyone sees that those dates are held (anonymously); the held employee also gets their entry id and the deadline, IT the person.
     holds: holds.map((w) => {
       const own = !!employeeId && w.employee_id === employeeId;
-      const base = { start: w.start_date, end: w.end_date, mine: own };
-      if (isAdmin) return { ...base, id: w.id, hold_expires_at: w.hold_expires_at, holder: { id: w.employee_id, name: w.holder_name, department: w.holder_department || null } };
-      return own ? { ...base, id: w.id, hold_expires_at: w.hold_expires_at } : base;
+      const base = { start: w.start_date, start_time: w.start_time || null, end: w.end_date, end_time: w.end_time || null, mine: own };
+      if (isAdmin) return { ...base, id: w.id, hold_expires_at: w.hold_expires_at, hold_expires_text: T.fmtStamp(w.hold_expires_at), holder: { id: w.employee_id, name: w.holder_name, department: w.holder_department || null } };
+      return own ? { ...base, id: w.id, hold_expires_at: w.hold_expires_at, hold_expires_text: T.fmtStamp(w.hold_expires_at) } : base;
     }),
     // The waitlist for this asset: IT sees everyone in line (FIFO), an employee only their own places.
     waitlist: wl.filter((w) => !w.lapsed && (isAdmin || w.employee_id === employeeId)).map((w) => {
-      const base = { id: w.id, start: w.start_date, end: w.end_date, phase: w.status, mine: !!employeeId && w.employee_id === employeeId, created_at: w.created_at, hold_expires_at: w.status === 'held' ? w.hold_expires_at : null };
+      const base = { id: w.id, start: w.start_date, start_time: w.start_time || null, end: w.end_date, end_time: w.end_time || null, phase: w.status, mine: !!employeeId && w.employee_id === employeeId, created_at: w.created_at, hold_expires_at: w.status === 'held' ? w.hold_expires_at : null };
       return isAdmin ? { ...base, holder: { id: w.employee_id, name: w.holder_name, department: w.holder_department || null } } : base;
     }),
     // Whether THIS viewer is offered "Reserve" (and, when the dates are taken, "Join waitlist") here (the server re-checks everything when they submit).
@@ -185,25 +197,27 @@ function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canR
 
 // Per-day counts for a broad scope.
 //  `reserved` = assets a CONFIRMED reservation holds that day (counts only; broad calendars never list reservations).
-//  Employees: available / expected / unavailable (every seat taken) / reserved / off. They never learn why something is unavailable, and never that
+//  `partial` = assets with a reservation / hold that covers only part of the day (never counted as available: something is scheduled).
+//  Employees: available / expected / unavailable (every seat taken) / reserved / partial / off. They never learn why something is unavailable, and never that
 //  anything is in repair: the only such asset they can see is one they hold, which simply counts as unavailable.
-//  Admins (schedulable pool only): available / expected / reserved / off (repair, retired, lost, disposed) count assets; checked_out counts the open
+//  Admins (schedulable pool only): available / expected / reserved / partial / off (repair, retired, lost, disposed) count assets; checked_out counts the open
 //  TEMPORARY assignments out on that day — exactly the assignments in `events`. There is no combined unavailable figure and no permanent figure.
 function summaryDays(assets, openBy, resvBy, { isAdmin, today, win, events }) {
   return win.days.map((d) => {
-    if (d < today) return isAdmin ? { available: 0, expected: 0, checked_out: 0, reserved: 0, off: 0 } : { available: 0, expected: 0, unavailable: 0, reserved: 0, off: 0 };
-    const c = { available: 0, expected: 0, unavailable: 0, reserved: 0, off: 0 };
+    if (d < today) return isAdmin ? { available: 0, expected: 0, checked_out: 0, reserved: 0, partial: 0, off: 0 } : { available: 0, expected: 0, unavailable: 0, reserved: 0, partial: 0, off: 0 };
+    const c = { available: 0, expected: 0, unavailable: 0, reserved: 0, partial: 0, off: 0 };
     for (const a of assets) {
       const s = dayState(a, openBy.get(a.id), d, today, resvBy.get(a.id));
       if (s === 'available') c.available++;
       else if (s === 'expected') c.expected++;
       else if (s === 'reserved') c.reserved++;
+      else if (s === 'partial') c.partial++;
       else if (s === 'occupied') c.unavailable++;
       else if (isAdmin) c.off++;
       else c.unavailable++;
     }
     if (!isAdmin) return c;
-    return { available: c.available, expected: c.expected, checked_out: events.filter((e) => eventOn(e, d)).length, reserved: c.reserved, off: c.off };
+    return { available: c.available, expected: c.expected, checked_out: events.filter((e) => eventOn(e, d)).length, reserved: c.reserved, partial: c.partial, off: c.off };
   });
 }
 
@@ -284,7 +298,8 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
 
 // What each asset is TODAY, for the employee Browse list (src/server.js GET /api/assets). Discoverability is not availability: a shared asset
 // that is checked out, reserved today or held for someone is still listed; this says which, so the row can read "Checked out · back Oct 12".
-//   state: 'available' | 'reserved' (a confirmed reservation or an active waitlist hold covers today) | 'checked_out' | 'unavailable'
+//   state: 'available' | 'reserved' (a confirmed reservation or an active waitlist hold covers all of today) | 'partial' (covers part of today:
+//          a pickup / return time) | 'checked_out' | 'unavailable'
 //   expected_back: the earliest return date among temporary checkouts, when there is one (never who has it)
 function todayStates(db, assets) {
   const out = new Map();
@@ -293,11 +308,11 @@ function todayStates(db, assets) {
   const ids = assets.map((a) => a.id); const marks = ids.map(() => '?').join(',');
   const open = new Map(ids.map((i) => [i, []])); const block = new Map(ids.map((i) => [i, []]));
   for (const r of db.prepare(`SELECT asset_id, assignment_type, due_date, checked_out_at FROM assignments WHERE returned_at IS NULL AND asset_id IN (${marks})`).all(...ids)) open.get(r.asset_id).push(r);
-  for (const r of db.prepare(`SELECT asset_id, start_date, end_date FROM reservations WHERE status = 'confirmed' AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
-  for (const r of db.prepare(`SELECT asset_id, start_date, end_date FROM waitlist_entries WHERE status = 'held' AND hold_expires_at > datetime('now') AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
+  for (const r of db.prepare(`SELECT asset_id, start_date, start_time, end_date, end_time FROM reservations WHERE status = 'confirmed' AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
+  for (const r of db.prepare(`SELECT asset_id, start_date, start_time, end_date, end_time FROM waitlist_entries WHERE status = 'held' AND hold_expires_at > datetime('now') AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
   for (const a of assets) {
     const s = dayState(a, open.get(a.id), today, today, block.get(a.id));
-    const state = s === 'available' ? 'available' : s === 'reserved' ? 'reserved' : s === 'occupied' ? 'checked_out' : 'unavailable';
+    const state = s === 'available' ? 'available' : s === 'reserved' ? 'reserved' : s === 'partial' ? 'partial' : s === 'occupied' ? 'checked_out' : 'unavailable';
     const dues = open.get(a.id).filter((h) => h.assignment_type === 'checkout' && h.due_date && h.due_date >= today).map((h) => h.due_date).sort();
     out.set(a.id, { state, expected_back: state === 'checked_out' && dues.length ? dues[0] : null });
   }
