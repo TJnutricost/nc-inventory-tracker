@@ -386,7 +386,7 @@ function mountShell() {
   $('#app').innerHTML = `
     <header class="topbar">
       ${isAdmin() ? `<button type="button" class="iconbtn nav-toggle" id="nav-toggle" aria-label="Open administration menu" aria-haspopup="dialog">${icon('menu')}</button>` : ''}
-      <a href="#/home" class="row" style="gap:10px"><img src="/logo-white.svg" alt="Nutricost" class="logo"><span class="app-name">IT Assets</span></a>
+      <a href="#/home" class="row" style="gap:10px"><img src="/logo-white.svg" alt="Nutricost" class="logo"><span class="app-name">${isAdmin() ? 'IT Admin' : 'Employee Portal'}</span></a>
       <span class="spacer"></span>
       <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
       <div class="menu-wrap"><button type="button" class="avatar sm" id="avatar-btn" aria-haspopup="menu" aria-expanded="false" title="${esc(S.me.name)}" style="background:var(--brand-accent);border:0;cursor:pointer">${esc(initials(S.me.name))}</button>

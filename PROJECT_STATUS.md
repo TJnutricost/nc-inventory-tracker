@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-07 (Slice 8.1 approved; PR into `stage` open)
+**Last updated:** 2026-10-07 (Slice 8.1 merged, #24; role-aware shell label D-44 done)
 
 ---
 
@@ -13,12 +13,12 @@
 | | |
 |---|---|
 | **Project status** | Early MVP / prototype. **Not deployed.** |
-| **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1) |
-| **Active slice** | **Slice 8.1 — Optional reservation times / partial-day availability** — approved; PR from `feature/reservation-times` into `stage` |
+| **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
+| **Active slice** | None. Slice 8.1 merged into `stage` (#24); the role-aware shell label (D-44) is the latest small polish. |
 | **Next slice** | None designated (see Priority Future Work) |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
-| **Tests** | **530 passing / 0 failing** (`npm test`) |
+| **Tests** | **531 tests** (`npm test`). On 2026-10-07, 3 time-sensitive hold tests in `test/partial-fulfillment.test.js` fail on a clean `stage` as well (a hold read back as `expired`); investigate separately. |
 | **Schema** | **Migration 17** (optional `start_time` / `end_time` and a `request_group` link on `reservations` and `waitlist_entries`). Migrations 1–17 are in `src/migrations.js`. |
 | **Stack** | Node.js ≥ 20.12 · Express 5 · SQLite (`better-sqlite3`) · vanilla-JS front end (no build step) · nodemailer SMTP · local-disk photos · Docker · PWA manifest/service worker |
 | **Production** | No Railway project, PostgreSQL, object storage or production auth yet (see Priority Future Work) |
@@ -60,13 +60,14 @@ Merged into `stage` (PR numbers from the repository history). Detail: [PROJECT_H
 - [x] Slice 8 — Waitlist + 24-hour availability holds + targeted emails; employee Edit dates; admin waitlist view/badges; reserved-date sheet; shorten calendar; IT email identity; `MAIL_TEST_RECIPIENT`; seed/test email suppression; contextual Settings → Catalog Back (#21, migrations 14–15)
 - [x] Search + discoverability — token search incl. catalog path and inherited Search keywords; catalog search; temporarily unavailable assets stay discoverable (#22, migration 16)
 - [x] Documentation cleanup — concise tracker + history archive + decision log (#23)
-- [ ] Slice 8.1 — optional pickup/return times, partial-day calendar, unavailable time waitlisted + split requests (`feature/reservation-times`, migration 17; approved, PR open, **not yet merged**)
+- [x] Slice 8.1 — optional pickup/return times, partial-day calendar, unavailable time waitlisted + split requests (#24, migration 17)
+- [x] Role-aware shell label (D-44) — top-bar subtitle "IT Admin" for admins, "Employee Portal" for everyone else (`feature/role-aware-shell-label`)
 
 ---
 
 ## Active Work
 
-- [ ] **Slice 8.1** — `feature/reservation-times`: approved; PR open into `stage`. Needs real-device QA (below).
+- [x] **Slice 8.1** — merged into `stage` (#24). Still needs real-device QA (below).
 
 Nothing else is in flight.
 
@@ -82,7 +83,6 @@ No slice is designated. Candidates are under Priority Future Work. Slice 8.1 fol
 
 ### Priority
 - [ ] **Google Workspace OAuth email connection — PRIORITY.** *Current state:* **Google Workspace SMTP (App Password, configured through env vars / secrets) is the working transport today** and the only one in use. *Direction:* Admin Settings → Email → *Connect Google Workspace*, so an admin can authorize/change the sending mailbox **without manual `.env` / Railway-secret changes**; **no Google passwords stored by the app**; individual IT/admin identities stay individual employee/account identities (audit logs, personal notifications); the shared IT mailbox stays the operational sending/reply identity where appropriate. (Resend / Postmark were only early alternative-provider ideas and are **not** planned; see D-35.)
-- [ ] **Role-aware shell labels** (small polish): top-bar subtitle "IT Admin" for admins, "Employee Portal" for employees, replacing the generic "IT Assets".
 
 ### Product / workflow
 - [ ] Admin employee/equipment **roster + CSV export** (data model already supports it; permanent vs temporary clearly separated)
@@ -201,7 +201,7 @@ Short and authoritative. The reasoning is in [PROJECT_DECISIONS.md](docs/PROJECT
 
 ## QA / Verification Outstanding
 
-- [ ] **Real-device QA** (iPhone Safari, Android Chrome, Firefox) of the newer flows: single-asset calendar + reserve/waitlist date sheet **including the Hour : Minutes + AM/PM time control and the split-request notice (Slice 8.1)**, Shorten calendar with a return time, Requests › Reservations, search/Browse rows. Only the Slice 4 mobile shell is real-iPhone verified (Chrome on iPhone)
+- [ ] **Real-device QA** (iPhone Safari, Android Chrome, Firefox) of the newer flows: single-asset calendar + reserve/waitlist date sheet **including the Hour : Minutes + AM/PM time control and the split-request notice (Slice 8.1)**, Shorten calendar with a return time, Requests › Reservations, search/Browse rows, **the top bar at 320–375 px ("Employee Portal" / "IT Admin" label)**. Only the Slice 4 mobile shell is real-iPhone verified (Chrome on iPhone)
 - [ ] **Scanner hardware QA**: USB scanner, Bluetooth scanner, phone camera over HTTPS (iPhone Safari/PWA, Android Chrome/PWA); barcode matrix (Code 128, QR, Code 39, UPC/EAN, manufacturer serial; small/large/angled/damaged/low-light/glare/duplicate/unknown); failure cases (camera denied/unavailable, unsupported browser, Enter suffix or not, network interruption, rapid duplicate scans)
 - [ ] **Real email on the target environment**: Workspace delivery of the waitlist emails, From/Reply-To behavior, and IT-email identity on stage/production (Gmail delivery via `MAIL_TEST_RECIPIENT` was owner-confirmed in dev)
 - [ ] No automated scanner integration tests exist beyond the lookup-endpoint and golden-workflow tests (scanning itself is manual/hardware QA)
