@@ -35,6 +35,12 @@ app.use((req, res, next) => {
   next();
 });
 
+// Liveness probe for the host's deployment health check. Deliberately before sessions and outside /api: no auth, no CSRF, no DB access, no diagnostics.
+app.get('/health', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ok: true });
+});
+
 // ---------- sessions (SQLite-backed) ----------
 class SqliteStore extends session.Store {
   get(sid, cb) {
