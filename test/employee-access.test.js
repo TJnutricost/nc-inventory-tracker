@@ -448,3 +448,9 @@ test('front end: the employee profile renders Building read-only and the admin k
   assert.match(view, /id="out"/, 'sign out is kept');
   assert.match(src, /id="signout"/, 'avatar menu sign out is kept');
 });
+test('front end: the top-bar subtitle is role-aware (D-44): IT Admin for admins, Employee Portal for everyone else', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const shell = src.slice(src.indexOf('function mountShell()'), src.indexOf('function mountShell()') + 1500);
+  assert.match(shell, /<span class="app-name">\$\{isAdmin\(\) \? 'IT Admin' : 'Employee Portal'\}<\/span>/);
+  assert.doesNotMatch(shell, /app-name">IT Assets/);
+});

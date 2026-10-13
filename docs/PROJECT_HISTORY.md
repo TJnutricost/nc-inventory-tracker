@@ -30,6 +30,8 @@ This is the archive of everything that used to live in the single, very long `PR
 | Slice 7 Asset Reservations V1 | #20 | 13 | 385 |
 | Slice 8 Waitlist + holds + targeted email (+ QA rounds) | #21 | 14, 15 | 434 |
 | Search + discoverability | #22 | 16 | 447 |
+| Slice 8.1 Optional reservation times | #24 | 17 | 530 |
+| Role-aware shell label (D-44) | — | — | 531 |
 
 ## 1. Project Overview (original, 2026-09-28)
 
@@ -1262,6 +1264,10 @@ Tests **447 → 482 passing / 0 failing** (new `test/reservation-times.test.js`:
 **Technical debt added.** "Today" and past-time checks are date-level only (a pickup time earlier today is accepted). The existing checkout email still prints its `due_time` raw (`at 13:00`; untouched, outside this slice). The date sheet and Shorten sheet rendering have no DOM test harness (decisions are server-side and tested; wording helpers are tested through `vm`). A waitlist entry cannot be created for a checkout-only conflict (nothing to wait behind): the employee reserves with a warning instead.
 
 **Correction, 2026-10-07 (browser QA found "Reserve anyway" wrong).** D-45 was rewritten: unavailable time is waitlist time. `findOverlaps` became `findBlockers` (+ `plan`); `T.splitFree` cuts a request into free/busy ranges; `reservations.create` reserves the free pieces and waitlists the busy ones in one transaction (`waitlist.classify` is the single decision, now `reserve` / `partial` / `waitlist` / refusals; `insertEntry`, `announceJoined`). Migration 17 was edited in place (still unpushed) to add `request_group` + indexes on both tables. `approve` and `confirmHold` re-check for blockers again; `/checkin` re-evaluates the waitlist in its own transaction. UI: "Reserve anyway" and the blue "Availability not guaranteed" confirm are gone; the date sheet shows one amber notice (partial) or Join waitlist (none free); tapping a calendar day reveals its detail; the sidebar's sticky offset follows the real top-bar height. Email: one confirmation listing Requested / Reserved / Waitlisted. Follow-up: `waitlist.evaluateAsset` re-splits each waiting entry with `reservations.plan` (the same `splitFree`): the freed part is held, the unavailable part stays waiting at the same `queue_seq`; no schema change. Checkout (`createAssignment`, used by manual, scan and request fulfilment) now refuses to run across another employee's active hold or waitlist-born pending reservation, and the hold owner's own checkout closes their hold (`fulfilled`, phase `checked_out`, activity `waitlist_checked_out`). Response windows are now tiered by how soon the offered piece starts (`waitlist.responseMinutes`, `T.nowKey` / `T.fmtStamp` in APP_TIMEZONE; no schema change; `hold_expires_text` served to the screens; email subject/body say "Available for you until <time>"). Tests **482 → 530** (new `test/partial-fulfillment.test.js`; overlap-warning tests rewritten). Local DBs that already applied the old migration 17 (e.g. `./data-dev`) lack `request_group`: rebuild with `npm run seed:dev` (`./data-qa` was rebuilt).
+
+#### Role-aware shell label (D-44) — 2026-10-07, `feature/role-aware-shell-label`
+
+The top-bar `.app-name` in `mountShell()` now reads "IT Admin" for admins and "Employee Portal" for every other role (was "IT Assets"); `white-space: nowrap` was added to `.topbar .app-name` because "Employee Portal" wrapped to two lines at 320 px. One source-level test added (`test/employee-access.test.js`); tests 530 → 531. Browser-checked in Chrome DevTools: admin at 1280, 500 and 320 px (hamburger present), employee at 320 px (one line, 20 px clear of the avatar, no overflow). Not real-device verified. `npm test` showed 3 pre-existing, time-sensitive hold failures in `test/partial-fulfillment.test.js` (also on a clean `stage`).
 
 ## Appendix A — Archived roadmap checklists (sections 12–17)
 

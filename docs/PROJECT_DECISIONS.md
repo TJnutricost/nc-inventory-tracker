@@ -170,8 +170,8 @@ Every screen reached from another carries its source in the URL (`from=` for the
 ### D-43 Mobile shell — 2026-10-02 — active
 Five bottom tabs for both roles (Home · Browse/Assets · centred Scan · Requests · Profile). The hamburger/drawer exists for admins only and holds administration only; employees have none. Real-iPhone QA of this shell passed (Chrome on iPhone).
 
-### D-44 Role-aware shell label — 2026-10-05 — future polish (pending)
-Replace the generic "IT Assets" subtitle: admin → "IT Admin", employee → "Employee Portal" (preferred wording).
+### D-44 Role-aware shell label — 2026-10-05 — active (implemented 2026-10-07)
+The top-bar subtitle replaces the generic "IT Assets": admin → "IT Admin", any other role → "Employee Portal". Presentation only; authorization stays on the backend. `<title>`, the PWA manifest, email templates and other product-name uses are unchanged.
 
 ---
 
