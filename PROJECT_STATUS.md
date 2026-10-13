@@ -133,6 +133,7 @@ Only items that are still true. Resolved debt lives in PROJECT_HISTORY.md.
 - [ ] "Today" is the server's **UTC** date everywhere (calendar, reservations, overdue, holds); a late-evening local time can be a day off. Hold deadlines in emails use `APP_TIMEZONE` or the server zone
 - [ ] Asset photos are served from local disk; the dev server must be restarted to pick up a new migration unless `npm run dev` (file watcher) is used
 - [ ] Google Workspace SMTP with an App Password is the only mail transport (no password-less IP relay); mailbox credentials are changed by editing env vars / secrets until the OAuth connection exists
+- [ ] **3 time-dependent hold-expiry tests are unreliable** in `test/partial-fulfillment.test.js` (a hold reads back as `expired`). On 2026-10-07 the suite was 531 total / 528 passing / 3 failing, and the same 3 failed on a clean `stage`; on 2026-10-13 (15:20 MDT) two runs passed 531/531. The result depends on when the suite runs, so do not treat a pass or a fail as meaningful until this is investigated. Not fixed in the D-44 slice
 
 **Reservations / waitlist / email**
 - [ ] Reservation times are wall-clock in `APP_TIMEZONE` and compared as strings; "today" and the past-start check stay date-level (a pickup time earlier today is accepted). The checkout email still prints its `due_time` as raw `HH:MM`
