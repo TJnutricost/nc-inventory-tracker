@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-07 (Slice 8.1 merged, #24; role-aware shell label D-44 done)
+**Last updated:** 2026-10-13 (Slice 8.1 merged, #24; role-aware shell label D-44 done)
 
 ---
 
