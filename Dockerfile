@@ -5,7 +5,6 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY src ./src
 COPY public ./public
-VOLUME /data
 EXPOSE 3000
 USER node
 CMD ["node", "src/server.js"]

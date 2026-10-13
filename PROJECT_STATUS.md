@@ -106,7 +106,7 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 - [ ] **Managed PostgreSQL** (Railway preferred, built provider-neutrally): schema conversion, constraints/indexes/FKs, replace `better-sqlite3` access, preserve API behavior, run host advisors, verify migration, **tested backup/restore**. Notes carried from Phase 1: re-express TEXT-timestamp CHECKs on real timestamps, `AUTOINCREMENT` → identity, optional transition triggers, run migrations 8–9 pre-checks read-only against exported production data before cutover.
 - [ ] **Object storage** (S3-compatible, private bucket; file naming + access policies; preserve thumbnails and cover photo; test mobile upload and image replacement/removal)
 - [ ] **Production authentication** (provider TBD; Google sign-in + magic-link fallback; pre-provisioned employees only; define the authentication model and admin/employee authorization strategy; secure sessions; replace custom password/reset/invite flows; shared login rate limiting; test admin and standard-user permissions)
-- [ ] **Railway staging**: service, env vars, `/health` endpoint + deployment health check, domain/HTTPS, production sending mailbox (see the email item above), logs, restart behavior
+- [ ] **Railway staging** (*foundation begun 2026-10-13:* staging service exists with a Volume mounted at `/data`; first build failed on the Dockerfile `VOLUME` instruction, removed): service, env vars, `/health` endpoint + deployment health check, domain/HTTPS, production sending mailbox (see the email item above), logs, restart behavior
 - [ ] **Production readiness**: security review, DB + storage backup strategy, restore procedure, error monitoring, audit logging, production admin accounts, real inventory import plan, final staging acceptance test, deployment, initial import
 - [ ] **CI** (none configured; no branch protection): automated build + test verification. Future engineering work to address **before production/release maturity**; it is *not* a blocker for Slice 8.1 or day-to-day development.
 
@@ -116,7 +116,7 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 
 **There is no active blocker.** These are external dependencies that matter only when the matching task starts:
 
-- [ ] **Railway account/project access** — *not re-confirmed.* Last recorded 2026-09-28 (the team had no access and no completion date); nothing since has confirmed or cleared it. Not treated as a blocker until a deployment/staging task actually needs it (Railway services, PostgreSQL/object-storage provisioning, staging deploy, production domain + HTTPS).
+- [x] **Railway account/project access** — *available as of 2026-10-13* (staging service created, Volume mounted at `/data`). Previously recorded 2026-09-28 as no access.
 - [ ] **HTTPS-accessible environment** — needed only for real phone-camera scanner QA (camera access requires HTTPS).
 - [ ] **Physical scanner hardware** — USB / Bluetooth scanners exist at the company but were not on hand at the campus used for QA.
 
@@ -221,7 +221,7 @@ Short and authoritative. The reasoning is in [PROJECT_DECISIONS.md](docs/PROJECT
 - [ ] Barcode label dimensions/printer; whether QR is needed alongside Code 128
 - [ ] Inventory / cycle-count V1 scope; paired-phone-scanner scope
 - [ ] **When to promote `stage` → `main`** — a deliberate release/staging decision; the workflow stays `feature/*` → `stage` → `main`, and `stage` being many commits ahead is not itself a reason to promote
-- [ ] Railway access status — *not re-confirmed*; only matters once a deployment/staging task needs it
+- [x] Railway access status — confirmed available 2026-10-13
 
 ---
 
