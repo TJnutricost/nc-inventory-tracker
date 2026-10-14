@@ -240,7 +240,11 @@ async function findLiveByPath(q, text) {
   return found && liveIn(index, found.id) ? found.id : null;
 }
 
+// Synchronous walks over an index already loaded with loadIndex(q) (Slice 4A: src/pg/availability.js loads the tree once
+// per call and resolves every path / liveness from it, so a transaction client does not re-read the tree per asset row).
+const inIndex = { pathText: textIn, isLive: liveIn, subtreeIds: subtreeIn, getNode: nodeIn };
+
 module.exports = {
   SEP, MAX_NAME, normName, nameKey, normKeywords, searchText, searchNodeIds, invalidate, loadIndex, pathNames, pathText, rootOf, isLive, subtreeIds, depthOf, getNode,
-  parseParent, createNode, updateNode, archiveNode, restoreNode, usage, deleteNode, findLiveByPath,
+  parseParent, createNode, updateNode, archiveNode, restoreNode, usage, deleteNode, findLiveByPath, inIndex,
 };

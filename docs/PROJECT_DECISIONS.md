@@ -189,6 +189,13 @@ PostgreSQL is the database for local development, staging and production. There 
 - **Git strategy:** small, safe prep slices merge to `stage`. Conversion work that cannot deploy in pieces goes on a temporary `integration/postgresql` branch, kept synced with `stage` and never merged incomplete.
 - **Host:** Railway PostgreSQL is provisioned (the "PostgreSQL host" open decision is resolved). Local development uses `postgres:18` in Docker (`docker-compose.postgres.yml`), matching the Railway major version.
 
+### D-47 PostgreSQL migration Slice 4 delivery and notification rules — 2026-10-14 — active (follows D-46)
+Availability + reservations + waitlist is the largest and most concurrency-sensitive part of the migration, so it is delivered in pieces with explicit rules for timing and email:
+1. **Delivery:** Slice 4 is three independently testable PRs into `integration/postgresql`: **4A** availability and the read side of reservations/waitlist (no writes, locks or email); **4B** reservation writes, the queue engine and after-commit effects with concurrency/lock-order tests; **4C** waitlist actions, the sweep and hold email.
+2. **Intentional, limited timing change:** on request paths (join, edit dates, confirm, decline, leave) lapsed holds are processed for the **requested asset only**, in a separately committed transaction before the main one (so a refused request still leaves the queue moved, as today). The **60-second global sweep** still processes every asset, one transaction per asset in ascending id order (so one failing asset no longer rolls back the others). Correctness never depended on the sweep: a lapsed hold stops blocking the moment `hold_expires_at` passes. Waitlist priority, eligibility, the reservation/hold lifecycle and every release-path re-evaluation are unchanged (D-28, D-45).
+3. **Notifications:** `src/pg/*` never imports a mailer. Effects are plain data registered during a transaction and fired only **after COMMIT** (dropped on rollback), through an injected notifier; an email failure never reverses committed state; **no email before commit and no SMTP while an asset lock is held**. Hold emails keep the `hold_email_at` claim (at-most-once, never duplicated; a crash between the claim and the send can lose one email: accepted). **No durable outbox** in this migration.
+4. The PG mailer itself (preserving D-35 to D-39) is Slice 5.
+
 ---
 
 ## Reconciliation notes (2026-10-05)

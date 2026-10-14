@@ -67,10 +67,25 @@ function insertWaitlistEntry(q, cols) {
 // A permanent active assignment unless told otherwise (a checkout needs due_date).
 const insertAssignment = (q, cols) => insertRow(q, 'assignments', { assignment_type: 'permanent', ...cols });
 
+// An open TEMPORARY checkout (Slice 4A): due_date required, due_time optional; checked_out_at defaults to the column default
+// (now) unless given, so a test can place the checkout's start in a month.
+const insertCheckout = (q, cols) => {
+  if (!cols.due_date) throw new Error('insertCheckout needs due_date');
+  return insertRow(q, 'assignments', { assignment_type: 'checkout', ...cols });
+};
+
+// The DATABASE clock + `seconds` (may be negative), as SQLite datetime('now', '+N seconds') text, on either engine. Tests seed
+// hold_expires_at with it so "live" / "lapsed" holds are relative to the clock the modules compare against (use generous margins).
+async function dbStamp(q, seconds) {
+  if (q.engine === 'sqlite') return (await q.query('SELECT datetime(\'now\', $1) AS v', [`${seconds >= 0 ? '+' : ''}${seconds} seconds`])).rows[0].v;
+  return (await q.query(`SELECT ${require('../src/pg/time').NOW_PLUS('$1')} AS v`, [seconds])).rows[0].v;
+}
+
 // The node-pg executor shape over a better-sqlite3 database: $1..$n placeholders (may repeat) become positional ?s.
 // Returns { rows, rowCount } like node-pg. Only for the differential tests' fixtures and probes.
 function sqliteExecutor(db) {
   return {
+    engine: 'sqlite',
     async query(text, params = []) {
       const order = [];
       const sql = text.replace(/\$(\d+)/g, (_, n) => { order.push(params[Number(n) - 1]); return '?'; });
@@ -84,5 +99,5 @@ function sqliteExecutor(db) {
 
 module.exports = {
   insertRow, insertEmployee, insertAccount, insertAsset, insertCatalogNode, insertRequest, insertReservation, insertWaitlistEntry, insertAssignment,
-  sqliteExecutor,
+  insertCheckout, dbStamp, sqliteExecutor,
 };
