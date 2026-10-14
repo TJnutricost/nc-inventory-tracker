@@ -3,10 +3,25 @@
 // error statuses/messages (read the header of src/waitlist.js); every function is async and takes an executor `q` (a pg Pool
 // or a transaction client) where the SQLite version takes `db`.
 //
-// Slice 4A has the reads only: classify, rangeCheck, list, get, present, counts. Slice 4B adds insertEntry / announceJoined /
-// evaluateAsset (+ insertPiece, close) and Slice 4C the actions (join, updateDates, confirmHold, declineHold, leave) and
-// processDue / sweep / dispatchHoldEmails to THIS file, without changing anything here. src/pg/* never imports a mailer
-// (D-47): notifications are after-commit effects through an injected notifier (4B).
+// Reads (Slice 4A): classify, rangeCheck, list, get, present, counts. Queue engine + entry helpers (Slice 4B): evaluateAsset
+// (+ private freeParts, insertPiece, close), insertEntry, announceJoined. Slice 4C adds the actions (join, updateDates,
+// confirmHold, declineHold, leave) and processDue / sweep / dispatchHoldEmails. src/pg/* never imports a mailer (D-47).
+//
+// Queue engine rules (Slice 4B), ported statement for statement from src/waitlist.js evaluateAsset:
+//   - evaluateAsset, insertEntry, insertPiece and close need the asset lock on the transaction client (assertAssetLock, code
+//     ASSET_LOCK_REQUIRED): a programming-error net, e.g. for the Slice 5 check-in route, which must lockAsset first.
+//   - FIFO is literal: waiting entries are read `ORDER BY queue_seq, id` (NOT the list screens' `queue_seq, status, id`, which
+//     only mirrors SQLite's index order for display); every other loop reads `ORDER BY id` (SQLite returned rowid order).
+//     freeParts / plan re-read the blockers per entry on the client, after the previous grant, so each hold makes its time
+//     unavailable for the entries behind it, and an older entry that is still blocked does not hold up a younger one.
+//   - queue_seq is per asset, computed under the lock: MAX(queue_seq) + 1 over THIS asset's entries (SQLite: the whole table).
+//     Order only ever matters within an asset; split pieces keep sharing their entry's queue_seq. No schema change.
+//   - Two clocks, as in SQLite: the database clock for stored stamps and `hold_expires_at > NOW` (NOW / NOW_PLUS); the JS clock
+//     (T.nowKey, APP_TIMEZONE, new Date().getUTCSeconds() in offerSeconds) for response tiers and interval ends. The
+//     "available until" activity text is read with its own time.nowPlus(), exactly as SQLite runs a separate query.
+//   - When at least one hold is granted, a `holds_owed` effect is registered (after the writes): only a TRIGGER for the
+//     claim-based, at-most-once hold-email dispatch of Slice 4C, which is unchanged. It fires after COMMIT, never on rollback.
+//   - announceJoined registers one `waitlist_joined` effect per distinct blocking reserver (SQLite emailed them after commit).
 //
 // Pure helpers come from src/reservations.js / src/timeRange.js (see src/pg/reservations.js). responseMinutes /
 // RESPONSE_MINUTES are pure exports of src/waitlist.js and are re-exported from it unchanged. present()'s shaping is private
@@ -30,11 +45,107 @@ const base = require('../waitlist');
 const T = require('../timeRange');
 const reservations = require('./reservations');
 const time = require('./time');
+const { assertAssetLock } = require('./transaction');
+const { registerEffect } = require('./effects');
 
-const { RESPONSE_MINUTES, responseMinutes } = base;
-const { httpError, whyBlocked, validateRange, rangeOf, reserveEligibility, todayOf, loadAsset, toId } = reservations;
-const { NOW } = time;
+const { RESPONSE_MINUTES, responseMinutes, offerSeconds } = base;
+const { httpError, whyBlocked, validateRange, rangeOf, reserveEligibility, todayOf, loadAsset, toId, note, when } = reservations;
+const { NOW, NOW_PLUS } = time;
 const OPEN = ['waiting', 'held'];
+
+// ---- queue engine (Slice 4B)
+const loadEntry = async (q, id) => {
+  const e = (await q.query('SELECT * FROM waitlist_entries WHERE id = $1', [toId(id)])).rows[0];
+  if (!e) throw httpError(404, 'Waitlist entry not found');
+  return e;
+};
+// Closes an open entry (the row `e`, so the asset lock can be checked). Returns the number of rows changed (0 or 1).
+async function close(c, e, status, actorAccountId) {
+  assertAssetLock(c, e.asset_id);
+  return (await c.query(`UPDATE waitlist_entries SET status = $1, closed_at = ${NOW}, closed_by = $2, updated_at = ${NOW} WHERE id = $3 AND status IN ('waiting','held')`,
+    [status, actorAccountId ?? null, e.id])).rowCount;
+}
+
+// What may this waiting entry be offered right now? null = nothing; otherwise the SAME split a new request gets.
+async function freeParts(c, e, today) {
+  if (e.start_date < today) return null;
+  const asset = await loadAsset(c, e.asset_id);
+  if (!reserveEligibility(asset).ok) return null;
+  const emp = (await c.query('SELECT status FROM employees WHERE id = $1', [e.employee_id])).rows[0];
+  if (!emp || emp.status !== 'active') return null;
+  if (await reservations.hasOwnOverlap(c, e.asset_id, e.employee_id, e)) return null;
+  return reservations.plan(c, asset, e, { today });
+}
+
+// A piece of an entry that has been split keeps the entry's place in line (same queue_seq / queued_at / request_group /
+// created_at), so splitting never costs priority. Returns the new row's id.
+async function insertPiece(c, e, piece, held, seconds) {
+  assertAssetLock(c, e.asset_id);
+  const params = [e.asset_id, e.employee_id, piece.start_date, piece.start_time || null, piece.end_date, piece.end_time || null, held ? 'held' : 'waiting', e.created_by, e.created_at, e.queue_seq, e.queued_at, e.request_group];
+  if (held) params.push(seconds);
+  return (await c.query(`INSERT INTO waitlist_entries (asset_id, employee_id, start_date, start_time, end_date, end_time, status, created_by, created_at, queue_seq, queued_at, request_group, hold_started_at, hold_expires_at)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, ${held ? `${NOW}, ${NOW_PLUS('$13')}` : 'NULL, NULL'}) RETURNING id`, params)).rows[0].id;
+}
+
+// Record lapsed holds / past ranges, then offer free time to waiting entries oldest-first (see src/waitlist.js). Needs the
+// asset lock on the transaction client. Returns the ids of the entries / pieces that were granted a hold.
+async function evaluateAsset(c, assetId) {
+  assertAssetLock(c, assetId);
+  const today = await todayOf(c);
+  const lapsed = (await c.query(`SELECT * FROM waitlist_entries WHERE asset_id = $1 AND ((status = 'held' AND hold_expires_at <= ${NOW}) OR (status IN ('waiting','held') AND start_date < $2)) ORDER BY id`,
+    [assetId, today])).rows;
+  for (const e of lapsed) {
+    if (await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)}${e.status === 'held' ? ' · hold ran out' : ' · dates passed'}`, e.employee_id);
+  }
+  const granted = [];
+  const nowKey = T.nowKey();
+  // an open entry whose whole interval has now ended (a same-day time that has passed) can never be offered again
+  for (const e of (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status IN ('waiting','held') ORDER BY id", [assetId])).rows) {
+    if (T.endKey(e.end_date, e.end_time) <= nowKey && await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)} · the time has passed`, e.employee_id);
+  }
+  const waiting = (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status = 'waiting' ORDER BY queue_seq, id", [assetId])).rows;
+  for (const e of waiting) {
+    const p = await freeParts(c, e, today);
+    if (!p) continue;
+    p.free = p.free.filter((f) => offerSeconds(f, nowKey) > 0); // (a freed piece that has already ended is not offered)
+    if (!p.free.length) continue;
+    const [first, ...more] = p.free;
+    const secs = (piece) => Math.max(1, offerSeconds(piece, nowKey));
+    const split = p.busy.length > 0 || more.length > 0;
+    // the entry itself becomes the first free piece (held); every other piece is a new row with the same place in line
+    const info = await c.query(`UPDATE waitlist_entries SET start_date = $1, start_time = $2, end_date = $3, end_time = $4, status = 'held', hold_started_at = ${NOW}, hold_expires_at = ${NOW_PLUS('$5')}, hold_email_at = NULL, updated_at = ${NOW} WHERE id = $6 AND status = 'waiting'`,
+      [first.start_date, first.start_time || null, first.end_date, first.end_time || null, secs(first), e.id]);
+    if (!info.rowCount) continue;
+    granted.push(e.id);
+    for (const piece of more) granted.push(await insertPiece(c, e, piece, true, secs(piece)));
+    for (const piece of p.busy) await insertPiece(c, e, piece, false, 0);
+    if (split) await note(c, assetId, null, 'waitlist_split', `${when(e)} → ${p.free.map((f) => when(f)).join(', ')} offered${p.busy.length ? `, ${p.busy.map((b) => when(b)).join(', ')} still waiting` : ''}`, e.employee_id);
+    for (const piece of p.free) await note(c, assetId, null, 'waitlist_hold_started', `${when(piece)} · available until ${T.fmtStamp(await time.nowPlus(c, secs(piece)))}${split ? ' · the part of your waitlisted time that opened up' : ''}`, e.employee_id);
+  }
+  if (granted.length) registerEffect(c, { type: 'holds_owed', assetId: Number(assetId) });
+  return granted;
+}
+
+// One waitlist row (the only place one is written). Needs the asset lock. `range` = { start_date, start_time, end_date, end_time }.
+async function insertEntry(c, { assetId, employeeId, actorAccountId, range, requestGroup = null }) {
+  assertAssetLock(c, assetId);
+  const row = (await c.query(`INSERT INTO waitlist_entries (asset_id, employee_id, start_date, start_time, end_date, end_time, created_by, queue_seq, queued_at, request_group)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM waitlist_entries WHERE asset_id = $1), ${NOW}, $8) RETURNING *`,
+  [assetId, employeeId, range.start_date, range.start_time || null, range.end_date, range.end_time || null, actorAccountId ?? null, requestGroup])).rows[0];
+  await note(c, assetId, actorAccountId, 'waitlist_joined', when(range), employeeId);
+  return row;
+}
+// Each distinct current reserver is told once, whatever the number of pieces (SQLite emailed them after its commit; here it
+// is a `waitlist_joined` effect, fired after COMMIT). Call after the entries were written, on the transaction client.
+function announceJoined(c, employeeId, assetId, entries, reservers) {
+  const seen = new Set();
+  for (const b of reservers) {
+    if (seen.has(b.employee_id)) continue;
+    seen.add(b.employee_id);
+    const entry = entries.find((e) => T.overlapsRows(e, b)) || entries[0];
+    registerEffect(c, { type: 'waitlist_joined', waiterEmployeeId: employeeId, assetId: Number(assetId), entry, reserver: b });
+  }
+}
 
 // ---- the one question behind the date sheet, reserving, joining and editing (see src/waitlist.js classify)
 async function classify(q, { assetId, employeeId, start, end, startTime, endTime, excludeEntryId = 0 }) {
@@ -136,4 +247,4 @@ async function counts(q, user) {
   return { pending: 0, waitlist_active: active, held, attention: held };
 }
 
-module.exports = { RESPONSE_MINUTES, responseMinutes, classify, rangeCheck, counts, list, get, present };
+module.exports = { RESPONSE_MINUTES, responseMinutes, offerSeconds, classify, rangeCheck, counts, list, get, present, evaluateAsset, insertEntry, announceJoined, loadEntry };

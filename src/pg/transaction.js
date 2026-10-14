@@ -29,12 +29,21 @@
 //   client is released). Used by caches that must not trust state a transaction wrote until it is committed (or know it
 //   never will be): src/pg/catalog.js invalidates its tree cache here. Registering the same fn twice runs it once; an
 //   error thrown by fn is ignored (it must never turn a committed transaction into a failure).
+//
+// holdsAssetLock(client, assetId) / assertAssetLock(client, assetId)   (Slice 4B)
+//   lockAsset() records, per client, the asset ids whose row lock it actually obtained (only after the FOR UPDATE
+//   returned the row). holdsAssetLock() is true only inside that client's transaction and only for those ids. The record
+//   is reset at BEGIN and cleared when the transaction ends (COMMIT, ROLLBACK, a failed ROLLBACK, any throw), before the
+//   end callbacks run and before the client is released, so a pooled client reused by the next transaction never carries
+//   a lock record across. assertAssetLock() throws a plain Error with code ASSET_LOCK_REQUIRED (never an HTTP-status
+//   error) when the lock is missing: the programming-error net for the reservation/waitlist write helpers.
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { getPool } = require('./pool');
 
 const activeTransaction = new AsyncLocalStorage();
 const clientsInTransaction = new WeakSet();
 const endCallbacks = new WeakMap();
+const assetLocks = new WeakMap(); // client -> Set of asset ids locked in its current transaction
 
 async function withTransaction(fn, pool = getPool()) {
   if (typeof fn !== 'function') throw new TypeError('withTransaction(fn): fn must be a function');
@@ -49,6 +58,7 @@ async function withTransaction(fn, pool = getPool()) {
   let destroy = null;
   let committed = false;
   try {
+    assetLocks.delete(client);
     await client.query('BEGIN');
     clientsInTransaction.add(client);
     const result = await activeTransaction.run(scope, () => fn(client));
@@ -65,6 +75,7 @@ async function withTransaction(fn, pool = getPool()) {
   } finally {
     scope.open = false;
     clientsInTransaction.delete(client);
+    assetLocks.delete(client);
     const callbacks = endCallbacks.get(client) || [];
     endCallbacks.delete(client);
     for (const cb of callbacks) {
@@ -95,7 +106,22 @@ async function lockAsset(client, assetId) {
   if (!Number.isSafeInteger(id) || id < 1) throw new TypeError(`lockAsset(): invalid asset id ${assetId}`);
   const { rows } = await client.query('SELECT * FROM assets WHERE id = $1 FOR UPDATE', [id]);
   if (!rows.length) throw Object.assign(new Error('Asset not found'), { status: 404, code: 'ASSET_NOT_FOUND' });
+  let held = assetLocks.get(client);
+  if (!held) assetLocks.set(client, (held = new Set()));
+  held.add(id);
   return rows[0];
 }
 
-module.exports = { withTransaction, lockAsset, isInTransaction, onTransactionEnd };
+function holdsAssetLock(client, assetId) {
+  if (!client || !isInTransaction(client)) return false;
+  const held = assetLocks.get(client);
+  return !!held && held.has(Number(assetId));
+}
+
+function assertAssetLock(client, assetId) {
+  if (!holdsAssetLock(client, assetId)) {
+    throw Object.assign(new Error(`This write needs the asset lock: call lockAsset(client, ${assetId}) inside withTransaction() first, and pass that client.`), { code: 'ASSET_LOCK_REQUIRED' });
+  }
+}
+
+module.exports = { withTransaction, lockAsset, isInTransaction, onTransactionEnd, holdsAssetLock, assertAssetLock };
