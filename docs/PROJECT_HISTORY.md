@@ -34,6 +34,7 @@ This is the archive of everything that used to live in the single, very long `PR
 | Role-aware shell label (D-44) | — | — | 531 |
 | `/health` liveness endpoint for Railway | #28 | — | 532 |
 | PostgreSQL preparation: local Docker database, `db:*` scripts, D-46 (Slice 1 of the migration; no runtime change) | — | — | 536 |
+| PostgreSQL Slice 2 foundation: pool/transaction/asset-lock helpers, PG baseline (= SQLite 1–17) + parity check, per-file test DB harness (on `integration/postgresql`; app still on SQLite) | — | PG 1 | 548 (569 with PostgreSQL) |
 
 ## 1. Project Overview (original, 2026-09-28)
 
@@ -1270,6 +1271,17 @@ Tests **447 → 482 passing / 0 failing** (new `test/reservation-times.test.js`:
 #### Role-aware shell label (D-44) — 2026-10-07, `feature/role-aware-shell-label`
 
 The top-bar `.app-name` in `mountShell()` now reads "IT Admin" for admins and "Employee Portal" for every other role (was "IT Assets"); `white-space: nowrap` was added to `.topbar .app-name` because "Employee Portal" wrapped to two lines at 320 px. One source-level test added (`test/employee-access.test.js`); tests 530 → 531. Browser-checked in Chrome DevTools: admin at 1280, 500 and 320 px (hamburger present), employee at 320 px (one line, 20 px clear of the avatar, no overflow). Not real-device verified. `npm test` showed 3 pre-existing, time-sensitive hold failures in `test/partial-fulfillment.test.js` (also on a clean `stage`).
+
+#### PostgreSQL migration Slice 2 of 7 — Foundation (2026-10-14, `feature/pg-slice-2-foundation` → `integration/postgresql`)
+
+New, **unused** modules next to the SQLite code (D-46); nothing in `src/server.js` or the feature modules imports them (a test enforces it) and the app still runs on SQLite. `pg` moved to production `dependencies`; new `npm run test:pg`.
+- **`src/pg/pool.js`** — lazy pool from `DATABASE_URL` (local Docker URL as a development-only default; production without `DATABASE_URL` throws), `TimeZone=UTC` as a startup option, max 10 / 5 s connect timeout, idle-error handler, `close()`. int8 (COUNT(*), bigint) is returned as a JS number like better-sqlite3 (a value beyond 2^53 fails the query instead of losing precision).
+- **`src/pg/transaction.js`** — `withTransaction(fn)` (BEGIN / COMMIT, ROLLBACK + rethrow, always releases; a client whose ROLLBACK fails is destroyed; nesting rejected via AsyncLocalStorage) and `lockAsset(client, id)` (`SELECT … FOR UPDATE`, inside a transaction only, 404 `ASSET_NOT_FOUND`), with the lock-ordering rule documented in the file.
+- **`src/pg/schema/001_baseline.sql` + `src/pg/migrate.js`** — one squashed baseline = the final state of SQLite migrations 1–17 (15 tables + `schema_migrations`), applied as PG migration 1 by a runner with one transaction per migration, an advisory lock against concurrent runners, and a fresh-database-only guard. Porting rules: identity columns, `integer` (`sessions.expires` = `bigint`), `double precision`, every TEXT column `COLLATE "C"` (byte order, like SQLite BINARY, so TEXT timestamps compare identically), NOCASE columns → unique index on `lower(col)`, `datetime('now')` → the same UTC text format, GLOB → anchored regex, all FK actions kept. It also writes the rows a fresh SQLite database gets (tag counter at 0, 13 default catalog roots).
+- **Parity check** (`test-support/pg-parity.js`, `test/pg/schema-parity.test.js`) — table/column/type/collation/nullability/default/PK/FK/CHECK/index comparison with an allow-list (7 entries, each with a reason; stale entries fail), plus 62 behavioral probes run against both databases (CHECKs, NOCASE vs ASCII-only `lower()`, partial uniques, RESTRICT/NO ACTION/CASCADE). Mutation-tested: injected drift of every kind was reported.
+- **Harness** (`test-support/pg-harness.js`) — one `nc_test_<16 hex>` database per test file, migrated, dropped `WITH (FORCE)`. It reads `TEST_DATABASE_URL` (never `DATABASE_URL`), applies the `isLocalDatabaseUrl` rule (now shared from `src/pg/local-url.js` with `db-check`) before any connection, and only drops `nc_test_*` names. PG suites skip with a message when PostgreSQL is unreachable; `npm run test:pg` fails instead.
+- **Tests** 536 → **548** without PostgreSQL (12 no-database tests; 4 PG suites skipped) and **569** with `npm run db:up` (`npm run test:pg`: 33/33).
+- **Left for Slice 3+:** queries that relied on NOCASE equality (`tag = ? COLLATE NOCASE`, login/work email) must use `lower(col) = lower($1)`; the Slice 7 data copy must advance identity sequences and replace the baseline's seeded catalog/counter rows.
 
 ## Appendix A — Archived roadmap checklists (sections 12–17)
 
