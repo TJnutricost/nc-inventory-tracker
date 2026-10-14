@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-14 (PostgreSQL preparation slice: local Docker database + tooling, D-46; `/health` merged, #28)
+**Last updated:** 2026-10-14 (PostgreSQL migration Slice 2 foundation on `integration/postgresql`: pool/transaction/asset-lock helpers, PG baseline + parity check, per-file test DB harness; app still on SQLite)
 
 ---
 
@@ -14,16 +14,16 @@
 |---|---|
 | **Project status** | Early MVP / prototype. **Staging is deployed on Railway** (SQLite on a `/data` Volume). Railway PostgreSQL and the S3-compatible bucket are provisioned but **UNUSED**. No production environment yet. |
 | **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
-| **Active slice** | PostgreSQL migration, Slice 1 of 7 (preparation and local tooling; see the plan under Infrastructure). The app itself is unchanged and still runs on SQLite. |
-| **Next slice** | PostgreSQL migration Slice 2 (foundation: pool, transaction and asset-lock helpers, baseline schema, per-file test database harness), to be built on the temporary `integration/postgresql` branch once it is created |
+| **Active slice** | PostgreSQL migration, Slice 2 of 7 (foundation, on the temporary `integration/postgresql` branch): `src/pg/` pool, `withTransaction`, `lockAsset`, PG baseline schema (= SQLite migrations 1–17) with a parity check, per-file test database harness. New modules only; nothing in the app imports them and it still runs on SQLite. |
+| **Next slice** | PostgreSQL migration Slice 3 (leaf modules), on `integration/postgresql`. Carry-over from Slice 2: lookups that relied on `COLLATE NOCASE` (`assets.tag`, `accounts.login_email`, `employees.work_email`) must compare `lower(col) = lower($1)` in PostgreSQL |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
-| **Tests** | **536 tests** (`npm test`). The 3 time-sensitive hold-expiry tests in `test/partial-fulfillment.test.js` remain a **known flake** (a hold reads back as `expired` depending on when the suite runs; see Technical Debt); all 536 passed on 2026-10-14. |
+| **Tests** | **548 tests** (`npm test` without PostgreSQL: the 4 PostgreSQL suites are skipped with a message) · **569** with the local database up (`npm run db:up`). `npm run test:pg` runs only the 33 PostgreSQL tests and **fails** if PostgreSQL is unavailable. The 3 time-sensitive hold-expiry tests in `test/partial-fulfillment.test.js` remain a **known flake** (a hold reads back as `expired` depending on when the suite runs; see Technical Debt); all passed on 2026-10-14. |
 | **Schema** | **Migration 17** (optional `start_time` / `end_time` and a `request_group` link on `reservations` and `waitlist_entries`). Migrations 1–17 are in `src/migrations.js`. |
 | **Stack** | Node.js ≥ 20.12 · Express 5 · SQLite (`better-sqlite3`) · vanilla-JS front end (no build step) · nodemailer SMTP · local-disk photos · Docker · PWA manifest/service worker |
 | **Production** | None yet. A Railway **staging** service runs from `stage` (SQLite on `/data`). Railway PostgreSQL and object storage are provisioned, **not connected to the app**; no production Railway project or production auth yet (see Priority Future Work) |
 
-**Verify any change with:** `npm test` · `npm run seed:verify` · `node --check public/app.js`
+**Verify any change with:** `npm test` · `npm run seed:verify` · `node --check public/app.js` (PostgreSQL work also: `npm run db:up` then `npm run test:pg`)
 (`npm run seed:dev` rebuilds `./data-dev` — use `seed:verify` while a dev server has that DB open. Both seed commands, and `npm test`, never send real email.)
 
 ---
@@ -69,14 +69,13 @@ Merged into `stage` (PR numbers from the repository history). Detail: [PROJECT_H
 ## Active Work
 
 - [x] **Slice 8.1** — merged into `stage` (#24). Still needs real-device QA (below).
-
-Nothing else is in flight.
+- [ ] **PostgreSQL migration Slice 2 (foundation)** — built on `feature/pg-slice-2-foundation`, for a PR into `integration/postgresql` (never `stage`). Awaiting review. Detail: PROJECT_HISTORY.md.
 
 ---
 
 ## Next
 
-No slice is designated. Candidates are under Priority Future Work. Slice 8.1 follow-ups (past-time checks, edit/extend of reservations) are listed there and under Technical Debt.
+PostgreSQL migration Slice 3 (leaf modules) on `integration/postgresql`, after Slice 2 is reviewed and merged there. Other candidates are under Priority Future Work. Slice 8.1 follow-ups (past-time checks, edit/extend of reservations) are listed there and under Technical Debt.
 
 ---
 
@@ -105,7 +104,7 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 
 ### Infrastructure (PostgreSQL migration in progress, see the plan below)
 - [ ] **Managed PostgreSQL** (Railway): **provisioned, not connected.** Decisions are recorded in D-46. Work: schema conversion, constraints/indexes/FKs, replace `better-sqlite3` access, preserve API behavior, verify migration, **tested backup/restore**. Notes carried from Phase 1: re-express TEXT-timestamp CHECKs on real timestamps (D-46 keeps TEXT timestamps initially), `AUTOINCREMENT` → identity, run migrations 8–9 pre-checks read-only against exported production data before cutover.
-  - **PostgreSQL migration plan** (decisions: D-46; local database: `npm run db:up`, PostgreSQL 18): (1) prep and tooling, **in progress**; (2) foundation: pool, transaction and asset-lock helpers, baseline schema, per-file test database harness; (3) leaf modules; (4) reservations and waitlist with concurrency tests; (5) `server.js` routes incl. sessions; (6) seeds and remaining tests; (7) staging cutover with tested backup/restore.
+  - **PostgreSQL migration plan** (decisions: D-46; local database: `npm run db:up`, PostgreSQL 18): (1) prep and tooling, **done** (#29); (2) foundation: pool, transaction and asset-lock helpers, baseline schema, per-file test database harness, **built on `integration/postgresql`** (`src/pg/`, `test/pg/`); (3) leaf modules; (4) reservations and waitlist with concurrency tests; (5) `server.js` routes incl. sessions; (6) seeds and remaining tests; (7) staging cutover with tested backup/restore.
 - [ ] **Object storage** (*bucket provisioned, not connected*; S3-compatible, private bucket; file naming + access policies; preserve thumbnails and cover photo; test mobile upload and image replacement/removal)
 - [ ] **Production authentication** (provider TBD; Google sign-in + magic-link fallback; pre-provisioned employees only; define the authentication model and admin/employee authorization strategy; secure sessions; replace custom password/reset/invite flows; shared login rate limiting; test admin and standard-user permissions)
 - [ ] **Railway staging** (*foundation begun 2026-10-13:* staging service exists with a Volume mounted at `/data`; first build failed on the Dockerfile `VOLUME` instruction, removed; second build reached `npm ci` and failed compiling `better-sqlite3` because the slim image lacked native build tools, so `python3`/`make`/`g++` are now installed before `npm ci`). **Staging is now deployed successfully** from the `stage` branch; the generated Railway HTTPS domain works (`APP_URL` set); SQLite persistence on the `/data` Volume (accounts + sessions) was verified across a redeploy. `GET /health` merged (#28) and the Railway health-check path is configured and verified. Still open: SMTP/production sending mailbox (see the email item above), custom domain, logs review, restart behavior. PostgreSQL, object storage and production readiness are **not** done and the app still uses SQLite

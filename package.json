@@ -7,6 +7,7 @@
     "start": "node src/server.js",
     "dev": "NODE_ENV=development node --watch src/server.js",
     "test": "node --test test/",
+    "test:pg": "node test-support/pg-probe.js && NC_REQUIRE_PG=1 node --test test/pg/",
     "seed:dev": "node scripts/seed-dev.js",
     "seed:verify": "node scripts/seed-verify.js",
     "db:up": "docker compose -f docker-compose.postgres.yml up -d --wait",
@@ -24,13 +25,11 @@
     "jsbarcode": "^3.12.3",
     "multer": "^2.4.0",
     "nodemailer": "^10.0.10",
+    "pg": "^8.23.1",
     "sharp": "^0.35.4"
   },
   "private": true,
   "engines": {
     "node": ">=20.12"
-  },
-  "devDependencies": {
-    "pg": "^8.23.1"
   }
 }
