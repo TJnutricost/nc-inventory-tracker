@@ -175,6 +175,22 @@ The top-bar subtitle replaces the generic "IT Assets": admin → "IT Admin", any
 
 ---
 
+## Database
+
+### D-46 PostgreSQL everywhere — 2026-10-14 — active (approved; migration in progress, app still on SQLite)
+PostgreSQL is the database for local development, staging and production. There is **no permanent SQLite compatibility layer**; SQLite goes away at cutover. Approved decisions:
+- **Driver:** plain `pg` with a thin helper layer (pool, transaction, per-asset lock). **No ORM.**
+- **Timestamps** stay in their existing TEXT formats initially, so no frontend changes are needed.
+- **Behavior preserved exactly:** ALL reservation, partial-day, overlap-warning, waitlist and handoff behavior (D-27 to D-33, D-45) stays as it is today.
+- **Concurrency:** per-asset row locking. **No blanket database overlap constraints**; any extra constraint is evaluated separately against the product rules first.
+- **Test data** is regenerated from the seeds. Staging gets secure credentials, and seeds are blocked in production.
+- **Backup and restore** must be tested and working before the staging cutover (mandatory).
+- The flaky hold-expiry tests stay separate technical debt, not part of this migration.
+- **Git strategy:** small, safe prep slices merge to `stage`. Conversion work that cannot deploy in pieces goes on a temporary `integration/postgresql` branch, kept synced with `stage` and never merged incomplete.
+- **Host:** Railway PostgreSQL is provisioned (the "PostgreSQL host" open decision is resolved). Local development uses `postgres:18` in Docker (`docker-compose.postgres.yml`), matching the Railway major version.
+
+---
+
 ## Reconciliation notes (2026-10-05)
 
 Recorded while consolidating the tracker; none changes a product decision.

@@ -1,0 +1,30 @@
+# Local development PostgreSQL (preparation for the PostgreSQL migration, see docs/PROJECT_DECISIONS.md D-46).
+# The app still runs on SQLite; nothing in src/ uses this database yet.
+#
+# Start:  npm run db:up      Stop (keep data): npm run db:down      Wipe: npm run db:reset
+#
+# The credentials below (nc_dev / nc_dev, database nc_assets_dev) are DEV-ONLY and public in this repo.
+# They must NEVER be reused anywhere else: not on Railway, not on staging, not in production.
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: nc_dev
+      POSTGRES_PASSWORD: nc_dev
+      POSTGRES_DB: nc_assets_dev
+      TZ: UTC
+      PGTZ: UTC
+    command: ["postgres", "-c", "timezone=UTC", "-c", "log_timezone=UTC"]
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - nc_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nc_dev -d nc_assets_dev"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  nc_pgdata:

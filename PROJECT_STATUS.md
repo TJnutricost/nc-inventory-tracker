@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-13 (Slice 8.1 merged, #24; role-aware shell label D-44 done)
+**Last updated:** 2026-10-14 (PostgreSQL preparation slice: local Docker database + tooling, D-46; `/health` merged, #28)
 
 ---
 
@@ -12,16 +12,16 @@
 
 | | |
 |---|---|
-| **Project status** | Early MVP / prototype. **Not deployed.** |
+| **Project status** | Early MVP / prototype. **Staging is deployed on Railway** (SQLite on a `/data` Volume). Railway PostgreSQL and the S3-compatible bucket are provisioned but **UNUSED**. No production environment yet. |
 | **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
-| **Active slice** | None. Slice 8.1 merged into `stage` (#24); the role-aware shell label (D-44) is the latest small polish. |
+| **Active slice** | PostgreSQL migration, Slice 1 of 7 (preparation and local tooling; see the plan under Infrastructure). The app itself is unchanged and still runs on SQLite. |
 | **Next slice** | None designated (see Priority Future Work) |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
-| **Tests** | **531 tests** (`npm test`). On 2026-10-07, 3 time-sensitive hold tests in `test/partial-fulfillment.test.js` fail on a clean `stage` as well (a hold read back as `expired`); investigate separately. |
+| **Tests** | **536 tests** (`npm test`). The 3 time-sensitive hold-expiry tests in `test/partial-fulfillment.test.js` remain a **known flake** (a hold reads back as `expired` depending on when the suite runs; see Technical Debt); all 536 passed on 2026-10-14. |
 | **Schema** | **Migration 17** (optional `start_time` / `end_time` and a `request_group` link on `reservations` and `waitlist_entries`). Migrations 1–17 are in `src/migrations.js`. |
 | **Stack** | Node.js ≥ 20.12 · Express 5 · SQLite (`better-sqlite3`) · vanilla-JS front end (no build step) · nodemailer SMTP · local-disk photos · Docker · PWA manifest/service worker |
-| **Production** | A Railway **staging** service is deployed (SQLite on a `/data` Volume); no production Railway project, PostgreSQL, object storage or production auth yet (see Priority Future Work) |
+| **Production** | None yet. A Railway **staging** service runs from `stage` (SQLite on `/data`). Railway PostgreSQL and object storage are provisioned, **not connected to the app**; no production Railway project or production auth yet (see Priority Future Work) |
 
 **Verify any change with:** `npm test` · `npm run seed:verify` · `node --check public/app.js`
 (`npm run seed:dev` rebuilds `./data-dev` — use `seed:verify` while a dev server has that DB open. Both seed commands, and `npm test`, never send real email.)
@@ -32,6 +32,7 @@
 
 - [x] `PROJECT_STATUS.md` is the canonical tracker; every meaningful slice updates it before completion (keep reports short here, detail goes to PROJECT_HISTORY.md).
 - [x] Branches: feature/chore/docs branch **from `stage` → PR into `stage`**. Never merge straight to `main`; promotion `stage` → `main` is a separate, deliberate release decision. (No CI or branch protection yet: future engineering work, see Priority Future Work.)
+- [x] **PostgreSQL integration-branch rule (D-46):** small, safe prep slices go `feature/*` → `stage` as usual. Conversion work that cannot deploy in pieces goes on a temporary `integration/postgresql` branch, kept synced with `stage`; incomplete conversion code **never** merges to `stage`, and nothing merges straight to `main`. Any PR to `stage` that touches the database layer (`src/db.js`, `src/migrations.js`, SQL in routes/modules) must be flagged to teammates.
 - [x] Roles: ChatGPT plans/reviews; **Claude Code is the default implementer** (inspection, code, tests, migrations, tracker updates); Codex is a secondary implementer/reviewer.
 - [x] One focused slice at a time, with scope, acceptance criteria, automated verification, manual verification and a final report. Do not combine unrelated features.
 - [x] Dummy/non-sensitive data until verified (seed users use `example.com`). No production infrastructure or data changes without explicit approval.
@@ -102,11 +103,12 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 - [ ] Catalog drag-to-reorder (alphabetical today)
 - [ ] Search extras: fuzzy/typo tolerance and ranking, match highlighting, keywords on individual assets, `seed:dev` default keywords
 
-### Infrastructure (no work started; none needed for Slice 8.1)
-- [ ] **Managed PostgreSQL** (Railway preferred, built provider-neutrally): schema conversion, constraints/indexes/FKs, replace `better-sqlite3` access, preserve API behavior, run host advisors, verify migration, **tested backup/restore**. Notes carried from Phase 1: re-express TEXT-timestamp CHECKs on real timestamps, `AUTOINCREMENT` → identity, optional transition triggers, run migrations 8–9 pre-checks read-only against exported production data before cutover.
-- [ ] **Object storage** (S3-compatible, private bucket; file naming + access policies; preserve thumbnails and cover photo; test mobile upload and image replacement/removal)
+### Infrastructure (PostgreSQL migration in progress, see the plan below)
+- [ ] **Managed PostgreSQL** (Railway): **provisioned, not connected.** Decisions are recorded in D-46. Work: schema conversion, constraints/indexes/FKs, replace `better-sqlite3` access, preserve API behavior, verify migration, **tested backup/restore**. Notes carried from Phase 1: re-express TEXT-timestamp CHECKs on real timestamps (D-46 keeps TEXT timestamps initially), `AUTOINCREMENT` → identity, run migrations 8–9 pre-checks read-only against exported production data before cutover.
+  - **PostgreSQL migration plan** (decisions: D-46; local database: `npm run db:up`, PostgreSQL 18): (1) prep and tooling, **in progress**; (2) foundation: pool, transaction and asset-lock helpers, baseline schema, per-file test database harness; (3) leaf modules; (4) reservations and waitlist with concurrency tests; (5) `server.js` routes incl. sessions; (6) seeds and remaining tests; (7) staging cutover with tested backup/restore.
+- [ ] **Object storage** (*bucket provisioned, not connected*; S3-compatible, private bucket; file naming + access policies; preserve thumbnails and cover photo; test mobile upload and image replacement/removal)
 - [ ] **Production authentication** (provider TBD; Google sign-in + magic-link fallback; pre-provisioned employees only; define the authentication model and admin/employee authorization strategy; secure sessions; replace custom password/reset/invite flows; shared login rate limiting; test admin and standard-user permissions)
-- [ ] **Railway staging** (*foundation begun 2026-10-13:* staging service exists with a Volume mounted at `/data`; first build failed on the Dockerfile `VOLUME` instruction, removed; second build reached `npm ci` and failed compiling `better-sqlite3` because the slim image lacked native build tools, so `python3`/`make`/`g++` are now installed before `npm ci`). **Staging is now deployed successfully** from the `stage` branch; the generated Railway HTTPS domain works (`APP_URL` set); SQLite persistence on the `/data` Volume (accounts + sessions) was verified across a redeploy. `GET /health` is being added for the Railway health check (Railway-side health-check path still to be configured). Still open: SMTP/production sending mailbox (see the email item above), custom domain, logs review, restart behavior. PostgreSQL, object storage and production readiness are **not** done and the app still uses SQLite
+- [ ] **Railway staging** (*foundation begun 2026-10-13:* staging service exists with a Volume mounted at `/data`; first build failed on the Dockerfile `VOLUME` instruction, removed; second build reached `npm ci` and failed compiling `better-sqlite3` because the slim image lacked native build tools, so `python3`/`make`/`g++` are now installed before `npm ci`). **Staging is now deployed successfully** from the `stage` branch; the generated Railway HTTPS domain works (`APP_URL` set); SQLite persistence on the `/data` Volume (accounts + sessions) was verified across a redeploy. `GET /health` merged (#28) and the Railway health-check path is configured and verified. Still open: SMTP/production sending mailbox (see the email item above), custom domain, logs review, restart behavior. PostgreSQL, object storage and production readiness are **not** done and the app still uses SQLite
 - [ ] **Production readiness**: security review, DB + storage backup strategy, restore procedure, error monitoring, audit logging, production admin accounts, real inventory import plan, final staging acceptance test, deployment, initial import
 - [ ] **CI** (none configured; no branch protection): automated build + test verification. Future engineering work to address **before production/release maturity**; it is *not* a blocker for Slice 8.1 or day-to-day development.
 
@@ -214,7 +216,8 @@ Short and authoritative. The reasoning is in [PROJECT_DECISIONS.md](docs/PROJECT
 
 ## Open Decisions
 
-- [ ] Managed-PostgreSQL host / project naming (Railway preferred) · object-storage provider · **authentication provider (TBD)**
+- [x] ~~Managed-PostgreSQL host~~ — resolved 2026-10-14: Railway PostgreSQL is provisioned (D-46)
+- [ ] Object-storage provider · **authentication provider (TBD)**
 - [ ] Production sending mailbox (shared IT mailbox vs individual identities) — to be settled together with the Google Workspace OAuth work
 - [ ] Production domain: parent domain, admin subdomain and employee subdomain (all TBD)
 - [ ] Production asset-tag prefix/format (avoid digits in the prefix)
