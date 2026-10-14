@@ -130,6 +130,21 @@ If the app should only be reachable inside the office network or VPN, host it in
 
 ---
 
+## Local PostgreSQL (preparation)
+
+**The app still runs on SQLite.** Nothing in `src/` uses PostgreSQL yet; this is only the local tooling for the planned migration (decision D-46). It needs Docker, and `npm install` (the `pg` driver is a dev dependency).
+
+```bash
+npm run db:up      # start PostgreSQL 18 on 127.0.0.1:5433 and wait until it is healthy
+npm run db:check   # print server version and time zone, then "connected" (local hosts only)
+npm run db:down    # stop it, keep the data
+npm run db:reset   # stop it and delete the data volume (local only)
+```
+
+The dev credentials (`nc_dev` / `nc_dev`, database `nc_assets_dev`) are in `docker-compose.postgres.yml` and must never be reused anywhere else. `db:check` refuses any host other than localhost, so a Railway URL can never be used by accident.
+
+---
+
 ## Planned production direction (not yet built)
 
 The setup above (Docker or plain Node, with local SQLite) is what actually works today. The intended longer-term production direction is:

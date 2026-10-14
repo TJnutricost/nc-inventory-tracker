@@ -32,6 +32,8 @@ This is the archive of everything that used to live in the single, very long `PR
 | Search + discoverability | #22 | 16 | 447 |
 | Slice 8.1 Optional reservation times | #24 | 17 | 530 |
 | Role-aware shell label (D-44) | — | — | 531 |
+| `/health` liveness endpoint for Railway | #28 | — | 532 |
+| PostgreSQL preparation: local Docker database, `db:*` scripts, D-46 (Slice 1 of the migration; no runtime change) | — | — | 536 |
 
 ## 1. Project Overview (original, 2026-09-28)
 
