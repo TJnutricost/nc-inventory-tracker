@@ -1,14 +1,14 @@
 # PostgreSQL migration — Slice 4 overview (4A / 4B / 4C)
 
-**Decision:** D-46, D-47. **Status:** APPROVED (owner, 2026-10-14). **4A done** (merged, #32, `66c562c`) · **4B built** (awaiting review) · 4C next.
+**Decision:** D-46, D-47. **Status:** APPROVED (owner, 2026-10-14). **4A done** (merged, #32, `66c562c`) · **4B done** (merged, #33, `1a50069`) · **4C in progress** (`docs/briefs/postgresql-slice-4c-waitlist-actions.md`).
 
 Availability + reservations + waitlist is ~970 lines of SQLite code with the hardest concurrency, so Slice 4 is delivered as three independently testable PRs, each from the latest `integration/postgresql`, each targeting `integration/postgresql`:
 
 | Slice | Scope | Risk | Route | State |
 |---|---|---|---|---|
 | **4A** | `src/pg/availability.js`; READ side of reservations and waitlist (`findBlockers`, `plan`, `hasOwnOverlap`, `hasOwnHold`, `classify`, `rangeCheck`, `list`, `get`, `present`, `counts`); time-offset helper; differential tests | Low: no locks, no email, no writes | opus/medium | done (#32) |
-| **4B** | Reservation writes (`create`, `approve`, `decline`, `cancel`, `shorten`, `insertReservation`, `note`), the queue engine (`evaluateAsset`, `insertPiece`, `close`), `insertEntry`/`announceJoined`, the after-commit effects mechanism with an injected notifier, the asset-lock guard, concurrency + lock-order tests | High | opus/high | built |
-| 4C | Waitlist actions (`join`, `updateDates`, `confirmHold`, `declineHold`, `leave`), `processDue`/`sweep` as per-asset transactions, hold-email dispatch, email-safety tests, remaining concurrency tests | Medium | planned after 4B | next |
+| **4B** | Reservation writes (`create`, `approve`, `decline`, `cancel`, `shorten`, `insertReservation`, `note`), the queue engine (`evaluateAsset`, `insertPiece`, `close`), `insertEntry`/`announceJoined`, the after-commit effects mechanism with an injected notifier, the asset-lock guard, concurrency + lock-order tests | High | opus/high | done (#33) |
+| 4C | Waitlist actions (`join`, `updateDates`, `confirmHold`, `declineHold`, `leave`), `processDue`/`sweep` as per-asset transactions, hold-email dispatch, email-safety tests, remaining concurrency tests | Medium | opus/high | in progress |
 
 ## The acceptance oracle for every race test (4B and 4C)
 Concurrency tests verify the behavior SQLite produces when it **serializes** the same operations, never a stricter or looser rule someone assumed. For each orchestrated race of 2–4 operations on one asset, the same operations run through the SQLite modules on a fresh reference with the same fixture **in every serial order**; the PostgreSQL concurrent run's per-operation outcomes and final rows (masked: stamps, request_group UUIDs, module-written ids, queue_seq as a rank) must **equal one of those serial outcomes**. SQLite permits several overlaps (pending ordinary reservations, waiting entries, lapsed holds, checkouts that became overdue, "expected back" time, the 1:00 PM / 1:00 PM adjacency, a hold owner confirming over time recorded meanwhile); a test that conflicts with SQLite's actual behavior is reported with the evidence, never "fixed" in the module.
