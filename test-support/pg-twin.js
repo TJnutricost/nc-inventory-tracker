@@ -44,7 +44,11 @@ async function createTwin(pool, { firstId = 100000 } = {}) {
     // One row into both engines (same id, same values). Returns the PostgreSQL row; the SQLite row is checked to be equal.
     async insert(table, cols) {
       const cs = await columnsOf(table);
-      const row = { id: ++id, ...cols };
+      // never reuse an id a module write already took on either engine (Slice 4B: modules write rows between fixtures)
+      const pgMax = Number((await pool.query(`SELECT COALESCE(MAX(id), 0) AS m FROM ${table}`)).rows[0].m);
+      const sqMax = sqlite.prepare(`SELECT COALESCE(MAX(rowid), 0) AS m FROM ${table}`).get().m;
+      id = Math.max(id + 1, pgMax + 1, sqMax + 1);
+      const row = { id, ...cols };
       for (const c of STAMPED) if (cs.has(c) && row[c] === undefined) row[c] = FIXED;
       const pgRow = await fx.insertRow(pool, table, row);
       const sqRow = await fx.insertRow(sq, table, row);
@@ -74,6 +78,11 @@ async function createTwin(pool, { firstId = 100000 } = {}) {
     },
     // The database clock + seconds, as stored text (read once from PostgreSQL and written identically to both engines).
     stamp: (seconds) => pgTime.nowPlus(pool, seconds),
+    // Slice 4B: fixtures carry explicit ids, which do not advance PostgreSQL's identity sequences. Before a module writes
+    // rows, set every touched sequence so the next id is MAX(id) + 1, which is also what SQLite hands out: the two engines then
+    // give module-written rows the same ids as long as both write the same rows in the same order. Call it again before
+    // each write scenario (a PostgreSQL rollback consumes sequence values, a SQLite one does not).
+    syncSequences: () => syncSequences(pool, sqlite),
     // Both catalog caches must forget the tree after fixtures add nodes.
     invalidateCatalogs() { require('../src/catalog').invalidate(); require('../src/pg/catalog').invalidate(); },
     // Runs the PostgreSQL and the SQLite version and requires identical outcomes (values or {status, message} errors). Reads only,
@@ -93,4 +102,24 @@ async function createTwin(pool, { firstId = 100000 } = {}) {
   return tw;
 }
 
-module.exports = { createTwin, outcome, FIXED };
+// Next id = one past the highest id either engine has used: PostgreSQL's MAX(id) and, for SQLite, MAX(rowid) or the
+// AUTOINCREMENT high-water mark in sqlite_sequence. Both engines are then set to hand out exactly that id next. Without a
+// SQLite database, PostgreSQL alone is set to MAX(id) + 1 (fixtures with explicit ids, then module writes).
+const SEQUENCED = ['employees', 'accounts', 'assets', 'catalog_nodes', 'assignments', 'reservations', 'waitlist_entries', 'activity'];
+async function syncSequences(pool, sqlite = null, tables = SEQUENCED) {
+  for (const t of tables) {
+    const pgMax = Number((await pool.query(`SELECT COALESCE(MAX(id), 0) AS m FROM ${t}`)).rows[0].m);
+    let next = pgMax + 1;
+    if (sqlite) {
+      const sqMax = sqlite.prepare(`SELECT COALESCE(MAX(rowid), 0) AS m FROM ${t}`).get().m;
+      const seq = sqlite.prepare('SELECT seq FROM sqlite_sequence WHERE name = ?').get(t);
+      next = Math.max(next, sqMax + 1, seq ? seq.seq + 1 : 0);
+      // (a plain rowid table cannot be raised; that only happens when a test wrote PostgreSQL-only rows, and a differential
+      // comparison would then fail loudly on the ids it compares)
+      if (seq) sqlite.prepare('UPDATE sqlite_sequence SET seq = ? WHERE name = ?').run(next - 1, t);
+    }
+    await pool.query(`SELECT setval(pg_get_serial_sequence('${t}', 'id'), $1, false)`, [next]);
+  }
+}
+
+module.exports = { createTwin, outcome, syncSequences, FIXED };

@@ -1,7 +1,8 @@
 // D-46 / D-47 (Slice 4A): src/pg/* must never load SQLite. src/reservations.js and src/waitlist.js require their mailer lazily,
 // and the mailer requires src/db.js, which opens SQLite and creates the data directory on load; the PG modules import only the
 // pure exports of those files. This loads every src/pg/*.js module in a FRESH child process (a clean require.cache) and checks
-// that src/db.js, src/mailer.js and better-sqlite3 were never loaded and that no data directory was created.
+// that src/db.js, src/mailer.js and better-sqlite3 were never loaded and that no data directory was created. Slice 4B: this
+// covers the reservation/waitlist write paths and src/pg/effects.js (notifications are injected, never imported).
 // Needs no database, so it runs under plain `npm test` too.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,7 +22,7 @@ test('every src/pg module loads without SQLite, the mailer or a data directory',
     });
     assert.equal(res.status, 0, res.stderr);
     const { loaded, cache } = JSON.parse(res.stdout);
-    for (const m of ['availability.js', 'reservations.js', 'waitlist.js', 'time.js', 'catalog.js', 'assignments.js', 'requests.js', 'settings.js']) {
+    for (const m of ['availability.js', 'reservations.js', 'waitlist.js', 'effects.js', 'transaction.js', 'time.js', 'catalog.js', 'assignments.js', 'requests.js', 'settings.js']) {
       assert.ok(loaded.includes(m), `src/pg/${m} was loaded`);
     }
     const rel = cache.map((k) => path.relative(ROOT, k).split(path.sep).join('/'));
@@ -35,4 +36,10 @@ test('every src/pg module loads without SQLite, the mailer or a data directory',
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }
+});
+
+test('src/pg/effects.js imports nothing but the transaction helpers (no mailer, no SQLite)', () => {
+  const src = fs.readFileSync(path.join(ROOT, 'src', 'pg', 'effects.js'), 'utf8');
+  const required = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
+  assert.deepEqual(required, ['./transaction']);
 });
