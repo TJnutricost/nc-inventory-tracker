@@ -1344,6 +1344,10 @@ Brief: `docs/briefs/postgresql-slice-4c-waitlist-actions.md` (decisions D4C-1 to
   - `deferUntil` was added to `effects.js` (additive; not in the brief's list); see above.
 - **For Slice 5:** carry-overs (i)–(n) in PROJECT_STATUS.md: notifier mapping, single-flight sweep timer, `lock_timeout` / pool sizing, routes call the request paths with the pool, check-in locks then evaluates, the shared pure helpers move into `src/pg/`.
 
+#### PostgreSQL migration Slice 5A — Runtime services (2026-10-14, `feature/pg-slice-5a-runtime-services` → `integration/postgresql`)
+
+Brief: `docs/briefs/postgresql-slice-5a-runtime-services.md`; overview: `docs/briefs/postgresql-slice-5-overview.md`; decision D-48 (and a D-46 note on PR #34). In progress; details are added when the slice is built.
+
 ## Appendix A — Archived roadmap checklists (sections 12–17)
 
 *Original 2026-09-28 / 2026-10-02 infrastructure checklists, kept verbatim. The still-open items are condensed into the "Priority Future Work" and "QA / Verification Outstanding" checklists of [PROJECT_STATUS.md](../PROJECT_STATUS.md).*
