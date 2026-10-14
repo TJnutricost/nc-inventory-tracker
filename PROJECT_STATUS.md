@@ -15,7 +15,7 @@
 | **Project status** | Early MVP / prototype. **Staging is deployed on Railway** (SQLite on a `/data` Volume). Railway PostgreSQL and the S3-compatible bucket are provisioned but **UNUSED**. No production environment yet. |
 | **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
 | **Active slice** | PostgreSQL migration, Slice 1 of 7 (preparation and local tooling; see the plan under Infrastructure). The app itself is unchanged and still runs on SQLite. |
-| **Next slice** | None designated (see Priority Future Work) |
+| **Next slice** | PostgreSQL migration Slice 2 (foundation: pool, transaction and asset-lock helpers, baseline schema, per-file test database harness), to be built on the temporary `integration/postgresql` branch once it is created |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
 | **Tests** | **536 tests** (`npm test`). The 3 time-sensitive hold-expiry tests in `test/partial-fulfillment.test.js` remain a **known flake** (a hold reads back as `expired` depending on when the suite runs; see Technical Debt); all 536 passed on 2026-10-14. |
