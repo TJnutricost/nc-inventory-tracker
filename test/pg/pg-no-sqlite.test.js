@@ -1,0 +1,38 @@
+// D-46 / D-47 (Slice 4A): src/pg/* must never load SQLite. src/reservations.js and src/waitlist.js require their mailer lazily,
+// and the mailer requires src/db.js, which opens SQLite and creates the data directory on load; the PG modules import only the
+// pure exports of those files. This loads every src/pg/*.js module in a FRESH child process (a clean require.cache) and checks
+// that src/db.js, src/mailer.js and better-sqlite3 were never loaded and that no data directory was created.
+// Needs no database, so it runs under plain `npm test` too.
+const { test } = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { spawnSync } = require('child_process');
+
+const ROOT = path.join(__dirname, '..', '..');
+
+test('every src/pg module loads without SQLite, the mailer or a data directory', () => {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-pg-load-'));
+  const dataDir = path.join(scratch, 'data-must-not-exist');
+  try {
+    const res = spawnSync(process.execPath, [path.join(ROOT, 'test-support', 'pg-load-probe.js')], {
+      cwd: scratch, encoding: 'utf8', timeout: 30_000, env: { ...process.env, DATA_DIR: dataDir },
+    });
+    assert.equal(res.status, 0, res.stderr);
+    const { loaded, cache } = JSON.parse(res.stdout);
+    for (const m of ['availability.js', 'reservations.js', 'waitlist.js', 'time.js', 'catalog.js', 'assignments.js', 'requests.js', 'settings.js']) {
+      assert.ok(loaded.includes(m), `src/pg/${m} was loaded`);
+    }
+    const rel = cache.map((k) => path.relative(ROOT, k).split(path.sep).join('/'));
+    assert.ok(!rel.includes('src/db.js'), 'src/db.js is not loaded');
+    assert.ok(!rel.includes('src/mailer.js'), 'src/mailer.js is not loaded');
+    assert.ok(!rel.some((k) => k.includes('node_modules/better-sqlite3/')), 'better-sqlite3 is not loaded');
+    assert.ok(!rel.some((k) => k.includes('node_modules/nodemailer/')), 'no mail transport is loaded');
+    assert.ok(rel.includes('src/reservations.js') && rel.includes('src/waitlist.js'), 'the pure SQLite-side exports were loaded (the probe really ran)');
+    assert.equal(fs.existsSync(dataDir), false, 'no data directory was created');
+    assert.equal(fs.existsSync(path.join(scratch, 'data')), false);
+  } finally {
+    fs.rmSync(scratch, { recursive: true, force: true });
+  }
+});
