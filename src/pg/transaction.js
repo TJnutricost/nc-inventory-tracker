@@ -23,11 +23,18 @@
 //        ascending id order (and that code must document it); never lock a second asset after touching dependent rows.
 //     3. Rows that are not under an asset (employees, accounts, settings, the tag counter) are not covered by this rule;
 //        a transaction that needs them AND an asset takes the asset lock first.
+//
+// onTransactionEnd(client, fn)   (Slice 3)
+//   Registers fn({ committed }) to run once the transaction on `client` has ended (after COMMIT or ROLLBACK, before the
+//   client is released). Used by caches that must not trust state a transaction wrote until it is committed (or know it
+//   never will be): src/pg/catalog.js invalidates its tree cache here. Registering the same fn twice runs it once; an
+//   error thrown by fn is ignored (it must never turn a committed transaction into a failure).
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { getPool } = require('./pool');
 
 const activeTransaction = new AsyncLocalStorage();
 const clientsInTransaction = new WeakSet();
+const endCallbacks = new WeakMap();
 
 async function withTransaction(fn, pool = getPool()) {
   if (typeof fn !== 'function') throw new TypeError('withTransaction(fn): fn must be a function');
@@ -40,11 +47,13 @@ async function withTransaction(fn, pool = getPool()) {
   // its own transaction later is not mistaken for nesting just because it inherited this async context.
   const scope = { open: true };
   let destroy = null;
+  let committed = false;
   try {
     await client.query('BEGIN');
     clientsInTransaction.add(client);
     const result = await activeTransaction.run(scope, () => fn(client));
     await client.query('COMMIT');
+    committed = true;
     return result;
   } catch (err) {
     try {
@@ -56,12 +65,26 @@ async function withTransaction(fn, pool = getPool()) {
   } finally {
     scope.open = false;
     clientsInTransaction.delete(client);
+    const callbacks = endCallbacks.get(client) || [];
+    endCallbacks.delete(client);
+    for (const cb of callbacks) {
+      try { cb({ committed }); } catch { /* see onTransactionEnd */ }
+    }
     client.release(destroy || undefined);
   }
 }
 
 function isInTransaction(client) {
   return clientsInTransaction.has(client);
+}
+
+function onTransactionEnd(client, fn) {
+  if (!client || !isInTransaction(client)) {
+    throw new Error('onTransactionEnd() must be called inside withTransaction(), with that transaction\'s client.');
+  }
+  let list = endCallbacks.get(client);
+  if (!list) endCallbacks.set(client, (list = []));
+  if (!list.includes(fn)) list.push(fn);
 }
 
 async function lockAsset(client, assetId) {
@@ -75,4 +98,4 @@ async function lockAsset(client, assetId) {
   return rows[0];
 }
 
-module.exports = { withTransaction, lockAsset, isInTransaction };
+module.exports = { withTransaction, lockAsset, isInTransaction, onTransactionEnd };

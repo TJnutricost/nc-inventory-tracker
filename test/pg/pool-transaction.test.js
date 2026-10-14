@@ -4,7 +4,7 @@ const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { pgSuite, createTestDatabase } = require('../../test-support/pg-harness');
-const { withTransaction, lockAsset } = require('../../src/pg/transaction');
+const { withTransaction, lockAsset, onTransactionEnd } = require('../../src/pg/transaction');
 
 async function waitFor(check, what, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -92,6 +92,27 @@ describe('PostgreSQL pool, transactions and per-asset locks', pgSuite(), () => {
     }, pool), /cannot be nested/);
     assert.equal(await settingValue(pool, 'tx_nested_outer'), undefined);
     assert.equal(await settingValue(pool, 'tx_nested_inner'), undefined);
+  });
+
+  test('onTransactionEnd runs after COMMIT or ROLLBACK (once per fn, errors ignored) and only inside a transaction', async () => {
+    const seen = [];
+    const record = (info) => seen.push(info.committed);
+    const visibleAtCallback = [];
+    await withTransaction(async (c) => {
+      await c.query("INSERT INTO settings (key, value) VALUES ('tx_end_commit', 'x')");
+      onTransactionEnd(c, record);
+      onTransactionEnd(c, record);
+      onTransactionEnd(c, () => { throw new Error('ignored'); });
+      onTransactionEnd(c, () => { visibleAtCallback.push(settingValue(pool, 'tx_end_commit')); });
+      assert.deepEqual(seen, [], 'nothing runs before the transaction ends');
+    }, pool);
+    assert.deepEqual(seen, [true]);
+    assert.equal(await visibleAtCallback[0], 'x', 'the commit is visible to other connections when the callback runs');
+    await assert.rejects(withTransaction(async (c) => { onTransactionEnd(c, record); throw new Error('nope'); }, pool), /nope/);
+    assert.deepEqual(seen, [true, false]);
+    await withTransaction(async () => {}, pool);
+    assert.deepEqual(seen, [true, false], 'callbacks belong to one transaction only');
+    assert.throws(() => onTransactionEnd(pool, record), /inside withTransaction/);
   });
 
   test('lockAsset returns the row; a missing asset throws a 404 ASSET_NOT_FOUND error', async () => {
