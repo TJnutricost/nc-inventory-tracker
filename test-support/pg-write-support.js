@@ -1,6 +1,6 @@
-// Support for the Slice 4B write tests (D-46, D-47): the SQLite-writer environment, masks and state dumps for comparing the
+// Support for the Slice 4B / 4C write tests (D-46, D-47): the SQLite-writer environment, masks and state dumps for comparing the
 // two engines, a fixture recorder that replays the same rows into fresh SQLite references, the serial-order oracle for race
-// tests, lock orchestration and a query spy. Only for tests.
+// tests, lock orchestration, a query spy and (4C) the recording notifier the Slice 5 wiring will mirror. Only for tests.
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -210,17 +210,27 @@ async function race(pool, sampler, assetId, fns) {
   return Promise.all(runs);
 }
 
-// ---- query spy: a pool whose clients record every statement's SQL text (in order) while checked out.
+// ---- query spy: a pool whose clients record every statement's SQL text (in order) while checked out. (Slice 4C: `calls` keeps
+// { sql, params, client } per statement as well; client is a per-checkout number, 0 for statements run on the pool itself.)
 function spyPool(pool) {
   const log = [];
+  const calls = [];
+  let checkouts = 0;
   return {
     log,
+    calls,
     pool: {
       async connect() {
         const client = await pool.connect();
+        const n = ++checkouts;
         const own = Object.prototype.hasOwnProperty.call(client, 'query');
         const original = client.query;
-        client.query = function spied(text, ...rest) { log.push(typeof text === 'string' ? text : text && text.text); return original.call(this, text, ...rest); };
+        client.query = function spied(text, ...rest) {
+          const sql = typeof text === 'string' ? text : text && text.text;
+          log.push(sql);
+          calls.push({ sql, params: Array.isArray(rest[0]) ? rest[0] : (text && text.values) || [], client: n });
+          return original.call(this, text, ...rest);
+        };
         const release = client.release;
         client.release = function released(...args) {
           if (own) client.query = original; else delete client.query;
@@ -229,13 +239,38 @@ function spyPool(pool) {
         };
         return client;
       },
-      query: (...args) => pool.query(...args),
+      // (Slice 4C) statements run on the pool itself, outside any checked-out client: the unlocked id -> asset lookups and scans
+      query: (text, ...rest) => {
+        const sql = typeof text === 'string' ? text : text && text.text;
+        log.push(sql);
+        calls.push({ sql, params: Array.isArray(rest[0]) ? rest[0] : [], client: 0 });
+        return pool.query(text, ...rest);
+      },
     },
   };
+}
+
+// ---- (Slice 4C) the notifier Slice 5 will install, with a recorder in place of the PG mailer: holds_owed -> dispatchHoldEmails(pool),
+// hold_email -> recorded (and `onHoldEmail(entry)` awaited, e.g. a gate or a failure); every effect is kept in `seen`.
+function installHoldMailNotifier(pool, { onHoldEmail = null, onEffect = null } = {}) {
+  const effects = require('../src/pg/effects');
+  const waitlist = require('../src/pg/waitlist');
+  const rec = { seen: [], holdEmails: [] };
+  effects.setNotifier(async (e) => {
+    rec.seen.push(e);
+    if (onEffect) await onEffect(e);
+    if (e.type === 'holds_owed') await waitlist.dispatchHoldEmails(pool);
+    else if (e.type === 'hold_email') {
+      rec.holdEmails.push(e.entry);
+      if (onHoldEmail) await onHoldEmail(e.entry);
+    }
+  });
+  rec.uninstall = () => effects.setNotifier(null);
+  return rec;
 }
 const oneLine = (sql) => String(sql).replace(/\s+/g, ' ').trim();
 
 module.exports = {
   prepareSqliteMail, STAMP_RE, mask, maskDetails, groupNamer, dumpAsset, createFixture, permutations, serialOracle, maskedRun, assertMatchesSerial,
-  waitFor, blockAsset, lockWaiters, race, spyPool, oneLine, outcome,
+  waitFor, blockAsset, lockWaiters, race, spyPool, oneLine, outcome, installHoldMailNotifier,
 };

@@ -4,8 +4,9 @@
 // or a transaction client) where the SQLite version takes `db`.
 //
 // Reads (Slice 4A): classify, rangeCheck, list, get, present, counts. Queue engine + entry helpers (Slice 4B): evaluateAsset
-// (+ private freeParts, insertPiece, close), insertEntry, announceJoined. Slice 4C adds the actions (join, updateDates,
-// confirmHold, declineHold, leave) and processDue / sweep / dispatchHoldEmails. src/pg/* never imports a mailer (D-47).
+// (+ private freeParts, insertPiece, close), insertEntry, announceJoined. Actions (Slice 4C): join, updateDates, confirmHold,
+// declineHold, leave (+ private recordLapses, the lapse step split out of evaluateAsset), processDue, sweep and the claim-based
+// dispatchHoldEmails (rules: the comment block before join()). src/pg/* never imports a mailer (D-47).
 //
 // Queue engine rules (Slice 4B), ported statement for statement from src/waitlist.js evaluateAsset:
 //   - evaluateAsset, insertEntry, insertPiece and close need the asset lock on the transaction client (assertAssetLock, code
@@ -20,7 +21,7 @@
 //     (T.nowKey, APP_TIMEZONE, new Date().getUTCSeconds() in offerSeconds) for response tiers and interval ends. The
 //     "available until" activity text is read with its own time.nowPlus(), exactly as SQLite runs a separate query.
 //   - When at least one hold is granted, a `holds_owed` effect is registered (after the writes): only a TRIGGER for the
-//     claim-based, at-most-once hold-email dispatch of Slice 4C, which is unchanged. It fires after COMMIT, never on rollback.
+//     claim-based, at-most-once hold-email dispatch (dispatchHoldEmails, Slice 4C). It fires after COMMIT, never on rollback.
 //   - announceJoined registers one `waitlist_joined` effect per distinct blocking reserver (SQLite emailed them after commit).
 //
 // Pure helpers come from src/reservations.js / src/timeRange.js (see src/pg/reservations.js). responseMinutes /
@@ -41,12 +42,13 @@
 // Consistency: multi-statement reads in READ COMMITTED, not one snapshot. classify()/rangeCheck() are advisory (the date
 // sheet); Slices 4B/4C call classify() with their TRANSACTION CLIENT after taking the asset lock (lockAsset, Slice 2), so the
 // decision is re-made under the lock. No transaction is opened here.
+const crypto = require('crypto');
 const base = require('../waitlist');
 const T = require('../timeRange');
 const reservations = require('./reservations');
 const time = require('./time');
-const { assertAssetLock } = require('./transaction');
-const { registerEffect } = require('./effects');
+const { withTransaction, lockAsset, isInTransaction, assertAssetLock } = require('./transaction');
+const { registerEffect, emit, hasNotifier, deferUntil } = require('./effects');
 
 const { RESPONSE_MINUTES, responseMinutes, offerSeconds } = base;
 const { httpError, whyBlocked, validateRange, rangeOf, reserveEligibility, todayOf, loadAsset, toId, note, when } = reservations;
@@ -87,22 +89,31 @@ async function insertPiece(c, e, piece, held, seconds) {
     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, ${held ? `${NOW}, ${NOW_PLUS('$13')}` : 'NULL, NULL'}) RETURNING id`, params)).rows[0].id;
 }
 
-// Record lapsed holds / past ranges, then offer free time to waiting entries oldest-first (see src/waitlist.js). Needs the
-// asset lock on the transaction client. Returns the ids of the entries / pieces that were granted a hold.
-async function evaluateAsset(c, assetId) {
+// The lapse-recording step of evaluateAsset (split out in Slice 4C, statements unchanged): lapsed holds and past ranges, then
+// open entries whose whole interval has ended, are closed as `expired` with the same activity rows. Returns the JS clock key
+// the interval check used (evaluateAsset offers with that same key, as SQLite did). Needs the asset lock.
+async function recordLapses(c, assetId, today) {
   assertAssetLock(c, assetId);
-  const today = await todayOf(c);
   const lapsed = (await c.query(`SELECT * FROM waitlist_entries WHERE asset_id = $1 AND ((status = 'held' AND hold_expires_at <= ${NOW}) OR (status IN ('waiting','held') AND start_date < $2)) ORDER BY id`,
     [assetId, today])).rows;
   for (const e of lapsed) {
     if (await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)}${e.status === 'held' ? ' · hold ran out' : ' · dates passed'}`, e.employee_id);
   }
-  const granted = [];
   const nowKey = T.nowKey();
   // an open entry whose whole interval has now ended (a same-day time that has passed) can never be offered again
   for (const e of (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status IN ('waiting','held') ORDER BY id", [assetId])).rows) {
     if (T.endKey(e.end_date, e.end_time) <= nowKey && await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)} · the time has passed`, e.employee_id);
   }
+  return nowKey;
+}
+
+// Record lapsed holds / past ranges, then offer free time to waiting entries oldest-first (see src/waitlist.js). Needs the
+// asset lock on the transaction client. Returns the ids of the entries / pieces that were granted a hold.
+async function evaluateAsset(c, assetId) {
+  assertAssetLock(c, assetId);
+  const today = await todayOf(c);
+  const nowKey = await recordLapses(c, assetId, today);
+  const granted = [];
   const waiting = (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status = 'waiting' ORDER BY queue_seq, id", [assetId])).rows;
   for (const e of waiting) {
     const p = await freeParts(c, e, today);
@@ -180,6 +191,254 @@ async function rangeCheck(q, args) {
   return { outcome: c.outcome, message: c.message, requires_approval: c.requires_approval, reserved: c.free, waitlisted: c.busy };
 }
 
+// ---- the waitlist actions, the sweep and the hold email (Slice 4C)
+// Request paths (join, updateDates, confirmHold, declineHold, leave), with the pool:
+//   1. learn the asset: join has it (an id that is not a valid integer is SQLite's classify refusal, 404 "Asset not found");
+//      the others do ONE unlocked `SELECT asset_id FROM waitlist_entries WHERE id = $1` (none -> 404, as SQLite answered after
+//      its processDue). An entry never changes asset.
+//   2. the due step: THAT asset only (D-47 point 2), in its own committed transaction (lockAsset -> evaluateAsset -> COMMIT),
+//      so a refused request still leaves the queue moved, and a hold it grants triggers its email (holds_owed). That trigger
+//      is held back until the request's main transaction has ended (effects.deferUntil), as SQLite dispatched at the end of
+//      the request: a hold the request itself then confirms or leaves is never emailed, and a refused request still emails.
+//   3. the main transaction: lockAsset first; then the lapse step (recordLapses: the clock moved since step 2, SQLite had no
+//      such gap; a hold that ran out in between is recorded `expired` and answered with SQLite's own message, never confirmed,
+//      decision D4C-1); then the entry is read under the lock and SQLite's checks run in SQLite's order, then the writes. If the
+//      main transaction throws, its lapse record rolls back with it: the hold still counts for nothing (blockers compare
+//      hold_expires_at) and the next due step or sweep records it.
+// Joined to a caller's transaction (given its client; a pool from inside a transaction is refused as nesting): the due step
+// cannot be its own commit, so it runs first on the caller's client, after lockAsset, as the full evaluateAsset (which begins
+// with the lapse step) - what SQLite's processDue + transaction did back to back. Everything then commits or rolls back with
+// the caller, and effects fire at ITS commit. The caller must not have read or written this asset's dependent rows before.
+// Email: none here (src/pg/* never imports a mailer). join / updateDates register waitlist_joined (+ request_recorded) after
+// their writes; every commit that grants a hold registers holds_owed (evaluateAsset), which replaces SQLite's `settling`
+// wrapper: the Slice 5 notifier maps holds_owed -> dispatchHoldEmails(pool), and the sweep calls dispatchHoldEmails directly,
+// so a lost trigger only delays an email to the next sweep (<= 60 s).
+
+// Test seam (module-level, never a production argument): when set, runs between a request path's committed due step and its
+// main transaction, standing in for the clock moving there (test/pg/pg-waitlist-actions.test.js, the "gap" test).
+let gapHook = null;
+const setGapHookForTests = (fn) => { gapHook = fn || null; };
+
+// The one unlocked read a waitlist action does before the lock: which asset the entry belongs to.
+async function entryAssetId(q, id) {
+  const row = (await q.query('SELECT asset_id FROM waitlist_entries WHERE id = $1', [toId(id)])).rows[0];
+  if (!row) throw httpError(404, 'Waitlist entry not found');
+  return row.asset_id;
+}
+const lockOr404 = async (c, assetId) => {
+  try {
+    return await lockAsset(c, assetId);
+  } catch (err) {
+    if (err.code === 'ASSET_NOT_FOUND') throw httpError(404, 'Asset not found'); // (SQLite: classify finds no asset)
+    throw err;
+  }
+};
+// Steps 2 and 3 above around `main(c)`, which runs under the asset lock and returns the action's result.
+async function requestPath(q, assetId, main) {
+  if (isInTransaction(q)) {
+    await lockOr404(q, assetId);
+    await evaluateAsset(q, assetId);
+    return main(q);
+  }
+  let ended;
+  const requestEnded = new Promise((resolve) => { ended = resolve; });
+  try {
+    await withTransaction(async (c) => {
+      await lockOr404(c, assetId);
+      deferUntil(c, requestEnded); // (its holds_owed fires once the request is over, as SQLite dispatched at its end)
+      await evaluateAsset(c, assetId);
+    }, q);
+    if (gapHook) await gapHook(assetId);
+    return await withTransaction(async (c) => {
+      await lockOr404(c, assetId);
+      await recordLapses(c, assetId, await todayOf(c));
+      return main(c);
+    }, q);
+  } finally {
+    ended();
+  }
+}
+
+// "Join waitlist": the WHOLE range is unavailable (see src/waitlist.js join). Returns { entry }.
+async function join(q, { assetId, employeeId, actorAccountId, start, end, startTime, endTime }) {
+  const key = toId(assetId);
+  if (key === null || key < 1) throw httpError(404, 'Asset not found'); // (SQLite: classify finds no asset)
+  return requestPath(q, key, async (c) => {
+    const cl = await classify(c, { assetId: key, employeeId, start, end, startTime, endTime });
+    if (cl.outcome !== 'waitlist') throw httpError(cl.status, cl.message);
+    const entry = await insertEntry(c, { assetId: key, employeeId, actorAccountId, range: cl.busy[0], requestGroup: crypto.randomUUID() });
+    // after the writes: the emails SQLite sends after its commit, in the same order
+    announceJoined(c, employeeId, key, [entry], cl.reservers);
+    registerEffect(c, { type: 'request_recorded', employeeId, assetId: key, requested: entry, reserved: [], waitlisted: [entry] });
+    return { entry };
+  });
+}
+
+// The owner changes the dates (and/or times) of a WAITING entry: same rules as joining, and the entry goes to the back of the
+// line (a new per-asset queue_seq, under the lock). Returns the entry.
+async function updateDates(q, id, { employeeId, actorAccountId, start, end, startTime, endTime }) {
+  const assetId = await entryAssetId(q, id);
+  return requestPath(q, assetId, async (c) => {
+    const e = await loadEntry(c, id);
+    if (!employeeId || e.employee_id !== employeeId) throw httpError(403, 'Not allowed');
+    if (e.status === 'held') throw httpError(400, "You've been offered this item. Confirm or decline the offer; dates can't be changed while it is held for you.");
+    if (e.status !== 'waiting') throw httpError(400, 'This waitlist entry is already closed.');
+    const st = T.cleanTime(startTime, 'pickup time'); const et = T.cleanTime(endTime, 'return time');
+    if (e.start_date === start && e.end_date === end && (e.start_time || null) === st && (e.end_time || null) === et) throw httpError(400, 'Those are already your dates.');
+    const cl = await classify(c, { assetId: e.asset_id, employeeId, start, end, startTime: st, endTime: et, excludeEntryId: e.id });
+    if (cl.outcome !== 'waitlist') throw httpError(cl.status, cl.message);
+    // Reservers the OLD range already overlapped were told when it was joined; only people the new range newly reaches get a notice.
+    const told = new Set((await c.query(`SELECT * FROM reservations WHERE asset_id = $1 AND status = 'confirmed' AND employee_id <> $2 AND start_date <= $3 AND end_date >= $4 ORDER BY id`,
+      [e.asset_id, e.employee_id, e.end_date, e.start_date])).rows.filter((r) => T.overlapsRows(r, e)).map((r) => r.employee_id));
+    const newly = cl.reservers.filter((b) => !told.has(b.employee_id));
+    const info = await c.query(`UPDATE waitlist_entries SET start_date = $1, start_time = $2, end_date = $3, end_time = $4, queue_seq = (SELECT COALESCE(MAX(queue_seq), 0) + 1 FROM waitlist_entries WHERE asset_id = $6), queued_at = ${NOW}, updated_at = ${NOW}
+      WHERE id = $5 AND status = 'waiting'`, [start, cl.start_time, end, cl.end_time, e.id, e.asset_id]);
+    if (!info.rowCount) throw httpError(409, 'This entry was just updated. Reload and try again.');
+    await note(c, e.asset_id, actorAccountId, 'waitlist_updated', `${when(e)} → ${when(rangeOf(start, end, cl.start_time, cl.end_time))} · back of the line`, employeeId);
+    const entry = await loadEntry(c, e.id);
+    // after the writes: each distinct reserver the new range NEWLY overlaps is told (informational)
+    const seen = new Set();
+    for (const b of newly) {
+      if (seen.has(b.employee_id)) continue;
+      seen.add(b.employee_id);
+      registerEffect(c, { type: 'waitlist_joined', waiterEmployeeId: employeeId, assetId: e.asset_id, entry, reserver: b, updated: true });
+    }
+    return entry;
+  });
+}
+
+// ---- the held employee's two answers (see src/waitlist.js confirmHold). Confirming never fails because of an overlap: the
+// hold is the holder's priority. When the dates can't be had after all, the hold goes back to waiting (or is closed if the
+// dates are gone), the queue moves, that is COMMITTED, and only then is the 409 thrown (SQLite's `failure` pattern).
+async function confirmHold(q, id, { employeeId, actorAccountId }) {
+  const assetId = await entryAssetId(q, id);
+  const out = await requestPath(q, assetId, async (c) => {
+    const e = await loadEntry(c, id);
+    if (e.employee_id !== employeeId) throw httpError(403, 'Not allowed');
+    if (e.status === 'expired') throw httpError(409, 'This hold has expired. The item was offered to the next person in line.');
+    if (e.status !== 'held') throw httpError(400, e.status === 'waiting' ? "You haven't been offered this item yet." : 'This waitlist entry is already closed.');
+    const today = await todayOf(c);
+    const asset = await loadAsset(c, e.asset_id);
+    const el = reserveEligibility(asset);
+    const emp = (await c.query('SELECT status FROM employees WHERE id = $1', [e.employee_id])).rows[0];
+    const over = () => e.start_date < today || T.endKey(e.end_date, e.end_time) <= T.nowKey();
+    let clash = !el.ok ? "this item can't be reserved right now" : !emp || emp.status !== 'active' ? 'your account is not active'
+      : e.start_date < today ? 'the start date has passed' : T.endKey(e.end_date, e.end_time) <= T.nowKey() ? 'that time has already ended' : null;
+    if (!clash && await reservations.hasOwnOverlap(c, e.asset_id, employeeId, e)) clash = 'you already have a reservation for those dates';
+    // the hold is priority, so nothing else should be in the way; if something somehow is (a checkout, an approval), the hold goes back to waiting
+    const taken = clash ? null : (await reservations.findBlockers(c, asset, e, { today, ignoreHoldId: e.id }))[0];
+    if (clash || taken) {
+      if (over()) await close(c, e, 'expired', null);
+      else await c.query(`UPDATE waitlist_entries SET status = 'waiting', hold_started_at = NULL, hold_expires_at = NULL, hold_email_at = NULL, updated_at = ${NOW} WHERE id = $1`, [e.id]);
+      await evaluateAsset(c, e.asset_id);
+      return { failure: `Those dates are no longer available: ${clash || whyBlocked(taken, today).replace(/\.$/, '').replace(/^It is /, 'it is ')}. ${over() ? 'Your waitlist entry has ended.' : "You're still on the waitlist."}` };
+    }
+    const reservation = await reservations.insertReservation(c, asset, { employeeId, actorAccountId, start: e.start_date, end: e.end_date, startTime: e.start_time, endTime: e.end_time, waitlistEntryId: e.id, requestGroup: e.request_group });
+    await close(c, e, 'fulfilled', actorAccountId);
+    await note(c, e.asset_id, actorAccountId, 'waitlist_confirmed', `${when(e)}${reservation.status === 'pending' ? ' · waiting for IT approval' : ''}`, employeeId);
+    return { entry: await loadEntry(c, e.id), reservation };
+  });
+  if (out.failure) throw httpError(409, out.failure);
+  return out;
+}
+
+async function declineHold(q, id, { employeeId, actorAccountId }) {
+  const assetId = await entryAssetId(q, id);
+  return requestPath(q, assetId, async (c) => {
+    const e = await loadEntry(c, id);
+    if (e.employee_id !== employeeId) throw httpError(403, 'Not allowed');
+    if (e.status === 'expired') throw httpError(409, 'This hold has already expired.');
+    if (e.status !== 'held') throw httpError(400, e.status === 'waiting' ? "You haven't been offered this item yet. Use Leave waitlist instead." : 'This waitlist entry is already closed.');
+    if (!await close(c, e, 'declined', actorAccountId)) throw httpError(409, 'This entry was just updated. Reload and try again.');
+    await note(c, e.asset_id, actorAccountId, 'waitlist_declined', when(e), employeeId);
+    await evaluateAsset(c, e.asset_id);
+    return loadEntry(c, e.id);
+  });
+}
+
+// The employee leaves their own place in line; IT may remove an entry (it can never reorder one).
+async function leave(q, id, { employeeId, actorAccountId, isAdmin }) {
+  const assetId = await entryAssetId(q, id);
+  return requestPath(q, assetId, async (c) => {
+    const e = await loadEntry(c, id);
+    const own = !!employeeId && e.employee_id === employeeId;
+    if (!own && !isAdmin) throw httpError(403, 'Not allowed');
+    if (!OPEN.includes(e.status)) throw httpError(400, 'This waitlist entry is already closed.');
+    if (!await close(c, e, own ? 'left' : 'removed', actorAccountId)) throw httpError(409, 'This entry was just updated. Reload and try again.');
+    await note(c, e.asset_id, actorAccountId, own ? 'waitlist_left' : 'waitlist_removed', `${when(e)}${own ? '' : ' · removed by IT'}`, e.employee_id);
+    await evaluateAsset(c, e.asset_id);
+    return loadEntry(c, e.id);
+  });
+}
+
+// ---- the due step and the sweep
+// processDue(q, assetId): that asset, in one transaction (joined to the caller's when given its client).
+// processDue(pool): every asset with an open entry (an unlocked scan, used only to pick the assets), ONE TRANSACTION PER ASSET in
+// ascending id order, never two asset locks at once (SQLite: one transaction for all). A failing asset is logged
+// ('[waitlist:sweep]') and reported; it neither rolls back nor stops the others. Returns { assets, failed: [{ assetId, message }] }
+// (SQLite returned nothing: the one intentional return-shape addition, decision D4C-4).
+async function processDue(q, assetId) {
+  const one = assetId !== undefined && assetId !== null;
+  if (isInTransaction(q)) {
+    if (!one) throw new Error('processDue() for every asset runs one transaction per asset: pass the pool, not a transaction client.');
+    await lockAsset(q, assetId);
+    await evaluateAsset(q, assetId);
+    return { assets: [Number(assetId)], failed: [] };
+  }
+  const ids = one ? [toId(assetId)]
+    : (await q.query("SELECT DISTINCT asset_id FROM waitlist_entries WHERE status IN ('waiting','held') ORDER BY asset_id")).rows.map((r) => r.asset_id);
+  const failed = [];
+  for (const id of ids) {
+    try {
+      await withTransaction(async (c) => { await lockAsset(c, id); await evaluateAsset(c, id); }, q);
+    } catch (err) {
+      console.error('[waitlist:sweep]', `asset ${id}:`, err.message);
+      failed.push({ assetId: id, message: err.message });
+    }
+  }
+  return { assets: ids, failed };
+}
+
+// Send the "available for you" email for every live hold that has not had one (global; never inside a transaction; takes no
+// asset lock). Each hold is claimed with ONE atomic UPDATE (hold_email_at), so two callers (the sweep, a holds_owed trigger,
+// a second server) can never both send it; then a `hold_email` effect is emitted to the notifier. A failed send is logged
+// ('[waitlist:mail]') and the claim stays: never retried, never duplicated (D-47 point 3). With no notifier installed nothing
+// is claimed (a no-op notifier must not burn claims, decision D4C-2). Returns the number of holds claimed.
+async function dispatchHoldEmails(q) {
+  if (isInTransaction(q)) throw new Error('dispatchHoldEmails() runs outside any transaction (an email must never precede a COMMIT): pass the pool.');
+  if (!hasNotifier()) return 0;
+  const ids = (await q.query(`SELECT id FROM waitlist_entries WHERE status = 'held' AND hold_email_at IS NULL AND hold_expires_at > ${NOW} ORDER BY id`)).rows.map((r) => r.id);
+  let claimed = 0;
+  for (const id of ids) {
+    try {
+      const entry = (await q.query(`UPDATE waitlist_entries SET hold_email_at = ${NOW} WHERE id = $1 AND status = 'held' AND hold_email_at IS NULL RETURNING *`, [id])).rows[0];
+      if (!entry) continue;
+      claimed++;
+      emit({ type: 'hold_email', entry: { ...entry } }, (err) => console.error('[waitlist:mail]', err && err.message ? err.message : err));
+    } catch (err) {
+      console.error('[waitlist:mail]', err.message);
+    }
+  }
+  return claimed;
+}
+
+// The 60-second sweep (Slice 5 wires the timer): every asset's due step, then the hold emails. Never throws.
+async function sweep(q) {
+  let result;
+  try {
+    result = await processDue(q);
+  } catch (err) {
+    console.error('[waitlist:sweep]', err.message);
+    result = { assets: [], failed: [{ assetId: null, message: err.message }] };
+  }
+  try {
+    await dispatchHoldEmails(q);
+  } catch (err) {
+    console.error('[waitlist:mail]', err.message);
+  }
+  return result;
+}
+
 // ---- reading
 const WAITLIST_SQL = `
   SELECT w.*, a.name AS asset_name, a.tag AS asset_tag, e.name AS employee_name, e.department AS employee_department,
@@ -247,4 +506,7 @@ async function counts(q, user) {
   return { pending: 0, waitlist_active: active, held, attention: held };
 }
 
-module.exports = { RESPONSE_MINUTES, responseMinutes, offerSeconds, classify, rangeCheck, counts, list, get, present, evaluateAsset, insertEntry, announceJoined, loadEntry };
+module.exports = {
+  RESPONSE_MINUTES, responseMinutes, offerSeconds, classify, rangeCheck, counts, list, get, present, evaluateAsset, insertEntry, announceJoined, loadEntry,
+  join, updateDates, confirmHold, declineHold, leave, processDue, dispatchHoldEmails, sweep, setGapHookForTests,
+};
