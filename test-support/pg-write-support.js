@@ -212,6 +212,9 @@ async function race(pool, sampler, assetId, fns) {
 
 // ---- query spy: a pool whose clients record every statement's SQL text (in order) while checked out. (Slice 4C: `calls` keeps
 // { sql, params, client } per statement as well; client is a per-checkout number, 0 for statements run on the pool itself.)
+// (Slice 5A) lockAsset's own two lock_timeout statements around its FOR UPDATE are part of the lock, not reads of protected
+// state, so they are not recorded (isLockTimeoutSql); test/pg/pg-lock-timeout.test.js checks them directly.
+const isLockTimeoutSql = (sql) => /^SELECT (current_setting\('lock_timeout'\)|set_config\('lock_timeout')/.test(String(sql));
 function spyPool(pool) {
   const log = [];
   const calls = [];
@@ -227,6 +230,7 @@ function spyPool(pool) {
         const original = client.query;
         client.query = function spied(text, ...rest) {
           const sql = typeof text === 'string' ? text : text && text.text;
+          if (isLockTimeoutSql(sql)) return original.call(this, text, ...rest);
           log.push(sql);
           calls.push({ sql, params: Array.isArray(rest[0]) ? rest[0] : (text && text.values) || [], client: n });
           return original.call(this, text, ...rest);
@@ -272,5 +276,5 @@ const oneLine = (sql) => String(sql).replace(/\s+/g, ' ').trim();
 
 module.exports = {
   prepareSqliteMail, STAMP_RE, mask, maskDetails, groupNamer, dumpAsset, createFixture, permutations, serialOracle, maskedRun, assertMatchesSerial,
-  waitFor, blockAsset, lockWaiters, race, spyPool, oneLine, outcome, installHoldMailNotifier,
+  waitFor, blockAsset, lockWaiters, race, spyPool, isLockTimeoutSql, oneLine, outcome, installHoldMailNotifier,
 };
