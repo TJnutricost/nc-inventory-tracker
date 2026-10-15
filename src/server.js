@@ -1,4 +1,8 @@
 require('./env');
+// TEMPORARY database driver seam (D-48; removed at the PostgreSQL cutover). DB_DRIVER is checked before anything opens a database:
+// unset / 'sqlite' is the default; 'pg' (wired in Slice 5D) and anything else stop the server with a clear error.
+const dataSeam = require('./dataSeam');
+const DB_DRIVER = dataSeam.resolveDriver();
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
@@ -14,9 +18,13 @@ const requestRules = require('./requests');
 const availabilityLib = require('./availability');
 const catalog = require('./catalog');
 const reservationRules = require('./reservations');
-const timeRange = require('./timeRange');
 const waitlistRules = require('./waitlist');
+const assetAccess = require('./assetAccess');
+const reservationViews = require('./reservationViews');
 const { cleanSerial, serialKey } = require('./serial');
+// The data modules with the database bound (`await data.waitlist.join({...})`). Routes migrated to the seam (PostgreSQL migration
+// Slice 5B; listed in test/data-seam-ratchet.test.js) use only this; the others still use `db` and the modules above directly.
+const data = dataSeam.open({ driver: DB_DRIVER, db });
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -145,7 +153,7 @@ function makeToken(userId, purpose, hours) {
   db.prepare('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, ?, ?)').run(token, userId, purpose, exp);
   return token;
 }
-const getAsset = (id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);
+const getAsset = (id) => assetAccess.getAsset(db, id); // (SQL in src/assetAccess.js since Slice 5B-1)
 
 // Serials are unique across the whole inventory (archived assets included) ignoring surrounding whitespace and letter
 // case; see src/serial.js. The UNIQUE index on assets.serial_normalized is the backstop; this gives a readable 400.
@@ -206,17 +214,9 @@ function sanitizeAsset(a, user) {
   return rest;
 }
 
-// Employee asset-visibility contract, enforced on the server (hiding navigation is not access control). An admin sees
-// everything. An employee may see an asset only if they currently hold it (that follows the ASSIGNMENT: a desk computer assigned to
-// them stays theirs whatever its flags), or it is in the shared pool and available to them: IT made it `available_to_request`, it is
-// not archived, and its status is 'available' (a multi-seat license with a free seat stays 'available'; a full one is 'checked_out').
-// Anything else — not shared, archived, in repair, lost, retired, held by someone else — is indistinguishable from "not found".
-function canViewAsset(user, a) {
-  if (!a) return false;
-  if (user.role === 'admin') return true;
-  if (!a.archived_at && a.status === 'available' && a.available_to_request) return true;
-  return !!user.employee_id && !!db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(a.id, user.employee_id);
-}
+// Employee asset-visibility contract, enforced on the server (hiding navigation is not access control): see src/assetAccess.js
+// (moved there verbatim in Slice 5B-1 so the routes on the driver seam share the one definition).
+const canViewAsset = (user, a) => assetAccess.canViewAsset(db, user, a);
 // The asset for this route, or a 404 when it doesn't exist OR this user may not see it.
 function visibleAsset(req, id) {
   const a = getAsset(Number(id));
@@ -491,9 +491,9 @@ app.get('/api/assets', auth, (req, res) => {
 // Availability calendar (read-only): ?node=<catalog id> | ?asset=<asset id> | neither (everything), &month=YYYY-MM. The scope rules,
 // the privacy narrowing for employees and the day states all live in src/availability.js. Not a way around asset visibility:
 // GET /api/assets/:id is unchanged and employees still cannot open assets held by someone else.
-app.get('/api/availability', auth, (req, res) => {
+app.get('/api/availability', auth, async (req, res) => {
   const q = req.query;
-  res.json(availabilityLib.availability(db, {
+  res.json(await data.availability.availability({
     isAdmin: req.user.role === 'admin', employeeId: req.user.employee_id || null,
     nodeId: q.node === undefined || q.node === '' ? undefined : q.node,
     assetId: q.asset === undefined || q.asset === '' ? undefined : q.asset,
@@ -806,28 +806,11 @@ app.use('/uploads', (req, res, next) => {
 // ---------- reservations (Phase 2, slice 7) ----------
 // Rules, transactions and conflict checks live in src/reservations.js. These routes only identify the caller and shape the answers.
 // Employees reserve through the same visibility contract as everything else (an asset they can't see is a 404), and only manage their own.
-const RESERVATION_SQL = `
-  SELECT r.*, a.name AS asset_name, a.tag AS asset_tag, e.name AS employee_name, e.department AS employee_department,
-    COALESCE(dn.name, da.login_email) AS decided_by_name
-  FROM reservations r JOIN assets a ON a.id = r.asset_id JOIN employees e ON e.id = r.employee_id
-  LEFT JOIN accounts da ON da.id = r.decided_by LEFT JOIN employees dn ON dn.id = da.employee_id`;
-// `phase`, `can_cancel` and `can_shorten` are the server's own answers, so the UI never has to guess a rule.
-function reservationOut(r, user) {
-  const t = reservationRules.todayOf(db);
-  const mine = !!user.employee_id && r.employee_id === user.employee_id;
-  const live = reservationRules.LIVE.includes(r.status) && r.end_date >= t;
-  const lastDay = r.start_date > t ? r.start_date : t; // the earliest end date a shortening may pick
-  const admin = user.role === 'admin';
-  return {
-    ...r, start_time: r.start_time || null, end_time: r.end_time || null, phase: reservationRules.phaseOf(r, t), mine,
-    can_cancel: live && (admin || mine),
-    // (slice 8.1) a shortening may move the end DATE earlier or only the end TIME earlier on the last day, so the server answers whether any room is left
-    can_shorten: mine && r.status === 'confirmed' && r.end_date >= t && timeRange.canShorten(r, lastDay),
-    shorten_min: lastDay,
-    ...(admin ? {} : { employee_department: undefined, decided_by_name: undefined }),
-  };
-}
-const reservationById = (id, user) => reservationOut(db.prepare(`${RESERVATION_SQL} WHERE r.id = ?`).get(id), user);
+// How a reservation is shown (`phase`, `can_cancel`, `can_shorten`, ...) lives in src/reservationViews.js (moved there verbatim in Slice 5B-1).
+const { RESERVATION_SQL } = reservationViews;
+const reservationOut = (r, user) => reservationViews.reservationOut(db, r, user);
+// Several reads in a row, in order, stopping at the first failure (exactly like the synchronous .map they replace).
+async function mapInOrder(items, fn) { const out = []; for (const x of items) out.push(await fn(x)); return out; }
 app.get('/api/reservations', auth, (req, res) => {
   const isAdmin = req.user.role === 'admin';
   const st = req.query.status;
@@ -840,76 +823,67 @@ app.get('/api/reservations', auth, (req, res) => {
   const order = st === 'closed' ? 'r.end_date DESC, r.id DESC' : `CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.start_date, r.id`;
   res.json(db.prepare(`${RESERVATION_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT 300`).all(...params).map((r) => reservationOut(r, req.user)));
 });
-// An employee may reserve anything the availability calendar shows them: in the shared pool (available_to_request), not archived, 'available' OR
-// currently 'checked_out' (reserving is how you claim FUTURE dates of an item someone has out now). This does not open the asset page or its
-// record to them (canViewAsset / GET /api/assets/:id are unchanged); reservations.create still enforces every eligibility rule.
-function reservableAsset(req, id) {
-  const a = getAsset(Number(id));
-  if (!a) throw httpError(404, 'Asset not found');
-  if (req.user.role === 'admin' || canViewAsset(req.user, a)) return a;
-  if (a.available_to_request && !a.archived_at && ['available', 'checked_out'].includes(a.status)) return a;
-  throw httpError(404, 'Asset not found');
-}
-app.post('/api/assets/:id/reservations', auth, (req, res) => {
-  const asset = reservableAsset(req, req.params.id);
+// Who may reserve which asset: src/assetAccess.js `reservableAsset` (moved there verbatim in Slice 5B-1).
+app.post('/api/assets/:id/reservations', auth, async (req, res) => {
+  const asset = await data.assetAccess.reservableAsset(req.user, req.params.id);
   // One request -> the free time reserved and the unavailable time waitlisted (src/reservations.js create). The answer says what each part became.
-  const r = reservationRules.create(db, {
+  const r = await data.reservations.create({
     assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id,
     start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time,
   });
-  res.json({ request_group: r.request_group, requested: r.requested, reserved: r.reserved.map((x) => reservationById(x.id, req.user)), waitlisted: r.waitlisted.map((w) => waitlistRules.get(db, w.id, req.user)) });
+  res.json({ request_group: r.request_group, requested: r.requested, reserved: await mapInOrder(r.reserved, (x) => data.reservationViews.reservationById(x.id, req.user)), waitlisted: await mapInOrder(r.waitlisted, (w) => data.waitlist.get(w.id, req.user)) });
 });
-app.post('/api/reservations/:id/approve', admin, (req, res) => {
-  const r = reservationRules.approve(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
-  res.json(reservationById(r.id, req.user));
+app.post('/api/reservations/:id/approve', admin, async (req, res) => {
+  const r = await data.reservations.approve(Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
+  res.json(await data.reservationViews.reservationById(r.id, req.user));
 });
-app.post('/api/reservations/:id/decline', admin, (req, res) => {
-  const r = reservationRules.decline(db, Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
-  waitlistRules.dispatchHoldEmails(db); // (declining may have offered the dates to the next person in line)
-  res.json(reservationById(r.id, req.user));
+app.post('/api/reservations/:id/decline', admin, async (req, res) => {
+  const r = await data.reservations.decline(Number(req.params.id), { actorAccountId: req.user.account_id, note: clean(req.body.note) });
+  await data.waitlist.dispatchHoldEmails(); // (declining may have offered the dates to the next person in line)
+  res.json(await data.reservationViews.reservationById(r.id, req.user));
 });
-app.post('/api/reservations/:id/cancel', auth, (req, res) => {
-  const r = reservationRules.cancel(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: req.user.role === 'admin' });
-  waitlistRules.dispatchHoldEmails(db);
-  res.json(reservationById(r.id, req.user));
+app.post('/api/reservations/:id/cancel', auth, async (req, res) => {
+  const r = await data.reservations.cancel(Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: req.user.role === 'admin' });
+  await data.waitlist.dispatchHoldEmails();
+  res.json(await data.reservationViews.reservationById(r.id, req.user));
 });
-app.post('/api/reservations/:id/shorten', auth, (req, res) => {
-  const r = reservationRules.shorten(db, Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date, newEndTime: req.body.end_time });
-  waitlistRules.dispatchHoldEmails(db);
-  res.json(reservationById(r.id, req.user));
+app.post('/api/reservations/:id/shorten', auth, async (req, res) => {
+  const r = await data.reservations.shorten(Number(req.params.id), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, newEnd: req.body.end_date, newEndTime: req.body.end_time });
+  await data.waitlist.dispatchHoldEmails();
+  res.json(await data.reservationViews.reservationById(r.id, req.user));
 });
 
 // ---------- waitlist + availability holds (Phase 2, slice 8) ----------
 // Rules live in src/waitlist.js. There is deliberately NO route that asks, or lets anyone ask, a current reserver to give anything up.
 // An employee manages only their own entries; IT can see every entry and remove one, never reorder or answer for the employee.
 // "What would happen if I asked for these dates?" for the date sheet: reserve (all free), waitlist (blocked by a reservation / hold) or a refusal. Writes nothing.
-app.get('/api/assets/:id/range-check', auth, (req, res) => {
-  const asset = reservableAsset(req, req.params.id);
-  res.json(waitlistRules.rangeCheck(db, { assetId: asset.id, employeeId: req.user.employee_id, start: req.query.start_date, end: req.query.end_date, startTime: req.query.start_time, endTime: req.query.end_time, excludeEntryId: Number(req.query.entry_id) || 0 }));
+app.get('/api/assets/:id/range-check', auth, async (req, res) => {
+  const asset = await data.assetAccess.reservableAsset(req.user, req.params.id);
+  res.json(await data.waitlist.rangeCheck({ assetId: asset.id, employeeId: req.user.employee_id, start: req.query.start_date, end: req.query.end_date, startTime: req.query.start_time, endTime: req.query.end_time, excludeEntryId: Number(req.query.entry_id) || 0 }));
 });
-app.get('/api/reservation-counts', auth, (req, res) => res.json(waitlistRules.counts(db, req.user)));
-app.put('/api/waitlist/:id', auth, (req, res) => {
-  const e = waitlistRules.updateDates(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
-  res.json(waitlistRules.get(db, e.id, req.user));
+app.get('/api/reservation-counts', auth, async (req, res) => res.json(await data.waitlist.counts(req.user)));
+app.put('/api/waitlist/:id', auth, async (req, res) => {
+  const e = await data.waitlist.updateDates(Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
+  res.json(await data.waitlist.get(e.id, req.user));
 });
-app.post('/api/assets/:id/waitlist', auth, (req, res) => {
-  const asset = reservableAsset(req, req.params.id);
-  const { entry } = waitlistRules.join(db, { assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
-  res.json(waitlistRules.get(db, entry.id, req.user));
+app.post('/api/assets/:id/waitlist', auth, async (req, res) => {
+  const asset = await data.assetAccess.reservableAsset(req.user, req.params.id);
+  const { entry } = await data.waitlist.join({ assetId: asset.id, employeeId: req.user.employee_id, actorAccountId: req.user.account_id, start: req.body.start_date, end: req.body.end_date, startTime: req.body.start_time, endTime: req.body.end_time });
+  res.json(await data.waitlist.get(entry.id, req.user));
 });
-app.get('/api/waitlist', auth, (req, res) => res.json(waitlistRules.list(db, req.user, { status: req.query.status })));
-app.get('/api/waitlist/:id', auth, (req, res) => res.json(waitlistRules.get(db, Number(req.params.id), req.user)));
-app.post('/api/waitlist/:id/confirm', auth, (req, res) => {
-  const { entry, reservation } = waitlistRules.confirmHold(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
-  res.json({ entry: waitlistRules.get(db, entry.id, req.user), reservation: reservationById(reservation.id, req.user) });
+app.get('/api/waitlist', auth, async (req, res) => res.json(await data.waitlist.list(req.user, { status: req.query.status })));
+app.get('/api/waitlist/:id', auth, async (req, res) => res.json(await data.waitlist.get(Number(req.params.id), req.user)));
+app.post('/api/waitlist/:id/confirm', auth, async (req, res) => {
+  const { entry, reservation } = await data.waitlist.confirmHold(Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
+  res.json({ entry: await data.waitlist.get(entry.id, req.user), reservation: await data.reservationViews.reservationById(reservation.id, req.user) });
 });
-app.post('/api/waitlist/:id/decline', auth, (req, res) => {
-  const e = waitlistRules.declineHold(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
-  res.json(waitlistRules.get(db, e.id, req.user));
+app.post('/api/waitlist/:id/decline', auth, async (req, res) => {
+  const e = await data.waitlist.declineHold(Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id });
+  res.json(await data.waitlist.get(e.id, req.user));
 });
-app.post('/api/waitlist/:id/cancel', auth, (req, res) => {
-  const e = waitlistRules.leave(db, Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, isAdmin: req.user.role === 'admin' });
-  res.json(waitlistRules.get(db, e.id, req.user));
+app.post('/api/waitlist/:id/cancel', auth, async (req, res) => {
+  const e = await data.waitlist.leave(Number(req.params.id), { employeeId: req.user.employee_id, actorAccountId: req.user.account_id, isAdmin: req.user.role === 'admin' });
+  res.json(await data.waitlist.get(e.id, req.user));
 });
 
 // ---------- equipment catalog ----------
@@ -968,26 +942,21 @@ app.get('/api/catalog', auth, (req, res) => {
   }
   res.json(out);
 });
-// Keeps assets.category (kept for display/filters/import) equal to the name of the root of the entry they are filed under,
-// after a rename or move. History is never touched: requests keep the path text they were made with.
-function syncAssetCategories(nodeId) {
-  const upd = db.prepare('UPDATE assets SET category = ? WHERE catalog_node_id = ? AND category <> ?');
-  for (const id of catalog.subtreeIds(db, nodeId)) { const root = catalog.rootOf(db, id).name; upd.run(root, id, root); }
-}
-const catalogOut = (id) => { const n = catalog.getNode(db, id); return { id: n.id, parent_id: n.parent_id, name: n.name, search_keywords: n.search_keywords || '', path: catalog.pathText(db, n.id), archived_at: n.archived_at, live: catalog.isLive(db, n.id), ...catalog.usage(db, n.id) }; };
-app.post('/api/catalog', admin, (req, res) => {
-  const parentId = catalog.parseParent(req.body.parent_id);
-  const id = db.transaction(() => catalog.createNode(db, { name: req.body.name, parentId: parentId ?? null, searchKeywords: req.body.search_keywords })).immediate();
-  res.json(catalogOut(id));
+// IT's catalog edits: the transactions, the category sync after a rename or move (assets.category follows the catalog root) and the entry
+// as the editor gets it back live in src/catalogAdmin.js (moved there verbatim in Slice 5B-1).
+app.post('/api/catalog', admin, async (req, res) => {
+  const parentId = data.catalog.parseParent(req.body.parent_id);
+  const id = await data.catalogAdmin.createNode({ name: req.body.name, parentId: parentId ?? null, searchKeywords: req.body.search_keywords });
+  res.json(await data.catalogAdmin.catalogOut(id));
 });
-app.put('/api/catalog/:id', admin, (req, res) => {
+app.put('/api/catalog/:id', admin, async (req, res) => {
   const id = Number(req.params.id);
-  db.transaction(() => { catalog.updateNode(db, id, { name: req.body.name, parentId: catalog.parseParent(req.body.parent_id), searchKeywords: req.body.search_keywords }); syncAssetCategories(id); }).immediate();
-  res.json(catalogOut(id));
+  await data.catalogAdmin.updateNode(id, { name: req.body.name, parent: req.body.parent_id, searchKeywords: req.body.search_keywords });
+  res.json(await data.catalogAdmin.catalogOut(id));
 });
-app.post('/api/catalog/:id/archive', admin, (req, res) => { const id = Number(req.params.id); catalog.archiveNode(db, id); res.json(catalogOut(id)); });
-app.post('/api/catalog/:id/restore', admin, (req, res) => { const id = Number(req.params.id); catalog.restoreNode(db, id); res.json(catalogOut(id)); });
-app.delete('/api/catalog/:id', admin, (req, res) => { catalog.deleteNode(db, Number(req.params.id)); res.json({ ok: true }); });
+app.post('/api/catalog/:id/archive', admin, async (req, res) => { const id = Number(req.params.id); await data.catalog.archiveNode(id); res.json(await data.catalogAdmin.catalogOut(id)); });
+app.post('/api/catalog/:id/restore', admin, async (req, res) => { const id = Number(req.params.id); await data.catalog.restoreNode(id); res.json(await data.catalogAdmin.catalogOut(id)); });
+app.delete('/api/catalog/:id', admin, async (req, res) => { await data.catalog.deleteNode(Number(req.params.id)); res.json({ ok: true }); });
 
 // ---------- requests ----------
 app.get('/api/requests', auth, (req, res) => {
@@ -1061,9 +1030,9 @@ function loadRequest(id) {
 }
 // IT opens a request (the admin detail view calls this when it is shown). Sets opened_at once — that is what ends the
 // employee's right to rescind — and is a no-op on later calls and on closed requests. Admin only; never a GET side effect.
-app.post('/api/requests/:id/open', admin, (req, res) => {
-  const r = requestRules.openRequest(db, Number(req.params.id));
-  res.json(requestRules.withLifecycle(db, r));
+app.post('/api/requests/:id/open', admin, async (req, res) => {
+  const r = await data.requests.openRequest(Number(req.params.id));
+  res.json(await data.requests.withLifecycle(r));
 });
 app.post('/api/requests/:id/approve', admin, (req, res) => {
   const r = loadRequest(req.params.id);

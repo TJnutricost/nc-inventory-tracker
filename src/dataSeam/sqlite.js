@@ -1,0 +1,54 @@
+// TEMPORARY (D-48): the SQLite side of the database driver seam (see ./index.js). Removed at the PostgreSQL cutover.
+//
+// Binds the better-sqlite3 handle into the data modules so a route writes `await data.waitlist.join({...})` instead of
+// `waitlistRules.join(db, {...})`. Each bound function is an async wrapper that calls the existing SYNCHRONOUS module function and
+// runs it to completion with no await inside: the transaction, its atomicity and its errors are exactly what they are without the seam
+// (a throw becomes a rejection carrying the SAME error object: status, code and message unchanged). Pure exports (constants,
+// validators, TRANSITIONS, ...) pass through untouched and stay synchronous.
+//
+// The function is looked up on the module at CALL time, the way `waitlistRules.join(db, ...)` always was, so nothing about which code
+// runs changes. Slice 5D binds the PostgreSQL pool to the same names (src/pg/<module>.js has the same exports and parallel signatures).
+//
+// Interleaving: a wrapper settles without waiting for any I/O, so `await` on it resumes as a microtask. A route that chains several
+// seam calls (write, then read the row back) therefore still runs in ONE event-loop turn on SQLite: no other request, timer or sweep
+// can run between those calls, exactly as when the route was synchronous (test/data-seam.test.js checks it). On PostgreSQL (5D) each
+// await really yields; the read-backs after a write are then separate statements, which 5C/5D must take into account.
+const MODULES = {
+  // module name -> [the module, the exports whose first argument is the database handle]
+  availability: [require('../availability'), ['todayStates', 'availability', 'resolveScope']],
+  reservations: [require('../reservations'), ['findBlockers', 'plan', 'insertReservation', 'hasOwnOverlap', 'hasOwnHold', 'note', 'loadAsset', 'emailOf', 'sendRecorded', 'create', 'approve', 'decline', 'cancel', 'shorten', 'todayOf']],
+  waitlist: [require('../waitlist'), ['classify', 'insertEntry', 'announceJoined', 'evaluateAsset', 'processDue', 'dispatchHoldEmails', 'sweep', 'rangeCheck', 'counts', 'list', 'get', 'join', 'updateDates', 'confirmHold', 'declineHold', 'leave']],
+  catalog: [require('../catalog'), ['searchText', 'searchNodeIds', 'loadIndex', 'pathNames', 'pathText', 'rootOf', 'isLive', 'subtreeIds', 'depthOf', 'getNode', 'createNode', 'updateNode', 'archiveNode', 'restoreNode', 'usage', 'deleteNode', 'findLiveByPath']],
+  requests: [require('../requests'), ['transition', 'openRequest', 'lifecycle', 'withLifecycle', 'completeEquipmentRequests', 'completeReturnRequests']],
+  assignments: [require('../assignments'), ['refreshStatus', 'createAssignment']],
+  // extracted verbatim from server.js in Slice 5B-1 for the routes migrated to the seam
+  assetAccess: [require('../assetAccess'), ['getAsset', 'canViewAsset', 'reservableAsset']],
+  reservationViews: [require('../reservationViews'), ['reservationOut', 'reservationById']],
+  catalogAdmin: [require('../catalogAdmin'), ['syncAssetCategories', 'catalogOut', 'createNode', 'updateNode']],
+};
+
+function bindModule(db, name, mod, dbFunctions) {
+  const out = {};
+  for (const key of Object.keys(mod)) {
+    if (dbFunctions.includes(key)) continue;
+    // pure export: read through to the module (a getter, so it is always the module's current value)
+    Object.defineProperty(out, key, { enumerable: true, get: () => mod[key] });
+  }
+  for (const fn of dbFunctions) {
+    if (typeof mod[fn] !== 'function') throw new Error(`data seam: ${name}.${fn} is not a function of src/${name}.js`);
+    // async + no await: the synchronous module function runs to completion inside this call
+    Object.defineProperty(out, fn, { enumerable: true, value: async (...args) => mod[fn](db, ...args) });
+  }
+  return Object.freeze(out);
+}
+
+function bind(db) {
+  if (!db || typeof db.prepare !== 'function' || typeof db.transaction !== 'function') {
+    throw new Error('data seam: the SQLite driver needs the better-sqlite3 database handle (src/db.js `db`)');
+  }
+  const data = { driver: 'sqlite' };
+  for (const [name, [mod, dbFunctions]] of Object.entries(MODULES)) data[name] = bindModule(db, name, mod, dbFunctions);
+  return Object.freeze(data);
+}
+
+module.exports = { bind, MODULES };
