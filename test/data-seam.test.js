@@ -102,7 +102,9 @@ report.modules = Object.keys(data);
 ${REPORT}`).out;
   assert.deepEqual(alone.pg, []);
   assert.equal(alone.sqliteDb, false, 'the seam does not open the app database by itself');
-  assert.deepEqual(alone.modules.sort(), ['assetAccess', 'assignments', 'availability', 'catalog', 'catalogAdmin', 'driver', 'requests', 'reservationViews', 'reservations', 'waitlist'].sort());
+  assert.deepEqual(alone.modules.sort(), ['assetAccess', 'assignments', 'availability', 'catalog', 'catalogAdmin', 'driver', 'requests', 'reservationViews', 'reservations', 'waitlist',
+    // Slice 5B-2
+    'activityLog', 'people', 'assetViews', 'assetRecords', 'assetCustody', 'photoRecords', 'dashboard', 'catalogViews', 'requestAccess'].sort());
 });
 
 // ---------------------------------------------------------------- binding
@@ -230,10 +232,10 @@ test('HTTP: a migrated (async) route answers an error with exactly the body and 
   try {
     for (const err of [Object.assign(new Error('Short and stout'), { status: 418 }), new Error('internal detail that must not leak')]) {
       waitlistRules.counts = () => { throw err; }; // GET /api/reservation-counts: migrated, async
-      requestRules.withLifecycle = () => { throw err; }; // GET /api/assets/:id: not migrated, synchronous
+      requestRules.withLifecycle = () => { throw err; }; // GET /api/requests: not migrated, synchronous (GET /api/assets/:id until Slice 5B-2 migrated it)
       console.error = () => {}; // (the error handler logs 500s)
       const asyncRes = await admin.get('/api/reservation-counts');
-      const syncRes = await admin.get(`/api/assets/${asset.id}`);
+      const syncRes = await admin.get('/api/requests');
       console.error = realConsoleError;
       assert.equal(asyncRes.status, err.status || 500);
       assert.equal(asyncRes.status, syncRes.status);

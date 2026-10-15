@@ -1,7 +1,7 @@
 // How a reservation is shown to a caller (SQLite). Extracted VERBATIM from src/server.js in PostgreSQL migration Slice 5B-1 (D-48):
-// the SQL and the answer are unchanged; the database handle is the first argument, like the other data modules. Routes migrated to
-// the temporary driver seam reach `reservationById` through src/dataSeam; the routes not migrated yet keep using RESERVATION_SQL and a
-// thin bound `reservationOut(r, user)` alias in server.js. A PostgreSQL twin follows in Slice 5C.
+// the SQL and the answer are unchanged; the database handle is the first argument, like the other data modules. Routes reach
+// `reservationById` / `listReservations` through the temporary driver seam (src/dataSeam); since Slice 5B-2 no route in server.js
+// uses RESERVATION_SQL or `reservationOut` directly (the asset page reads them in src/assetViews.js). A PostgreSQL twin follows in 5C.
 const reservationRules = require('./reservations');
 const timeRange = require('./timeRange');
 
@@ -28,4 +28,17 @@ function reservationOut(db, r, user) {
 }
 const reservationById = (db, id, user) => reservationOut(db, db.prepare(`${RESERVATION_SQL} WHERE r.id = ?`).get(id), user);
 
-module.exports = { RESERVATION_SQL, reservationOut, reservationById };
+// GET /api/reservations (added in Slice 5B-2, again VERBATIM from src/server.js): IT sees every reservation, an employee their own;
+// `st` is 'open', 'closed' or undefined (the route has already refused anything else).
+function listReservations(db, user, st) {
+  const isAdmin = user.role === 'admin';
+  const t = reservationRules.todayOf(db);
+  const where = []; const params = [];
+  if (!isAdmin) { where.push('r.employee_id = ?'); params.push(user.employee_id); }
+  const open = "(r.status = 'pending' OR (r.status = 'confirmed' AND r.end_date >= ?))";
+  if (st === 'open') { where.push(open); params.push(t); } else if (st === 'closed') { where.push(`NOT ${open}`); params.push(t); }
+  const order = st === 'closed' ? 'r.end_date DESC, r.id DESC' : `CASE WHEN r.status = 'pending' THEN 0 ELSE 1 END, r.start_date, r.id`;
+  return db.prepare(`${RESERVATION_SQL} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY ${order} LIMIT 300`).all(...params).map((r) => reservationOut(db, r, user));
+}
+
+module.exports = { RESERVATION_SQL, reservationOut, reservationById, listReservations };

@@ -31,4 +31,25 @@ function reservableAsset(db, user, id) {
   throw httpError(404, 'Asset not found');
 }
 
-module.exports = { getAsset, canViewAsset, reservableAsset };
+// ---- added in Slice 5B-2 (again VERBATIM from src/server.js; server.js passed `req` and only ever read `req.user`) ----
+// The asset for this route, or a 404 when it doesn't exist OR this user may not see it.
+function visibleAsset(db, user, id) {
+  const a = getAsset(db, Number(id));
+  if (!a || !canViewAsset(db, user, a)) throw httpError(404, 'Asset not found');
+  return a;
+}
+// Employee actions on equipment they currently hold (Phase 2, Slice 2): the asset must be visible to the caller AND checked out to
+// the caller right now. Anything else is refused on the server; a hidden button is never the authorization. (A visible-but-not-held
+// asset is a 400, an invisible one a 404.)
+function heldAsset(db, user, id) {
+  const asset = visibleAsset(db, user, id);
+  const me = user.employee_id;
+  if (!me || !db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(asset.id, me)) {
+    throw httpError(400, "This isn't checked out to you");
+  }
+  return asset;
+}
+// Whether this employee holds this asset right now (the photo upload rule: IT or the holder).
+const holdsAsset = (db, assetId, employeeId) => db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(assetId, employeeId);
+
+module.exports = { getAsset, canViewAsset, reservableAsset, visibleAsset, heldAsset, holdsAsset };
