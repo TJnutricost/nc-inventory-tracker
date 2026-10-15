@@ -1,7 +1,7 @@
 // Ratchet for the TEMPORARY database driver seam (D-48, PostgreSQL migration Slice 5B). Static checks only: no database is opened.
 //
 // MIGRATED lists every route in src/server.js that reaches the database ONLY through the seam (`data.<module>.<fn>`, src/dataSeam).
-// The list only grows (5B-1 added the already-modular routes, 5B-2 assets/photos/dashboard/scan; 5B-3..5B-4 add the rest). For each listed route the handler must be
+// The list only grows (5B-1 added the already-modular routes, 5B-2 assets/photos/dashboard/scan, 5B-3 people/auth/sessions; 5B-4 adds the rest). For each listed route the handler must be
 // async, must use `data.`, and must not touch `db`, prepare SQL, write SQL text, or call a data module / server.js-local database
 // helper directly. A route that is not listed must not use `data.` at all (a half-migrated route is not allowed: list it once it is pure).
 const { test } = require('node:test');
@@ -59,7 +59,31 @@ const MIGRATED = [
   'GET /api/catalog',
   'POST /api/requests/:id/deny',
   'POST /api/requests/:id/cancel',
+  // Slice 5B-3: people, authentication and sessions (inline SQL extracted verbatim into src/accounts.js and src/sessions.js, and added
+  // to src/people.js). The auth middleware, the admin guard, the session store and its purge timer are checked separately below.
+  'GET /api/setup-needed',
+  'POST /api/setup',
+  'POST /api/login',
+  'POST /api/me/password',
+  'PUT /api/me',
+  'POST /api/forgot',
+  'POST /api/reset',
+  'GET /api/users',
+  'POST /api/users',
+  'POST /api/users/:id/account',
+  'GET /api/users/:id',
+  'PUT /api/users/:id',
+  'PUT /api/users/:id/self-checkout',
+  'POST /api/users/:id/invite',
 ];
+
+// Routes with no database access of their own, so they cannot use the seam (they are checked to stay that way): logout reaches the
+// sessions only through express-session and the store (on the seam since 5B-3). GET /api/me reads the user from the auth middleware (on
+// the seam) and the settings with getSettings(), which moves with the settings in Slice 5B-4 (then it joins MIGRATED).
+const NO_OWN_SQL = {
+  'POST /api/logout': [],
+  'GET /api/me': ['getSettings()'],
+};
 
 // Known, listed exceptions inside migrated routes: the exact text is removed before the checks below. Each one names the slice that
 // removes it. Nothing else may be added here without the planner's approval.
@@ -76,7 +100,7 @@ const FORBIDDEN = [
   [/\b(SELECT|INSERT|UPDATE|DELETE|REPLACE)\s+(\*|INTO|FROM|[a-z_])/, 'SQL text'],
   [/\bRESERVATION_SQL\b|\bPERSON_SQL\b|\bASSET_LIST_SQL\b/, 'a SQL fragment'],
   // the data modules, as server.js imports them (the seam is the only way in). `(?<![.\w$])`: `data.catalog.x` is the seam, `catalog.x` is not
-  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess)\s*\./, 'a data module called directly'],
+  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess|accounts|sessions)\s*\./, 'a data module called directly'],
   // server.js-local helpers that run SQL (again: `data.assetAccess.reservableAsset(` is the seam, a bare `reservableAsset(` is not)
   [/(?<![.\w$])(getAsset|canViewAsset|visibleAsset|heldAsset|reservableAsset|reservationOut|reservationById|getPerson|loadRequest|cancelBlock|isSelfInitiated|log|refreshStatus|openAssignments|sanitizeAsset|withCatalog|peekTag|allocateTag|tagExists|makeToken|currentUser|catalogOut|syncAssetCategories|doCheckout|assertSerialFree|resolveAssetNode|heldByMe|getSettings|setSetting|overdueSweep|waitlistSweep)\s*\(/, 'a server.js helper that runs SQL'],
 ];
@@ -145,15 +169,56 @@ test('ratchet: a migrated route is async, uses the seam and has no direct databa
   }
 });
 
-// The photo files (/uploads) are an app.use middleware, not a route: checked on its own (Slice 5B-2). Its only database access outside
-// the seam is the session's account (currentUser, like the auth middleware every route uses), which moves in Slice 5B-3.
-test('ratchet: the /uploads access check reaches the database only through the seam (apart from the session lookup)', () => {
-  const at = src.indexOf("app.use('/uploads'");
-  assert.ok(at > 0, 'the /uploads middleware exists');
-  const body = code(src.slice(at, matchParen(src, src.indexOf('(', at)) + 1)).split('currentUser(req)').join('');
+test('ratchet: the routes with no SQL of their own (logout, GET /api/me) stay that way', () => {
+  for (const [key, allowed] of Object.entries(NO_OWN_SQL)) {
+    const found = all.filter((r) => r.key === key);
+    assert.equal(found.length, 1, `${key}: expected exactly one definition`);
+    let body = code(found[0].text);
+    for (const text of allowed) { assert.ok(body.includes(text), `${key}: "${text}" is gone: update NO_OWN_SQL (and list the route in MIGRATED)`); body = body.split(text).join(''); }
+    for (const [re, what] of FORBIDDEN) assert.doesNotMatch(body, re, `${key}: uses ${what}`);
+  }
+});
+
+// The source of a function / class / middleware in server.js: from `marker` to the end of its first {...} block (or (...) call).
+// The whole file without its full-line comments (`code()` is for one route: across the file a `//` inside a string, e.g. 'https://',
+// would cut the rest of the line).
+const srcCode = src.replace(/^[ \t]*\/\/[^\n]*$/gm, '');
+function blockAt(marker, opener = '{') {
+  const at = src.indexOf(marker);
+  assert.ok(at >= 0, `${marker} exists in src/server.js`);
+  assert.equal(src.indexOf(marker, at + 1), -1, `${marker} appears once`);
+  return code(src.slice(at, matchParen(src, src.indexOf(opener, at)) + 1));
+}
+
+// The photo files (/uploads) are an app.use middleware, not a route: checked on its own (Slice 5B-2). Since Slice 5B-3 the session's
+// account is read through the seam too, so there is no exception left.
+test('ratchet: the /uploads access check reaches the database only through the seam (the session lookup included)', () => {
+  const body = blockAt("app.use('/uploads'", '(');
   assert.match(body, /\basync\s*\(/);
+  assert.match(body, /\bawait\s+data\.accounts\.currentUser\(req\.session\.uid\)/);
   assert.match(body, /\bawait\s+data\.photoRecords\.photoByFile\(/);
   for (const [re, what] of FORBIDDEN) assert.doesNotMatch(body, re, `/uploads uses ${what}`);
+});
+
+// Slice 5B-3: the auth middleware every protected route runs, the admin guard, the express-session store and its hourly purge.
+test('ratchet: the auth middleware and the admin guard read the session\'s account only through the seam', () => {
+  const auth = blockAt('async function auth(req, res, next)');
+  assert.match(auth, /const u = await data\.accounts\.currentUser\(req\.session\.uid\);/);
+  for (const [re, what] of FORBIDDEN) assert.doesNotMatch(auth, re, `auth uses ${what}`);
+  const admin = blockAt('function admin(req, res, next)');
+  assert.match(admin, /return auth\(req, res, /, 'the admin guard runs the auth middleware and returns its promise (a rejection reaches Express)');
+  for (const [re, what] of FORBIDDEN) assert.doesNotMatch(admin, re, `admin uses ${what}`);
+  assert.doesNotMatch(srcCode, /function currentUser\b|\bcurrentUser\(req\)/, 'no server.js-local session lookup is left');
+});
+
+test('ratchet: the session store and its purge timer reach the sessions table only through the seam', () => {
+  const store = blockAt('class SqliteStore extends session.Store');
+  for (const fn of ['get', 'set', 'destroy']) assert.match(store, new RegExp(`\\bdata\\.sessions\\.${fn}\\(`), `the store's ${fn} uses data.sessions.${fn}`);
+  for (const [re, what] of FORBIDDEN) assert.doesNotMatch(store, re, `the session store uses ${what}`);
+  assert.match(srcCode, /setInterval\(\(\) => data\.sessions\.purgeExpired\(Date\.now\(\)\), 3600e3\)\.unref\(\);/, 'the hourly purge goes through the seam');
+  // no SQL against the session, token or (outside the 5B-4 CSV import) account tables is left in server.js
+  assert.doesNotMatch(srcCode, /\b(FROM|INTO|UPDATE)\s+(sessions|tokens)\b/, 'server.js has no SQL on sessions or tokens');
+  assert.doesNotMatch(srcCode, /\b(INTO|UPDATE)\s+accounts\b/, 'server.js writes no account rows itself');
 });
 
 test('ratchet: no route outside the list uses the seam (a half-migrated route is not allowed)', () => {

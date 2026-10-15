@@ -28,7 +28,9 @@ const MODULES = {
   catalogAdmin: [require('../catalogAdmin'), ['syncAssetCategories', 'catalogOut', 'createNode', 'updateNode']],
   // extracted verbatim from server.js in Slice 5B-2 (assets, photos, dashboard, scan, and the 5B-1 deferred reads)
   activityLog: [require('../activityLog'), ['log']],
-  people: [require('../people'), ['getPerson']],
+  people: [require('../people'), ['getPerson', // (5B-3 below)
+    'listPeople', 'workEmailTaken', 'workEmailTakenByOther', 'loginEmailTaken', 'loginEmailTakenByOther', 'createPerson', 'addAccount',
+    'personAssignments', 'updatePerson', 'setSelfCheckout', 'updateOwnProfile']],
   assetViews: [require('../assetViews'), ['openAssignments', 'withCatalog', 'sanitizeAsset', 'listAssets', 'lookupCode', 'assetDetail']],
   assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset']],
   assetCustody: [require('../assetCustody'), ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice']],
@@ -36,6 +38,9 @@ const MODULES = {
   dashboard: [require('../dashboard'), ['dashboard']],
   catalogViews: [require('../catalogViews'), ['searchCatalog', 'catalogTree']],
   requestAccess: [require('../requestAccess'), ['loadRequest', 'isSelfInitiated', 'cancelBlock']],
+  // extracted verbatim from server.js in Slice 5B-3 (people, authentication, sessions; people.js gained the /api/users functions)
+  accounts: [require('../accounts'), ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset']],
+  sessions: [require('../sessions'), ['get', 'set', 'destroy', 'purgeExpired', 'destroyForAccount']],
 };
 
 function bindModule(db, name, mod, dbFunctions) {
