@@ -4,7 +4,7 @@ const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { Client } = require('pg');
 const { pgSuite, createTestDatabase } = require('../../test-support/pg-harness');
-const { withTransaction, lockAsset, onTransactionEnd } = require('../../src/pg/transaction');
+const { withTransaction, lockAsset, onTransactionEnd, setLockTimeout } = require('../../src/pg/transaction');
 
 async function waitFor(check, what, timeoutMs = 5000) {
   const deadline = Date.now() + timeoutMs;
@@ -175,11 +175,12 @@ describe('PostgreSQL pool, transactions and per-asset locks', pgSuite(), () => {
         return lockAsset(c, 2);
       }, pool);
       assert.equal(other.id, 2);
-      await assert.rejects(withTransaction(async (c) => {
-        await c.query("SET LOCAL lock_timeout = '150ms'");
-        return lockAsset(c, 1);
-      }, pool), (err) => err.code === '55P03'); // lock_not_available
+      // (Slice 5A: lockAsset sets its own transaction-local timeout and answers 503 ASSET_BUSY, keeping the 55P03 as the cause)
+      setLockTimeout(150);
+      await assert.rejects(withTransaction(async (c) => lockAsset(c, 1), pool),
+        (err) => err.status === 503 && err.code === 'ASSET_BUSY' && err.cause.code === '55P03'); // lock_not_available
     } finally {
+      setLockTimeout(null);
       letAFinish();
       await txA;
     }

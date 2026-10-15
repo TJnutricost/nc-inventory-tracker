@@ -12,7 +12,7 @@
 // hours from the database clock, APP_TIMEZONE=UTC; the tier test skips (with a message) within 15 minutes of UTC midnight.
 // Skipped without PostgreSQL.
 process.env.APP_TIMEZONE = 'UTC';
-const { prepareSqliteMail, mask, groupNamer, dumpAsset, outcome, installHoldMailNotifier } = require('../../test-support/pg-write-support');
+const { prepareSqliteMail, mask, groupNamer, dumpAsset, outcome, installHoldMailNotifier, spyPool, blockAsset } = require('../../test-support/pg-write-support');
 const sqliteMail = prepareSqliteMail();
 
 const { describe, test, before, after, afterEach } = require('node:test');
@@ -21,7 +21,7 @@ const { pgSuite, createTestDatabase } = require('../../test-support/pg-harness')
 const { createTwin, FIXED } = require('../../test-support/pg-twin');
 const T = require('../../src/timeRange');
 const pgTime = require('../../src/pg/time');
-const { withTransaction, lockAsset } = require('../../src/pg/transaction');
+const { withTransaction, lockAsset, setLockTimeout } = require('../../src/pg/transaction');
 const effects = require('../../src/pg/effects');
 const sqliteWaitlist = require('../../src/waitlist');
 const waitlist = require('../../src/pg/waitlist');
@@ -375,7 +375,7 @@ describe('PostgreSQL waitlist actions (differential against src/waitlist.js)', p
     assert.deepEqual(emailed(), [A.fx.id, B.fx.id], 'each hold emailed once');
   });
 
-  test('the gap (decision D4C-1): a hold that runs out between the committed due step and the main transaction is never confirmed / declined / left', async () => {
+  test('the gap (D4C-1, refined in 5A / D-48 point 7): a hold that runs out between the due step and the main transaction is never confirmed / declined / left; the refusal commits exactly what SQLite\'s [processDue, op] would', async () => {
     const run = async (fn, opts, expected) => {
       const a = await req({ name: `Gap ${fn}` });
       const h = await held({ asset_id: a.id, employee_id: w.ana.id, start_date: d(5), hold_expires_at: await live(), queue_seq: 1 });
@@ -387,23 +387,30 @@ describe('PostgreSQL waitlist actions (differential against src/waitlist.js)', p
         assert.equal(assetId, a.id);
         await pool.query('UPDATE waitlist_entries SET hold_expires_at = $1 WHERE id = $2', [LAPSED, h.id]); // the clock passed the expiry
       });
+      const rec = installHoldMailNotifier(pool);
       const r = await outcome(() => waitlist[fn](pool, h.id, opts));
+      await effects.whenIdle();
+      rec.uninstall();
       waitlist.setGapHookForTests(null);
       assert.equal(gaps, 1);
       assert.deepEqual(r, { error: expected }, `${fn}: SQLite's own answer for an expired hold`);
+      // committed: the lapse and the queue movement (re-run due step); absent: anything the refused request itself wrote
+      assert.deepEqual([await statusOf(h.id), await statusOf(f.id)], ['expired', 'held'], `${fn}: the lapse is recorded and the queue moved`);
       assert.equal(Number((await pool.query('SELECT COUNT(*) c FROM reservations WHERE asset_id = $1', [a.id])).rows[0].c), 0, `${fn}: no reservation`);
-      // the refused main transaction rolled its lapse record back: the hold counts for nothing and the next due step records it
-      assert.equal(await statusOf(h.id), 'held');
-      assert.equal((await waitlist.get(pool, h.id, ADMIN)).phase, 'expired');
-      await waitlist.processDue(pool, a.id);
-      assert.deepEqual([await statusOf(h.id), await statusOf(f.id)], ['expired', 'held']);
-      const notes = (await pool.query("SELECT details FROM activity WHERE asset_id = $1 AND action = 'waitlist_expired'", [a.id])).rows;
-      assert.deepEqual(notes.map((n) => n.details), [`${T.when({ start_date: d(5), end_date: d(5) })} · hold ran out`]);
+      assert.deepEqual(ours(rec.seen, [a.id]).filter((e) => e.type === 'hold_email').map((e) => e.entry.id), [f.id], `${fn}: the next person emailed exactly once`);
+      // SQLite, serial order [processDue (the hold has lapsed), the refused op]: the same answer and the same rows
+      tw.sqlite.prepare('UPDATE waitlist_entries SET hold_expires_at = ? WHERE id = ?').run(LAPSED, h.id);
+      sqliteWaitlist.processDue(tw.sqlite);
+      const sq = await outcome(() => sqliteWaitlist[fn](tw.sqlite, h.id, opts));
+      assert.deepEqual(sq, r, `${fn}: SQLite answers the same`);
+      const gp = groupNamer(); const gs = groupNamer();
+      assert.deepEqual(await dumpAsset(pool, a.id, { group: gp }), await dumpAsset(tw.sq, a.id, { group: gs }), `${fn}: the final state equals SQLite's serial order`);
     };
     await run('confirmHold', ana(), { status: 409, message: 'This hold has expired. The item was offered to the next person in line.' });
     await run('declineHold', ana(), { status: 409, message: 'This hold has already expired.' });
     await run('leave', { ...ana(), isAdmin: false }, { status: 400, message: 'This waitlist entry is already closed.' });
-    // a request that succeeds in the gap commits the lapse record with it, then moves the queue
+
+    // a request that succeeds in the gap commits the lapse record with it, then moves the queue (unchanged)
     const a = await req({ name: 'Gap success' });
     const h = await held({ asset_id: a.id, employee_id: w.ana.id, start_date: d(6), hold_expires_at: await live(), queue_seq: 1 });
     const f = await tw.entry({ asset_id: a.id, employee_id: w.fay.id, start_date: d(6), queue_seq: 2 });
@@ -414,26 +421,71 @@ describe('PostgreSQL waitlist actions (differential against src/waitlist.js)', p
     waitlist.setGapHookForTests(null);
     assert.equal(left.status, 'left');
     assert.deepEqual([await statusOf(h.id), await statusOf(g.id)], ['expired', 'held'], 'recorded and the next person offered, in one commit');
+
+    // a NON-HTTP failure after the lapse was recorded does not trigger the re-run: everything rolls back, the next due step records it
+    const b = await req({ name: 'Gap error' });
+    const hb = await held({ asset_id: b.id, employee_id: w.ana.id, start_date: d(6), hold_expires_at: await live(), queue_seq: 1 });
+    const fb = await tw.entry({ asset_id: b.id, employee_id: w.fay.id, start_date: d(6), queue_seq: 2 });
+    await tw.syncSequences();
+    await pool.query("CREATE OR REPLACE FUNCTION nc_test_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected failure'; END $$");
+    await pool.query(`CREATE TRIGGER nc_fail_gap BEFORE INSERT ON activity FOR EACH ROW WHEN (NEW.asset_id = ${b.id} AND NEW.action = 'waitlist_left') EXECUTE FUNCTION nc_test_fail()`);
+    const spy = spyPool(pool);
+    waitlist.setGapHookForTests(() => pool.query('UPDATE waitlist_entries SET hold_expires_at = $1 WHERE id = $2', [LAPSED, hb.id]));
+    await assert.rejects(waitlist.leave(spy.pool, fb.id, { ...fay(), isAdmin: false }), /injected failure/);
+    waitlist.setGapHookForTests(null);
+    await pool.query('DROP TRIGGER nc_fail_gap ON activity');
+    assert.deepEqual([await statusOf(hb.id), await statusOf(fb.id)], ['held', 'waiting'], 'all rolled back, no re-run');
+    assert.equal(spy.log.filter((x) => x === 'BEGIN').length, 2, 'the due step and the main transaction only');
+
+    // a 503 does not trigger it either (the asset lock is the main transaction's first statement, so nothing was recorded)
+    const c = await req({ name: 'Gap busy' });
+    const hc = await held({ asset_id: c.id, employee_id: w.ana.id, start_date: d(6), hold_expires_at: await live(), queue_seq: 1 });
+    await tw.syncSequences();
+    let blocker;
+    setLockTimeout(100);
+    waitlist.setGapHookForTests(async () => { blocker = await blockAsset(pool, c.id); });
+    const spy2 = spyPool(pool);
+    try {
+      await assert.rejects(waitlist.declineHold(spy2.pool, hc.id, ana()), { status: 503, code: 'ASSET_BUSY' });
+    } finally {
+      waitlist.setGapHookForTests(null);
+      setLockTimeout(null);
+      await blocker.release();
+    }
+    assert.equal(spy2.log.filter((x) => x === 'BEGIN').length, 2, 'no re-run after a 503');
+    assert.equal(await statusOf(hc.id), 'held');
   });
 
-  test('joined to a caller\'s transaction: the due step runs on the caller\'s client, everything commits or rolls back with it', async () => {
+  test('confirmHold refuses a caller\'s transaction (D-48 point 6); the other actions join it: the due step runs on the caller\'s client, everything commits or rolls back with it', async () => {
     const a = await req({ name: 'Joined' });
     await held({ asset_id: a.id, employee_id: w.ben.id, start_date: d(5), hold_expires_at: LAPSED, queue_seq: 1 });
     const f = await tw.entry({ asset_id: a.id, employee_id: w.ana.id, start_date: d(5), queue_seq: 2 });
+    const g = await tw.entry({ asset_id: a.id, employee_id: w.dee.id, start_date: d(5), queue_seq: 3 });
     await tw.syncSequences();
+    // confirmHold with a transaction client: a programming error, before any read or write
+    const seen = [];
+    await assert.rejects(withTransaction(async (c) => {
+      const original = c.query;
+      c.query = function spied(...args) { seen.push(args[0]); return original.apply(this, args); };
+      try { await waitlist.confirmHold(c, f.id, ana()); } finally { c.query = original; }
+    }, pool), (err) => err.code === 'CONFIRM_HOLD_NEEDS_POOL' && err.status === undefined);
+    assert.deepEqual(seen, [], 'nothing read or written');
     const rec = installHoldMailNotifier(pool);
     await assert.rejects(withTransaction(async (c) => {
-      const r = await waitlist.confirmHold(c, f.id, ana()); // Ben's lapsed hold recorded, Ana offered, then confirmed: one transaction
-      assert.equal(r.reservation.status, 'confirmed');
+      const r = await waitlist.leave(c, g.id, { employeeId: w.dee.id, actorAccountId: null, isAdmin: false }); // Ben's lapse recorded, Ana offered, Dee leaves
+      assert.equal(r.status, 'left');
       throw new Error('caller failed afterwards');
     }, pool), /caller failed/);
     await effects.whenIdle();
     assert.deepEqual(ours(rec.seen, [a.id]), [], 'nothing fires when the caller rolls back');
-    assert.equal(await statusOf(f.id), 'waiting', 'nothing committed');
-    const r = await withTransaction((c) => waitlist.confirmHold(c, f.id, ana()), pool);
+    assert.deepEqual([await statusOf(f.id), await statusOf(g.id)], ['waiting', 'waiting'], 'nothing committed');
+    const r = await withTransaction((c) => waitlist.leave(c, g.id, { employeeId: w.dee.id, actorAccountId: null, isAdmin: false }), pool);
     await effects.whenIdle();
-    assert.equal(r.reservation.status, 'confirmed');
-    assert.deepEqual(ours(rec.seen, [a.id]).map((e) => e.type), ['holds_owed'], 'one trigger at the caller\'s COMMIT (the hold was confirmed before any claim, so no email)');
+    assert.equal(r.status, 'left');
+    assert.deepEqual(ours(rec.seen, [a.id]).map((e) => e.type), ['holds_owed', 'hold_email'], 'one trigger at the caller\'s COMMIT, one email for Ana');
+    assert.equal(await statusOf(f.id), 'held');
+    const conf = await waitlist.confirmHold(pool, f.id, ana()); // through the pool: as in 4C
+    assert.equal(conf.reservation.status, 'confirmed');
     await assert.rejects(withTransaction(() => waitlist.join(pool, { assetId: a.id, ...fay(), start: d(5), end: d(5) }), pool), /cannot be nested/);
     await assert.rejects(withTransaction(() => waitlist.leave(pool, f.id, { ...ana(), isAdmin: false }), pool), /cannot be nested/);
     await assert.rejects(withTransaction((c) => waitlist.dispatchHoldEmails(c), pool), /outside any transaction/);

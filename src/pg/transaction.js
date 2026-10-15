@@ -37,6 +37,16 @@
 //   end callbacks run and before the client is released, so a pooled client reused by the next transaction never carries
 //   a lock record across. assertAssetLock() throws a plain Error with code ASSET_LOCK_REQUIRED (never an HTTP-status
 //   error) when the lock is missing: the programming-error net for the reservation/waitlist write helpers.
+//
+// Busy limits (Slice 5A, D-48 point 3; initial values, subject to testing):
+//   - lockAsset waits at most the LOCK TIMEOUT for the asset row (default 5000 ms; env NC_LOCK_TIMEOUT_MS; tests: setLockTimeout).
+//     It is set TRANSACTION-LOCAL right before the FOR UPDATE and restored to the previous value right after it, so it never
+//     applies to any other statement, and never to the next transaction on the same pooled client. PostgreSQL's 55P03
+//     (lock_not_available) from that FOR UPDATE becomes an error with status 503, code ASSET_BUSY and the message BUSY_ASSET;
+//     the transaction then rolls back as for any error (nothing written, no effects).
+//   - withTransaction: a pool CHECKOUT timeout (pg-pool's connectionTimeoutMillis, 5 s) becomes status 503, code DB_BUSY, message
+//     BUSY_DB. Other connection errors are passed through unchanged.
+//   Migrations and advisory locks do not go through lockAsset and are not subject to the asset timeout.
 const { AsyncLocalStorage } = require('node:async_hooks');
 const { getPool } = require('./pool');
 
@@ -45,13 +55,35 @@ const clientsInTransaction = new WeakSet();
 const endCallbacks = new WeakMap();
 const assetLocks = new WeakMap(); // client -> Set of asset ids locked in its current transaction
 
+const BUSY_ASSET = 'This item is busy right now. Please try again in a moment.';
+const BUSY_DB = 'The system is busy right now. Please try again in a moment.';
+const DEFAULT_LOCK_TIMEOUT_MS = 5000;
+const POOL_CHECKOUT_TIMEOUT = 'timeout exceeded when trying to connect'; // (pg-pool's message for connectionTimeoutMillis)
+const validMs = (v) => { const n = Number(v); return v !== '' && v !== null && v !== undefined && Number.isInteger(n) && n >= 1 ? n : null; };
+const lockTimeoutFromEnv = () => validMs(process.env.NC_LOCK_TIMEOUT_MS) ?? DEFAULT_LOCK_TIMEOUT_MS;
+let lockTimeoutMs = lockTimeoutFromEnv();
+// Tests only: the asset-lock timeout in ms; null/undefined goes back to NC_LOCK_TIMEOUT_MS or the default. Returns the value in force.
+function setLockTimeout(ms) {
+  if (ms === null || ms === undefined) lockTimeoutMs = lockTimeoutFromEnv();
+  else if (validMs(ms) === null) throw new TypeError(`setLockTimeout(ms): a whole number of milliseconds >= 1, got ${ms}`);
+  else lockTimeoutMs = validMs(ms);
+  return lockTimeoutMs;
+}
+const busy = (message, code, cause) => Object.assign(new Error(message), { status: 503, code, cause });
+
 async function withTransaction(fn, pool = getPool()) {
   if (typeof fn !== 'function') throw new TypeError('withTransaction(fn): fn must be a function');
   const outer = activeTransaction.getStore();
   if (outer && outer.open) {
     throw new Error('withTransaction() cannot be nested: pass the outer transaction\'s client to the inner code instead of starting a new transaction.');
   }
-  const client = await pool.connect();
+  let client;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    if (err && err.message === POOL_CHECKOUT_TIMEOUT) throw busy(BUSY_DB, 'DB_BUSY', err);
+    throw err;
+  }
   // `open` is cleared when this transaction ends, so work fn merely scheduled (a timer, a deferred email) that starts
   // its own transaction later is not mistaken for nesting just because it inherited this async context.
   const scope = { open: true };
@@ -104,7 +136,16 @@ async function lockAsset(client, assetId) {
   }
   const id = Number(assetId);
   if (!Number.isSafeInteger(id) || id < 1) throw new TypeError(`lockAsset(): invalid asset id ${assetId}`);
-  const { rows } = await client.query('SELECT * FROM assets WHERE id = $1 FOR UPDATE', [id]);
+  // the timeout applies to this FOR UPDATE only: set (transaction-local) right before it, the previous value restored right after
+  const prev = (await client.query("SELECT current_setting('lock_timeout') AS prev, set_config('lock_timeout', $1, true) AS now", [`${lockTimeoutMs}ms`])).rows[0].prev;
+  let rows;
+  try {
+    ({ rows } = await client.query('SELECT * FROM assets WHERE id = $1 FOR UPDATE', [id]));
+  } catch (err) {
+    if (err && err.code === '55P03') throw busy(BUSY_ASSET, 'ASSET_BUSY', err); // (the transaction is aborted; withTransaction rolls it back)
+    throw err;
+  }
+  await client.query("SELECT set_config('lock_timeout', $1, true)", [prev]);
   if (!rows.length) throw Object.assign(new Error('Asset not found'), { status: 404, code: 'ASSET_NOT_FOUND' });
   let held = assetLocks.get(client);
   if (!held) assetLocks.set(client, (held = new Set()));
@@ -124,4 +165,4 @@ function assertAssetLock(client, assetId) {
   }
 }
 
-module.exports = { withTransaction, lockAsset, isInTransaction, onTransactionEnd, holdsAssetLock, assertAssetLock };
+module.exports = { withTransaction, lockAsset, isInTransaction, onTransactionEnd, holdsAssetLock, assertAssetLock, setLockTimeout, BUSY_ASSET, BUSY_DB, DEFAULT_LOCK_TIMEOUT_MS };
