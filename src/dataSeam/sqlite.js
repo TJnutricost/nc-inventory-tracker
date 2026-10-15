@@ -27,12 +27,13 @@ const MODULES = {
   reservationViews: [require('../reservationViews'), ['reservationOut', 'reservationById', 'listReservations']],
   catalogAdmin: [require('../catalogAdmin'), ['syncAssetCategories', 'catalogOut', 'createNode', 'updateNode']],
   // extracted verbatim from server.js in Slice 5B-2 (assets, photos, dashboard, scan, and the 5B-1 deferred reads)
-  activityLog: [require('../activityLog'), ['log']],
-  people: [require('../people'), ['getPerson', // (5B-3 below)
+  activityLog: [require('../activityLog'), ['log', 'recent']], // (recent: 5B-4)
+  people: [require('../people'), ['getPerson', // (5B-3 below, then employeeStatus 5B-4)
     'listPeople', 'workEmailTaken', 'workEmailTakenByOther', 'loginEmailTaken', 'loginEmailTakenByOther', 'createPerson', 'addAccount',
-    'personAssignments', 'updatePerson', 'setSelfCheckout', 'updateOwnProfile']],
-  assetViews: [require('../assetViews'), ['openAssignments', 'withCatalog', 'sanitizeAsset', 'listAssets', 'lookupCode', 'assetDetail']],
-  assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset']],
+    'personAssignments', 'updatePerson', 'setSelfCheckout', 'updateOwnProfile', 'employeeStatus']],
+  assetViews: [require('../assetViews'), ['openAssignments', 'withCatalog', 'sanitizeAsset', 'listAssets', 'lookupCode', 'assetDetail', 'exportRows']], // (exportRows: 5B-4)
+  assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset',
+    'peekTag', 'importAssets']], // (peekTag, importAssets: 5B-4)
   assetCustody: [require('../assetCustody'), ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice']],
   photoRecords: [require('../photoRecords'), ['addPhoto', 'touchAsset', 'getPhoto', 'deletePhoto', 'photoAsset', 'setCover', 'photoByFile']],
   dashboard: [require('../dashboard'), ['dashboard']],
@@ -41,6 +42,13 @@ const MODULES = {
   // extracted verbatim from server.js in Slice 5B-3 (people, authentication, sessions; people.js gained the /api/users functions)
   accounts: [require('../accounts'), ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset']],
   sessions: [require('../sessions'), ['get', 'set', 'destroy', 'purgeExpired', 'destroyForAccount']],
+  // Slice 5B-4: settings (the SQL of src/db.js getSettings / setSetting, copied verbatim: src/db.js is unchanged), the outbox and the
+  // overdue sweep, the request list / create / approve (extracted verbatim from server.js; additions to activityLog, people, assetViews,
+  // assetRecords above). Since 5B-4 server.js reaches the database only through this seam.
+  settings: [require('../settings'), ['getSettings', 'setSetting']],
+  outbox: [require('../outbox'), ['latest', 'recent']],
+  overdue: [require('../overdue'), ['dueAssignments', 'markNotified']],
+  requestRecords: [require('../requestRecords'), ['listRequests', 'createEquipmentRequest', 'approveRequest']],
 };
 
 function bindModule(db, name, mod, dbFunctions) {

@@ -1,7 +1,7 @@
 // People (SQLite): employees with their optional login account. Extracted VERBATIM from src/server.js in PostgreSQL migration Slices
 // 5B-2 (getPerson, for check-out and request deny) and 5B-3 (the /api/users routes): the SQL and the transaction boundaries are
-// unchanged; the database handle is the first argument, like the other data modules. The routes not migrated yet keep using a thin
-// bound `getPerson(id)` alias in server.js. A PostgreSQL twin follows in Slice 5C.
+// unchanged; the database handle is the first argument, like the other data modules. Slice 5B-4 added `employeeStatus` (POST
+// /api/requests); since then every route reaches this module through the seam. A PostgreSQL twin follows in Slice 5C.
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email).
 const PERSON_SQL = `
@@ -75,7 +75,10 @@ function updateOwnProfile(db, employeeId, { name, phone, department, title }) {
     .run(name, phone, department, title, employeeId);
 }
 
+// POST /api/requests: the status of the person a request is for ({ status }, or undefined when there is no such employee).
+const employeeStatus = (db, id) => db.prepare('SELECT status FROM employees WHERE id = ?').get(id);
+
 module.exports = {
   PERSON_SQL, HISTORY_LIMIT, getPerson, listPeople, workEmailTaken, workEmailTakenByOther, loginEmailTaken, loginEmailTakenByOther,
-  createPerson, addAccount, personAssignments, updatePerson, setSelfCheckout, updateOwnProfile,
+  createPerson, addAccount, personAssignments, updatePerson, setSelfCheckout, updateOwnProfile, employeeStatus,
 };

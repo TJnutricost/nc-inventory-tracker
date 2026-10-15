@@ -106,7 +106,9 @@ ${REPORT}`).out;
     // Slice 5B-2
     'activityLog', 'people', 'assetViews', 'assetRecords', 'assetCustody', 'photoRecords', 'dashboard', 'catalogViews', 'requestAccess',
     // Slice 5B-3
-    'accounts', 'sessions'].sort());
+    'accounts', 'sessions',
+    // Slice 5B-4
+    'settings', 'outbox', 'overdue', 'requestRecords'].sort());
 });
 
 // ---------------------------------------------------------------- binding
@@ -234,7 +236,7 @@ test('HTTP: a migrated (async) route answers an error with exactly the body and 
   try {
     for (const err of [Object.assign(new Error('Short and stout'), { status: 418 }), new Error('internal detail that must not leak')]) {
       waitlistRules.counts = () => { throw err; }; // GET /api/reservation-counts: migrated, async
-      requestRules.withLifecycle = () => { throw err; }; // GET /api/requests: not migrated, synchronous (GET /api/assets/:id until Slice 5B-2 migrated it)
+      requestRules.withLifecycle = () => { throw err; }; // GET /api/requests: synchronous until Slice 5B-4 migrated it (the last such route); the comparison still pins both bodies
       console.error = () => {}; // (the error handler logs 500s)
       const asyncRes = await admin.get('/api/reservation-counts');
       const syncRes = await admin.get('/api/requests');

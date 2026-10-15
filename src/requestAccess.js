@@ -1,8 +1,7 @@
 // Loading a request and the rescind/cancel policy (SQLite). Extracted VERBATIM from src/server.js in PostgreSQL migration Slice 5B-2
-// (D-48): the SQL and the rules are unchanged; the database handle is the first argument, like the other data modules. The request deny
-// and cancel routes reach these through the temporary driver seam (src/dataSeam); the request routes not migrated yet (list, approve,
-// resolve, dropped-off) keep calling them through thin bound aliases in server.js (`loadRequest(id)`, `cancelBlock(r, user)`).
-// A PostgreSQL twin follows in Slice 5C.
+// (D-48): the SQL and the rules are unchanged; the database handle is the first argument, like the other data modules. The request
+// routes reach these through the temporary driver seam (src/dataSeam; the list, approve, resolve and dropped-off routes too since Slice
+// 5B-4, and src/requestRecords.js listRequests uses `cancelBlock` for each row's `can_cancel`). A PostgreSQL twin follows in Slice 5C.
 const requestRules = require('./requests');
 
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });

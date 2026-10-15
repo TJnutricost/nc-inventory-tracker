@@ -2,8 +2,8 @@
 // assignments, and the fields a non-admin may see. Extracted VERBATIM from src/server.js in PostgreSQL migration Slice 5B-2 (D-48):
 // the SQL and the answers are unchanged; the database handle is the first argument, like the other data modules (server.js read
 // `req.user` / `req.query`, which are now passed as `user` / `query`). Routes migrated to the temporary driver seam reach these through
-// src/dataSeam (`await data.assetViews.listAssets(user, query)`); the routes not migrated yet keep ASSET_LIST_SQL and a thin bound
-// `openAssignments(assetId)` alias in server.js. A PostgreSQL twin follows in Slice 5C.
+// src/dataSeam (`await data.assetViews.listAssets(user, query)`). A PostgreSQL twin follows in Slice 5C. Slice 5B-4 added `exportRows`
+// (the CSV export's query, extracted verbatim); since then every route reaches this module through the seam.
 const catalog = require('./catalog');
 const availabilityLib = require('./availability');
 const requestRules = require('./requests');
@@ -149,4 +149,12 @@ function assetDetail(db, user, a) {
   };
 }
 
-module.exports = { ASSET_LIST_SQL, openAssignments, withCatalog, sanitizeAsset, listAssets, lookupCode, assetDetail };
+// GET /api/export/assets.csv (Slice 5B-4, extracted verbatim): every live asset by tag, each with its catalog path ('' when unlinked).
+// The columns, the CSV text and the download headers stay in the route.
+function exportRows(db) {
+  const rows = db.prepare(`${ASSET_LIST_SQL} WHERE a.archived_at IS NULL ORDER BY a.tag`).all();
+  for (const r of rows) r.catalog_path = r.catalog_node_id ? catalog.pathText(db, r.catalog_node_id) : '';
+  return rows;
+}
+
+module.exports = { ASSET_LIST_SQL, openAssignments, withCatalog, sanitizeAsset, listAssets, lookupCode, assetDetail, exportRows };

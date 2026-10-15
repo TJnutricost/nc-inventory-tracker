@@ -1,9 +1,12 @@
 // Ratchet for the TEMPORARY database driver seam (D-48, PostgreSQL migration Slice 5B). Static checks only: no database is opened.
 //
 // MIGRATED lists every route in src/server.js that reaches the database ONLY through the seam (`data.<module>.<fn>`, src/dataSeam).
-// The list only grows (5B-1 added the already-modular routes, 5B-2 assets/photos/dashboard/scan, 5B-3 people/auth/sessions; 5B-4 adds the rest). For each listed route the handler must be
+// The list only grows (5B-1 added the already-modular routes, 5B-2 assets/photos/dashboard/scan, 5B-3 people/auth/sessions, 5B-4 the
+// rest: settings, outbox, activity, import/export, the request routes, next-tag, GET /api/me). For each listed route the handler must be
 // async, must use `data.`, and must not touch `db`, prepare SQL, write SQL text, or call a data module / server.js-local database
 // helper directly. A route that is not listed must not use `data.` at all (a half-migrated route is not allowed: list it once it is pure).
+// Since Slice 5B-4 every route is either listed or has no database access at all (NO_OWN_SQL), and the whole of server.js is audited:
+// no `db` use besides binding the seam, no SQL, no settings access and no data module outside the seam.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -75,22 +78,41 @@ const MIGRATED = [
   'PUT /api/users/:id',
   'PUT /api/users/:id/self-checkout',
   'POST /api/users/:id/invite',
+  // Slice 5B-4: everything else (inline SQL extracted verbatim into src/settings.js (the SQL of src/db.js getSettings / setSetting),
+  // src/outbox.js, src/overdue.js, src/requestRecords.js, and added to src/activityLog.js, src/assetViews.js, src/assetRecords.js,
+  // src/people.js). The sweep timers are checked separately below.
+  'GET /api/me',
+  'GET /api/next-tag',
+  'GET /api/requests',
+  'POST /api/requests',
+  'POST /api/requests/:id/approve',
+  'POST /api/requests/:id/resolve',
+  'POST /api/requests/:id/dropped-off',
+  'GET /api/settings',
+  'PUT /api/settings',
+  'POST /api/settings/test-email',
+  'GET /api/outbox',
+  'GET /api/activity',
+  'GET /api/export/assets.csv',
+  'POST /api/import/assets',
 ];
 
-// Routes with no database access of their own, so they cannot use the seam (they are checked to stay that way): logout reaches the
-// sessions only through express-session and the store (on the seam since 5B-3). GET /api/me reads the user from the auth middleware (on
-// the seam) and the settings with getSettings(), which moves with the settings in Slice 5B-4 (then it joins MIGRATED).
+// Routes with no database access at all, so they cannot use the seam (they are checked to stay that way): logout reaches the sessions
+// only through express-session and the store (on the seam since 5B-3); GET /health is the host's liveness probe and deliberately touches
+// no database (a database failure must not fail it: test/data-seam-remaining.test.js); the dev service-worker kill switch and the two
+// vendored scripts are files. (GET /api/me was listed here until 5B-4 put the settings on the seam; it is in MIGRATED now.)
 const NO_OWN_SQL = {
   'POST /api/logout': [],
-  'GET /api/me': ['getSettings()'],
+  'GET /health': [],
+  'GET /sw.js': [],
+  'GET /vendor/html5-qrcode.min.js': [],
+  'GET /vendor/JsBarcode.all.min.js': [],
 };
 
-// Known, listed exceptions inside migrated routes: the exact text is removed before the checks below. Each one names the slice that
-// removes it. Nothing else may be added here without the planner's approval.
-const ALLOWED = {
-  // the `tag_prefix` setting for a newly issued tag (src/db.js getSettings). The settings move to the seam in Slice 5B-4.
-  'POST /api/assets': ['getSettings().tag_prefix'],
-};
+// Known, listed exceptions inside migrated routes: the exact text is removed before the checks below. Empty since Slice 5B-4 (the last
+// one, `getSettings().tag_prefix` in POST /api/assets, went with the settings onto the seam). Nothing may be added here without the
+// planner's approval.
+const ALLOWED = {};
 
 // Direct database access a migrated handler must not contain.
 const FORBIDDEN = [
@@ -100,9 +122,9 @@ const FORBIDDEN = [
   [/\b(SELECT|INSERT|UPDATE|DELETE|REPLACE)\s+(\*|INTO|FROM|[a-z_])/, 'SQL text'],
   [/\bRESERVATION_SQL\b|\bPERSON_SQL\b|\bASSET_LIST_SQL\b/, 'a SQL fragment'],
   // the data modules, as server.js imports them (the seam is the only way in). `(?<![.\w$])`: `data.catalog.x` is the seam, `catalog.x` is not
-  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess|accounts|sessions)\s*\./, 'a data module called directly'],
+  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess|accounts|sessions|settings|outbox|overdue|requestRecords)\s*\./, 'a data module called directly'],
   // server.js-local helpers that run SQL (again: `data.assetAccess.reservableAsset(` is the seam, a bare `reservableAsset(` is not)
-  [/(?<![.\w$])(getAsset|canViewAsset|visibleAsset|heldAsset|reservableAsset|reservationOut|reservationById|getPerson|loadRequest|cancelBlock|isSelfInitiated|log|refreshStatus|openAssignments|sanitizeAsset|withCatalog|peekTag|allocateTag|tagExists|makeToken|currentUser|catalogOut|syncAssetCategories|doCheckout|assertSerialFree|resolveAssetNode|heldByMe|getSettings|setSetting|overdueSweep|waitlistSweep)\s*\(/, 'a server.js helper that runs SQL'],
+  [/(?<![.\w$])(getAsset|canViewAsset|visibleAsset|heldAsset|reservableAsset|reservationOut|reservationById|getPerson|loadRequest|cancelBlock|isSelfInitiated|log|refreshStatus|openAssignments|sanitizeAsset|withCatalog|peekTag|allocateTag|tagExists|makeToken|currentUser|catalogOut|syncAssetCategories|doCheckout|assertSerialFree|resolveAssetNode|heldByMe|getSettings|setSetting|overdueSweep|waitlistSweep|listRequests|createEquipmentRequest|approveRequest|importAssets|exportRows|employeeStatus|dueAssignments|markNotified)\s*\(/, 'a server.js helper that runs SQL'],
 ];
 const withoutAllowed = (key, body) => (ALLOWED[key] || []).reduce((b, text) => b.split(text).join(''), body);
 
@@ -169,7 +191,7 @@ test('ratchet: a migrated route is async, uses the seam and has no direct databa
   }
 });
 
-test('ratchet: the routes with no SQL of their own (logout, GET /api/me) stay that way', () => {
+test('ratchet: the routes with no database access (logout, /health, the static files) stay that way', () => {
   for (const [key, allowed] of Object.entries(NO_OWN_SQL)) {
     const found = all.filter((r) => r.key === key);
     assert.equal(found.length, 1, `${key}: expected exactly one definition`);
@@ -216,7 +238,7 @@ test('ratchet: the session store and its purge timer reach the sessions table on
   for (const fn of ['get', 'set', 'destroy']) assert.match(store, new RegExp(`\\bdata\\.sessions\\.${fn}\\(`), `the store's ${fn} uses data.sessions.${fn}`);
   for (const [re, what] of FORBIDDEN) assert.doesNotMatch(store, re, `the session store uses ${what}`);
   assert.match(srcCode, /setInterval\(\(\) => data\.sessions\.purgeExpired\(Date\.now\(\)\), 3600e3\)\.unref\(\);/, 'the hourly purge goes through the seam');
-  // no SQL against the session, token or (outside the 5B-4 CSV import) account tables is left in server.js
+  // no SQL against the session, token or account tables is left in server.js
   assert.doesNotMatch(srcCode, /\b(FROM|INTO|UPDATE)\s+(sessions|tokens)\b/, 'server.js has no SQL on sessions or tokens');
   assert.doesNotMatch(srcCode, /\b(INTO|UPDATE)\s+accounts\b/, 'server.js writes no account rows itself');
 });
@@ -237,4 +259,60 @@ test('ratchet: server.js opens the seam once, after checking DB_DRIVER and befor
   assert.ok(resolveAt > 0, 'DB_DRIVER is resolved at startup');
   assert.ok(resolveAt < body.indexOf("require('./db')"), 'DB_DRIVER is checked before src/db.js opens the SQLite database');
   assert.doesNotMatch(body, /require\(['"]\.\/pg\//, 'server.js does not load src/pg/* before Slice 5D');
+});
+
+// ---------------------------------------------------------------- Slice 5B-4: the final audit of server.js
+// The whole file without comments: full-line ones, and trailing ones that follow whitespace (a `//` right after a quote or a colon, as in
+// 'https://' or the dev service worker's text, is not a comment). server.js has no block comments (its `'*/*'` content type and a regex
+// ending in `.*/` would fool a naive block-comment stripper), which the first check pins.
+const allCode = src.replace(/^[ \t]*\/\/[^\n]*$/gm, '').replace(/(\s)\/\/[^\n]*/g, '$1');
+test('ratchet (5B-4): server.js has no block comments (the whole-file audit below strips line comments only)', () => {
+  assert.doesNotMatch(src, /\/\*[\s*]/);
+});
+
+test('ratchet (5B-4): every route in server.js is either on the seam (MIGRATED) or has no database access (NO_OWN_SQL)', () => {
+  const noSql = new Set(Object.keys(NO_OWN_SQL));
+  for (const key of MIGRATED) assert.ok(!noSql.has(key), `${key} is in both lists`);
+  for (const r of all) assert.ok(MIGRATED.includes(r.key) || noSql.has(r.key), `${r.key} is in neither MIGRATED nor NO_OWN_SQL`);
+  assert.deepEqual(ALLOWED, {}, 'no listed exception is left inside a migrated route');
+  assert.equal(MIGRATED.length + noSql.size, all.length);
+});
+
+test('ratchet (5B-4): server.js has no database access outside the seam (no db use, SQL, settings access or data module)', () => {
+  // src/db.js: only the handle (to bind the seam) and the data directory; the settings come through the seam (src/settings.js)
+  const dbRequires = allCode.match(/^.*require\(['"]\.\/db['"]\).*$/gm) || [];
+  assert.deepEqual(dbRequires, ["const { db, DATA_DIR } = require('./db');"], 'server.js takes only `db` and `DATA_DIR` from src/db.js');
+  const dbLines = allCode.split('\n').filter((l) => /\bdb\b/.test(l)).map((l) => l.trim());
+  assert.deepEqual(dbLines, ["const { db, DATA_DIR } = require('./db');", 'const data = dataSeam.open({ driver: DB_DRIVER, db });'],
+    'the SQLite handle is used only to open the seam');
+  // the only local modules: the env loader, the seam, src/db.js (above), the mailer (the SQLite mail adapter) and the pure serial helpers
+  const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(locals, ['./dataSeam', './db', './env', './mailer', './serial'], 'no data module is loaded by server.js (only the seam)');
+  assert.doesNotMatch(allCode, /\.prepare\s*\(/, 'no prepared statement');
+  assert.doesNotMatch(allCode, /\.transaction\s*\(/, 'no transaction');
+  assert.doesNotMatch(allCode, /\b(db|database)\s*\.\s*(exec|pragma|prepare|transaction)\b/, 'no direct database call');
+  assert.doesNotMatch(allCode, /\b(SELECT|INSERT|UPDATE|DELETE|REPLACE)\s+(\*|INTO|FROM|[a-z_])/, 'no SQL text');
+  assert.doesNotMatch(allCode, /(?<![.\w$])(getSettings|setSetting)\b/, 'no settings access except data.settings.*');
+  for (const [re, what] of FORBIDDEN.slice(3)) {
+    if (what === 'a server.js helper that runs SQL') continue; // (the sweeps are named functions here; checked on their own below)
+    assert.doesNotMatch(allCode, re, `server.js uses ${what}`);
+  }
+});
+
+test('ratchet (5B-4): the overdue and waitlist sweeps reach the database only through the seam and keep their timers', () => {
+  const overdue = blockAt('async function overdueSweep()');
+  assert.match(overdue, /await data\.settings\.getSettings\(\)/);
+  assert.match(overdue, /await data\.overdue\.dueAssignments\(\)/);
+  assert.match(overdue, /await data\.overdue\.markNotified\(s\.id\)/);
+  const waitlist = blockAt('function waitlistSweep()');
+  assert.match(waitlist, /data\.waitlist\.sweep\(\)\.catch\(/, 'the waitlist sweep goes through the seam and logs a failure');
+  for (const [name, body] of [['overdueSweep', overdue], ['waitlistSweep', waitlist]]) {
+    const inner = body.slice(body.indexOf('{'));
+    for (const [re, what] of FORBIDDEN) assert.doesNotMatch(inner, re, `${name} uses ${what}`);
+  }
+  for (const timer of ['setInterval(overdueSweep, 3600e3).unref();', 'setTimeout(overdueSweep, 15e3).unref();',
+    'setInterval(waitlistSweep, 60e3).unref();', 'setTimeout(waitlistSweep, 20e3).unref();']) {
+    assert.equal(allCode.split(timer).length - 1, 1, `${timer} (unchanged interval, unref'd, once)`);
+  }
+  assert.equal((allCode.match(/\bset(Interval|Timeout)\(/g) || []).length, 5, 'no other timer (the four sweep timers and the hourly session purge)');
 });

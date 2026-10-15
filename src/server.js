@@ -11,22 +11,14 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const sharp = require('sharp');
-const { db, DATA_DIR, getSettings, setSetting } = require('./db');
+// src/db.js opens (and migrates) SQLite; server.js takes only the handle, to bind it into the seam below, and the data directory.
+// The settings are read and written through the seam (src/settings.js) since Slice 5B-4.
+const { db, DATA_DIR } = require('./db');
 const { notify, APP_URL, mailConfigured, mailEnvelope, testRecipient } = require('./mailer');
-const assignments = require('./assignments');
-const requestRules = require('./requests');
-const catalog = require('./catalog');
-const waitlistRules = require('./waitlist');
-const assetAccess = require('./assetAccess');
-// (Slice 5B-2) SQL moved verbatim out of this file; the routes not migrated yet use thin bound aliases of these (below)
-const activityLog = require('./activityLog');
-const people = require('./people');
-const assetViews = require('./assetViews');
-const assetRecords = require('./assetRecords');
-const requestAccess = require('./requestAccess');
-const { cleanSerial, serialKey } = require('./serial');
-// The data modules with the database bound (`await data.waitlist.join({...})`). Routes migrated to the seam (PostgreSQL migration
-// Slice 5B; listed in test/data-seam-ratchet.test.js) use only this; the others still use `db` and the modules above directly.
+const { cleanSerial } = require('./serial');
+// The data modules with the database bound (`await data.waitlist.join({...})`). Since PostgreSQL migration Slice 5B-4 every route, the
+// middleware, the session store and the timers reach the database ONLY through this (test/data-seam-ratchet.test.js); the modules' pure
+// exports (constants, validators) are read through it too (`data.assignments.capacity`).
 const data = dataSeam.open({ driver: DB_DRIVER, db });
 
 const app = express();
@@ -122,9 +114,8 @@ function admin(req, res, next) {
 const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, building: u.building || null, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email). The SQL is in
-// src/people.js (moved there verbatim in Slices 5B-2 and 5B-3); the request routes not migrated yet use this bound alias.
-const { HISTORY_LIMIT } = people;
-const getPerson = (id) => people.getPerson(db, id);
+// src/people.js (moved there verbatim in Slices 5B-2 and 5B-3).
+const { HISTORY_LIMIT } = data.people;
 const publicPerson = (p) => p && ({
   id: p.id, name: p.name, email: p.email, work_email: p.work_email, department: p.department, title: p.title, phone: p.phone,
   active: p.status === 'active', created_at: p.created_at,
@@ -133,13 +124,11 @@ const publicPerson = (p) => p && ({
   last_login_at: p.last_login_at || null, has_password: !!p.password_hash,
   can_self_checkout: !!p.can_self_checkout, building: p.building || null,
 });
-// Who did it: an account, shown by its employee's name (or login email if unlinked). (src/activityLog.js since Slice 5B-2)
-const { ACTOR_JOIN, ACTOR_NAME } = activityLog;
 const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
 const normEmail = (v) => { const c = clean(v); return c ? c.toLowerCase() : null; };
 
-// The activity log: src/activityLog.js (moved there verbatim in Slice 5B-2).
-const log = (assetId, actorAccountId, action, details, subjectEmployeeId) => activityLog.log(db, assetId, actorAccountId, action, details, subjectEmployeeId);
+// The activity log (who did it: an account, shown by its employee's name or login email): src/activityLog.js (Slice 5B-2).
+
 // Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id. A new token and its expiry (ISO string),
 // generated here; storing it (replacing the account's previous one of the same purpose) is src/accounts.js replaceToken (Slice 5B-3).
 function newToken(hours) {
@@ -147,32 +136,12 @@ function newToken(hours) {
   const expiresAt = new Date(Date.now() + hours * 3600e3).toISOString();
   return { token, expiresAt };
 }
-const getAsset = (id) => assetAccess.getAsset(db, id); // (SQL in src/assetAccess.js since Slice 5B-1)
 
-// Serials are unique across the whole inventory (archived assets included) ignoring surrounding whitespace and letter
-// case; see src/serial.js and src/assetRecords.js `assertSerialFree` (moved there verbatim in Slice 5B-2).
-const assertSerialFree = (serial, exceptAssetId) => assetRecords.assertSerialFree(db, serial, exceptAssetId);
-const { capacity } = assignments;
-const openAssignments = (assetId) => assetViews.openAssignments(db, assetId); // (SQL in src/assetViews.js since Slice 5B-2)
-
-const refreshStatus = (assetId) => assignments.refreshStatus(db, assetId);
-
-// ---- asset tag issuance ----
-// Generated tags are prefix + a number from a durable, ever-increasing counter (asset_tag_counter); the counter and its claim are in
-// src/assetRecords.js (moved there verbatim in Slice 5B-2). peekTag() only previews the next number and consumes nothing.
-const { formatTag } = assetRecords;
-const tagExists = (tag) => assetRecords.tagExists(db, tag);
-function peekTag() {
-  const prefix = getSettings().tag_prefix;
-  let n = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n + 1;
-  while (tagExists(formatTag(prefix, n))) n++;
-  return formatTag(prefix, n);
-}
-const allocateTag = () => assetRecords.allocateTag(db, getSettings().tag_prefix); // call only inside a transaction
-
-// Employee asset-visibility contract, enforced on the server (hiding navigation is not access control): see src/assetAccess.js
-// (moved there verbatim in Slice 5B-1 so the routes on the driver seam share the one definition).
-const canViewAsset = (user, a) => assetAccess.canViewAsset(db, user, a);
+// Serials are unique across the whole inventory (archived assets included) ignoring surrounding whitespace and letter case: see
+// src/serial.js and src/assetRecords.js `assertSerialFree`. Asset tags: prefix + a number from a durable, ever-increasing counter
+// (asset_tag_counter), claimed inside the asset's create transaction; `peekTag` only previews the next one (src/assetRecords.js).
+// The employee asset-visibility contract, enforced on the server (hiding navigation is not access control): src/assetAccess.js.
+const { capacity } = data.assignments;
 
 // ---------- setup & auth ----------
 // The SQL of these routes is in src/accounts.js and src/people.js (moved there verbatim in Slice 5B-3); bcrypt, the tokens, the session
@@ -213,8 +182,8 @@ app.post('/api/login', wrap(async (req, res) => {
 // never an "ok" that leaves the session signed in.)
 app.post('/api/logout', (req, res, next) => req.session.destroy((err) => (err ? next(err) : res.json({ ok: true }))));
 
-app.get('/api/me', auth, (req, res) => {
-  const { it_email_name, it_contact_email, ...shared } = getSettings(); // the IT email identity is IT's to see (Settings), not part of every employee's session
+app.get('/api/me', auth, async (req, res) => {
+  const { it_email_name, it_contact_email, ...shared } = await data.settings.getSettings(); // the IT email identity is IT's to see (Settings), not part of every employee's session
   // the zone a new optional time's AM/PM default is read in (APP_TIMEZONE, else the server's own zone): display only
   let appTimezone = process.env.APP_TIMEZONE || '';
   try { new Intl.DateTimeFormat('en-US', { timeZone: appTimezone || undefined }); } catch { appTimezone = ''; }
@@ -363,7 +332,6 @@ app.post('/api/users/:id/invite', admin, async (req, res) => {
 // Reading assets (the list, the asset page, the scan lookup, the fields a non-admin may see) lives in src/assetViews.js, writing them
 // (tags, serials, create / edit / archive) in src/assetRecords.js, getting them back in src/assetCustody.js: all moved there verbatim in
 // Slice 5B-2. The routes check the request, call the seam and send the emails.
-const { ASSET_LIST_SQL } = assetViews; // (the CSV export, not migrated yet)
 
 // Employees get ONE meaning for this list — "equipment I can get" (the shared pool, not their own); the status / holder filters are
 // IT's tools and are ignored for employees. The query and its rules: src/assetViews.js listAssets.
@@ -397,7 +365,8 @@ app.get('/api/assets/lookup/:code', auth, async (req, res) => {
 });
 
 // Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.
-app.get('/api/next-tag', admin, (req, res) => res.json({ tag: peekTag() }));
+// (The `tag_prefix` setting, the counter and the taken-tag check: src/assetRecords.js peekTag, moved there verbatim in Slice 5B-4.)
+app.get('/api/next-tag', admin, async (req, res) => res.json({ tag: await data.assetRecords.peekTag() }));
 
 // The asset page: holders, photos, live requests and reservations, the employee's own waitlist places, IT's activity (src/assetViews.js
 // assetDetail), for an asset this user may see (a 404 otherwise: src/assetAccess.js visibleAsset).
@@ -407,7 +376,7 @@ app.get('/api/assets/:id', auth, async (req, res) => {
 });
 
 // The two per-asset reservation settings (admin only). Strictly boolean-ish so a typo can't silently turn something on.
-const { FLAGS, ASSET_FIELDS } = assetRecords;
+const { FLAGS, ASSET_FIELDS } = data.assetRecords;
 function flagValue(body, key, current) {
   const v = body[key];
   if (v === undefined) return current ? 1 : 0;
@@ -441,10 +410,10 @@ app.post('/api/assets', admin, async (req, res) => {
   const status = ['maintenance', 'retired', 'lost'].includes(req.body.status) ? req.body.status : 'available';
   const flags = FLAGS.map((f) => flagValue(req.body, f, 0)); // both default OFF
   // Number claim + insert are one transaction: a failed create rolls the counter back, and two creates can't share a tag
-  // (src/assetRecords.js createAsset). A blank tag issues the next number with the `tag_prefix` setting, read here until the settings
-  // move to the seam in Slice 5B-4 (on SQLite in the same synchronous turn as the transaction, so the same value as before).
+  // (src/assetRecords.js createAsset). A blank tag issues the next number with the `tag_prefix` setting, read through the seam just
+  // before the transaction (on SQLite in the same event-loop turn as the transaction, so the same value as when it was read inside it).
   const tag = clean(req.body.tag);
-  const id = await data.assetRecords.createAsset({ tag, tagPrefix: tag ? null : getSettings().tag_prefix, status, nodeId, flags, v, actorAccountId: req.user.account_id });
+  const id = await data.assetRecords.createAsset({ tag, tagPrefix: tag ? null : (await data.settings.getSettings()).tag_prefix, status, nodeId, flags, v, actorAccountId: req.user.account_id });
   res.json(await data.assetAccess.getAsset(id));
 });
 
@@ -730,85 +699,72 @@ app.post('/api/catalog/:id/restore', admin, async (req, res) => { const id = Num
 app.delete('/api/catalog/:id', admin, async (req, res) => { await data.catalog.deleteNode(Number(req.params.id)); res.json({ ok: true }); });
 
 // ---------- requests ----------
-app.get('/api/requests', auth, (req, res) => {
-  const where = []; const params = [];
-  if (req.user.role !== 'admin') { where.push('r.user_id = ?'); params.push(req.user.employee_id); }
+// The list query, the new request's insert and the approval transaction: src/requestRecords.js; loading a request and the rescind/cancel
+// policy: src/requestAccess.js (moved there verbatim in Slices 5B-2 and 5B-4). The routes check the request, call the seam in the same
+// order as before and send the emails.
+app.get('/api/requests', auth, async (req, res) => {
   if (req.query.status !== undefined && !['open', 'closed'].includes(req.query.status)) throw httpError(400, 'Status must be open or closed');
   if (req.query.type !== undefined && !['equipment', 'return', 'issue'].includes(req.query.type)) throw httpError(400, 'Type must be equipment, return or issue');
-  if (req.query.status === 'open') where.push("r.status IN ('open','approved','dropped_off')");
-  else if (req.query.status === 'closed') where.push("r.status IN ('denied','completed','cancelled')");
-  if (req.query.type) { where.push('r.type = ?'); params.push(req.query.type); }
-  // `self_initiated`: the employee started this themselves (vs. IT asking). `can_cancel`: the server's own answer to
-  // "may this viewer cancel it right now", so the UI never has to guess the rule.
-  const rows = db.prepare(`
-    SELECT r.*, u.name AS user_name, u.department AS user_department, a.name AS asset_name, a.tag AS asset_tag, COALESCE(c.name, ca.login_email) AS created_by_name, COALESCE(rv.name, ra.login_email) AS resolved_by_name,
-      COALESCE(ca.employee_id = r.user_id, 0) AS self_initiated
-    FROM requests r JOIN employees u ON u.id = r.user_id
-    LEFT JOIN assets a ON a.id = r.asset_id
-    LEFT JOIN accounts ca ON ca.id = r.created_by LEFT JOIN employees c ON c.id = ca.employee_id
-    LEFT JOIN accounts ra ON ra.id = r.resolved_by LEFT JOIN employees rv ON rv.id = ra.employee_id
-    ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
-    ORDER BY CASE WHEN r.status IN ('open','dropped_off','approved') THEN 0 ELSE 1 END, r.created_at DESC LIMIT 500`).all(...params);
-  res.json(requestRules.withLifecycle(db, rows.map((r) => ({ ...r, can_cancel: requestRules.LIVE.includes(r.status) && !cancelBlock(r, req.user) }))));
+  // An employee sees only their own; each row says whether this viewer may cancel it (`can_cancel`) and who started it (`self_initiated`).
+  res.json(await data.requestRecords.listRequests(req.user, { status: req.query.status, type: req.query.type }));
 });
-app.post('/api/requests', auth, (req, res) => {
+app.post('/api/requests', auth, async (req, res) => {
   let category = clean(req.body.category);
   const message = clean(req.body.message);
   let nodeId = null; // what was asked for in the catalog (any level); asset_id set as well => a specific item, else "any matching"
   if (req.body.catalog_node_id !== undefined && req.body.catalog_node_id !== null && req.body.catalog_node_id !== '') {
     nodeId = Number(req.body.catalog_node_id);
-    if (!Number.isInteger(nodeId) || nodeId < 1 || !catalog.isLive(db, nodeId)) throw httpError(400, 'Choose equipment from the catalog list');
+    if (!Number.isInteger(nodeId) || nodeId < 1 || !(await data.catalog.isLive(nodeId))) throw httpError(400, 'Choose equipment from the catalog list');
   }
   if (!category && !message && nodeId === null) throw httpError(400, 'Tell IT what you need');
   const forUser = req.user.role === 'admin' && req.body.user_id ? Number(req.body.user_id) : req.user.employee_id;
   if (forUser === null) throw httpError(400, "Your login isn't linked to an employee record. Choose who the request is for.");
   const assetId = num(req.body.asset_id);
   const wantedType = clean(req.body.requested_assignment_type);
-  if (wantedType && !assignments.ASSIGNMENT_TYPES.includes(wantedType)) throw httpError(400, 'Requested assignment type must be permanent or checkout');
+  if (wantedType && !data.assignments.ASSIGNMENT_TYPES.includes(wantedType)) throw httpError(400, 'Requested assignment type must be permanent or checkout');
   if (wantedType === 'permanent' && assetId === null) throw httpError(400, 'Choose the equipment you want assigned permanently');
   if (!Number.isInteger(forUser) || forUser < 1) throw httpError(400, 'Choose a valid person for this request');
   if (assetId !== null && (!Number.isInteger(assetId) || assetId < 1)) throw httpError(400, 'Choose a valid asset');
-  const forPerson = db.prepare('SELECT status FROM employees WHERE id = ?').get(forUser);
+  const forPerson = await data.people.employeeStatus(forUser);
   if (!forPerson) throw httpError(404, 'User not found');
   if (forPerson.status !== 'active') throw httpError(400, 'That person is inactive, so a request can\'t be made for them');
-  const wanted = assetId === null ? null : getAsset(assetId);
-  if (assetId !== null && (!wanted || !canViewAsset(req.user, wanted))) throw httpError(404, 'Asset not found'); // an employee can only ask for equipment they can see
+  const wanted = assetId === null ? null : await data.assetAccess.getAsset(assetId);
+  if (assetId !== null && (!wanted || !(await data.assetAccess.canViewAsset(req.user, wanted)))) throw httpError(404, 'Asset not found'); // an employee can only ask for equipment they can see
   if (wanted && wanted.archived_at) throw httpError(400, 'This asset is archived and can\'t be requested.');
   if (wanted && nodeId !== null) {
     // A specific item picked under a catalog selection: it must really be filed under that entry, and an employee may only
     // pick what they could get anyway (available, not archived, not theirs already) — never something someone else holds.
-    if (req.user.role !== 'admin' && (wanted.status !== 'available' || db.prepare('SELECT 1 FROM assignments WHERE asset_id = ? AND employee_id = ? AND returned_at IS NULL').get(wanted.id, forUser))) throw httpError(404, 'Asset not found');
-    if (!catalog.subtreeIds(db, nodeId).includes(wanted.catalog_node_id)) throw httpError(400, "That item isn't part of the equipment you chose.");
-  } else if (wanted && wanted.catalog_node_id && catalog.isLive(db, wanted.catalog_node_id)) {
+    if (req.user.role !== 'admin' && (wanted.status !== 'available' || await data.assetAccess.holdsAsset(wanted.id, forUser))) throw httpError(404, 'Asset not found');
+    if (!(await data.catalog.subtreeIds(nodeId)).includes(wanted.catalog_node_id)) throw httpError(400, "That item isn't part of the equipment you chose.");
+  } else if (wanted && wanted.catalog_node_id && await data.catalog.isLive(wanted.catalog_node_id)) {
     nodeId = wanted.catalog_node_id; // asked for one particular item (e.g. from its page): record where it sits in the catalog
   }
   // Snapshots, so the request still reads the same after a rename, a move or an asset edit.
-  const catalogPath = nodeId !== null ? catalog.pathText(db, nodeId) : null;
-  if (nodeId !== null) category = catalog.rootOf(db, nodeId).name;
+  const catalogPath = nodeId !== null ? await data.catalog.pathText(nodeId) : null;
+  if (nodeId !== null) category = (await data.catalog.rootOf(nodeId)).name;
   const assetLabel = wanted ? `${wanted.tag} — ${wanted.name}` : null;
   // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
-  const info = db.prepare("INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type, catalog_node_id, catalog_path, asset_label) VALUES ('equipment', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
-    .run(forUser, assetId, category || (wantedType === 'permanent' ? wanted.category : null), message, clean(req.body.needed_by), req.user.account_id, wantedType, nodeId, catalogPath, assetLabel);
-  const r = db.prepare('SELECT * FROM requests WHERE id = ?').get(info.lastInsertRowid);
-  if (assetId) log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || catalogPath || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
-  notify.equipmentRequested(getPerson(forUser), r);
+  const r = await data.requestRecords.createEquipmentRequest({
+    forUser, assetId, category: category || (wantedType === 'permanent' ? wanted.category : null), message, neededBy: clean(req.body.needed_by),
+    createdBy: req.user.account_id, wantedType, nodeId, catalogPath, assetLabel,
+  });
+  if (assetId) await data.activityLog.log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || catalogPath || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
+  notify.equipmentRequested(await data.people.getPerson(forUser), r);
   res.json(r);
 });
-// Loading a request (a 404 if there is none) and the rescind/cancel policy: src/requestAccess.js (moved there verbatim in Slice 5B-2).
-const loadRequest = (id) => requestAccess.loadRequest(db, id);
 // IT opens a request (the admin detail view calls this when it is shown). Sets opened_at once — that is what ends the
 // employee's right to rescind — and is a no-op on later calls and on closed requests. Admin only; never a GET side effect.
 app.post('/api/requests/:id/open', admin, async (req, res) => {
   const r = await data.requests.openRequest(Number(req.params.id));
   res.json(await data.requests.withLifecycle(r));
 });
-app.post('/api/requests/:id/approve', admin, (req, res) => {
-  const r = loadRequest(req.params.id);
+app.post('/api/requests/:id/approve', admin, async (req, res) => {
+  const r = await data.requestAccess.loadRequest(req.params.id);
   if (r.type !== 'equipment') throw httpError(400, 'This request is not open');
-  if (!requestRules.canTransition('equipment', r.status, 'approved') && !requestRules.canTransition('equipment', r.status, 'completed')) {
-    throw httpError(400, requestRules.TERMINAL.includes(r.status) ? 'This request is already closed' : 'This request is not open');
+  if (!data.requests.canTransition('equipment', r.status, 'approved') && !data.requests.canTransition('equipment', r.status, 'completed')) {
+    throw httpError(400, data.requests.TERMINAL.includes(r.status) ? 'This request is already closed' : 'This request is not open');
   }
-  const user = getPerson(r.user_id);
+  const user = await data.people.getPerson(r.user_id);
   if (!user || user.status !== 'active') throw httpError(400, 'That person is inactive, so this request can\'t be approved');
   const rawAssetId = num(req.body.asset_id);
   if (rawAssetId !== null && (!Number.isInteger(rawAssetId) || rawAssetId < 0)) throw httpError(400, 'Choose a valid asset');
@@ -822,27 +778,24 @@ app.post('/api/requests/:id/approve', admin, (req, res) => {
     assetId = r.asset_id;
     assignmentType = 'permanent';
   }
-  const asset = assetId ? getAsset(assetId) : null;
+  const asset = assetId ? await data.assetAccess.getAsset(assetId) : null;
   if (assetId && !asset) throw httpError(404, 'Asset not found');
   // Fulfilling (an asset is attached) must hand over what was asked for. A request that named one item (asset_id is only
   // ever set on an unfulfilled request when a specific item was requested) is fulfilled with that item and no other; an
   // "any matching" request takes any asset filed under the catalog entry that was asked for. Availability, archived and
   // seat rules are enforced by createAssignment inside the transaction below.
   if (asset && r.asset_id !== null && asset.id !== r.asset_id) throw httpError(400, `This request is for a specific item (${r.asset_label || 'the one that was requested'}). It can only be fulfilled with that item.`);
-  if (asset && r.asset_id === null && r.catalog_node_id !== null && !catalog.subtreeIds(db, r.catalog_node_id).includes(asset.catalog_node_id)) {
+  if (asset && r.asset_id === null && r.catalog_node_id !== null && !(await data.catalog.subtreeIds(r.catalog_node_id)).includes(asset.catalog_node_id)) {
     throw httpError(400, `That asset isn't part of the equipment that was requested${r.catalog_path ? ` (${r.catalog_path})` : ''}. Choose a matching asset.`);
   }
   const note = clean(req.body.note);
-  // The assignment (if any) and the request's completion succeed or fail together; emails go out only after commit.
-  const assignment = db.transaction(() => {
-    const made = asset ? assignments.createAssignment(db, {
-      assetId: asset.id, employeeId: user.id, actorAccountId: req.user.account_id, actorIsAdmin: true,
-      type: assignmentType, dueDate: req.body.due_date, dueTime: req.body.due_time, notes: `Request #${r.id}`,
-    }).assignment : null;
-    requestRules.transition(db, r.id, asset ? 'completed' : 'approved', { actorAccountId: req.user.account_id, actorIsAdmin: true, note, setNote: true, assetId: asset ? asset.id : null });
-    return made;
-  }).immediate();
-  if (assignment) notify.checkedOut(user, getAsset(asset.id), assignment);
+  // The assignment (if any) and the request's completion succeed or fail together (ONE immediate transaction: src/requestRecords.js
+  // approveRequest); emails go out only after commit.
+  const assignment = await data.requestRecords.approveRequest({
+    request: r, asset, employeeId: user.id, actorAccountId: req.user.account_id,
+    assignmentType, dueDate: req.body.due_date, dueTime: req.body.due_time, note,
+  });
+  if (assignment) notify.checkedOut(user, await data.assetAccess.getAsset(asset.id), assignment);
   // When an asset is attached the checkout email already went out; only send the approval note if no asset yet or a note was added
   if (!asset || note) notify.requestResolved(user, { ...r, status: asset ? 'completed' : 'approved', resolution_note: note }, asset);
   res.json({ ok: true });
@@ -855,17 +808,17 @@ app.post('/api/requests/:id/deny', admin, async (req, res) => {
   notify.requestResolved(await data.people.getPerson(r.user_id), { ...r, status: 'denied', resolution_note: note });
   res.json({ ok: true });
 });
-// Resolves an issue report. Issues have no approve/deny: IT either resolves one (here) or dismisses it (cancel).
-app.post('/api/requests/:id/resolve', admin, (req, res) => {
-  const r = loadRequest(req.params.id);
+// Resolves an issue report. Issues have no approve/deny: IT either resolves one (here) or dismisses it (cancel). The status change and
+// the activity row are two steps, as before (not one transaction).
+app.post('/api/requests/:id/resolve', admin, async (req, res) => {
+  const r = await data.requestAccess.loadRequest(req.params.id);
   if (r.type !== 'issue') throw httpError(400, 'Only issue reports can be marked resolved');
-  requestRules.transition(db, r.id, 'completed', { actorAccountId: req.user.account_id, actorIsAdmin: true, note: clean(req.body.note), setNote: true });
-  log(r.asset_id, req.user.account_id, 'issue_resolved', clean(req.body.note) || 'Marked resolved', r.user_id);
+  await data.requests.transition(r.id, 'completed', { actorAccountId: req.user.account_id, actorIsAdmin: true, note: clean(req.body.note), setNote: true });
+  await data.activityLog.log(r.asset_id, req.user.account_id, 'issue_resolved', clean(req.body.note) || 'Marked resolved', r.user_id);
   res.json({ ok: true });
 });
 // Rescind/cancel policy, one place for the route and for the `can_cancel` flag on the list: src/requestAccess.js cancelBlock (admin:
 // any live request; an employee: only their own, while live and before IT has opened it; see the table there).
-const cancelBlock = (r, user) => requestAccess.cancelBlock(db, r, user);
 // Rescind/cancel: the person who made a request may cancel their own while it is still eligible (see cancelBlock); IT may
 // cancel any live request. A cancelled request stays in history — nothing is deleted.
 app.post('/api/requests/:id/cancel', auth, async (req, res) => {
@@ -876,15 +829,16 @@ app.post('/api/requests/:id/cancel', auth, async (req, res) => {
   await data.requests.transition(r.id, 'cancelled', { actorAccountId: req.user.account_id, actorIsAdmin: isIT, requireUnopened: !isIT });
   res.json({ ok: true });
 });
-app.post('/api/requests/:id/dropped-off', auth, (req, res) => {
-  const r = loadRequest(req.params.id);
+// The status change, then (if the asset still exists) the activity row and the email: separate steps, as before.
+app.post('/api/requests/:id/dropped-off', auth, async (req, res) => {
+  const r = await data.requestAccess.loadRequest(req.params.id);
   if (r.user_id !== req.user.employee_id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
   if (r.type !== 'return') throw httpError(400, 'This request is not open');
-  requestRules.transition(db, r.id, 'dropped_off', { actorIsAdmin: req.user.role === 'admin' });
-  const asset = getAsset(r.asset_id);
+  await data.requests.transition(r.id, 'dropped_off', { actorIsAdmin: req.user.role === 'admin' });
+  const asset = await data.assetAccess.getAsset(r.asset_id);
   if (asset) {
-    log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
-    notify.droppedOff(getPerson(r.user_id), asset);
+    await data.activityLog.log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
+    notify.droppedOff(await data.people.getPerson(r.user_id), asset);
   }
   res.json({ ok: true });
 });
@@ -924,7 +878,10 @@ app.get('/api/dashboard', auth, async (req, res) => {
 });
 
 // ---------- settings, email, import/export ----------
-app.get('/api/settings', admin, (req, res) => res.json({ ...getSettings(), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null, mailEnvelope: mailEnvelope(), mailTestRecipient: testRecipient() }));
+// On the seam since Slice 5B-4: the settings (src/settings.js, the SQL of src/db.js getSettings / setSetting), the outbox (src/outbox.js),
+// IT's activity list (src/activityLog.js recent), the CSV export query (src/assetViews.js exportRows) and the import transaction
+// (src/assetRecords.js importAssets). Validation, the CSV text and the emails stay here.
+app.get('/api/settings', admin, async (req, res) => res.json({ ...(await data.settings.getSettings()), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null, mailEnvelope: mailEnvelope(), mailTestRecipient: testRecipient() }));
 // The IT email identity is just a display name and a contact address. Anything credential-shaped is refused outright: passwords, app
 // passwords, API keys and OAuth secrets belong in the server environment (SMTP_PASS etc.), never in the database or this screen.
 const CREDENTIAL_KEY = /pass(word)?|secret|token|api[_-]?key|smtp|credential|oauth/i;
@@ -943,38 +900,35 @@ function itEmailSettings(b) {
   }
   return out;
 }
-app.put('/api/settings', admin, (req, res) => {
+// Each setting is its own write, in this order, as before (no transaction); the answer is the settings read back.
+app.put('/api/settings', admin, async (req, res) => {
   const b = req.body;
   if (Object.keys(b).some((k) => CREDENTIAL_KEY.test(k))) throw httpError(400, 'Email passwords, keys and secrets are not stored here. Set them in the server environment (see the README).');
   const it = itEmailSettings(b); // validate everything new BEFORE anything is saved
-  for (const [k, v] of Object.entries(it)) setSetting(k, v);
-  if (b.overdue_reminders !== undefined) setSetting('overdue_reminders', b.overdue_reminders ? '1' : '0');
-  if (b.default_loan_days !== undefined) setSetting('default_loan_days', String(Math.max(0, parseInt(b.default_loan_days, 10) || 0)));
-  if (b.tag_prefix !== undefined) setSetting('tag_prefix', String(b.tag_prefix).trim().slice(0, 10));
-  if (Array.isArray(b.categories)) setSetting('categories', b.categories.map((s) => String(s).trim()).filter(Boolean));
-  if (Array.isArray(b.locations)) setSetting('locations', b.locations.map((s) => String(s).trim()).filter(Boolean));
-  res.json(getSettings());
+  for (const [k, v] of Object.entries(it)) await data.settings.setSetting(k, v);
+  if (b.overdue_reminders !== undefined) await data.settings.setSetting('overdue_reminders', b.overdue_reminders ? '1' : '0');
+  if (b.default_loan_days !== undefined) await data.settings.setSetting('default_loan_days', String(Math.max(0, parseInt(b.default_loan_days, 10) || 0)));
+  if (b.tag_prefix !== undefined) await data.settings.setSetting('tag_prefix', String(b.tag_prefix).trim().slice(0, 10));
+  if (Array.isArray(b.categories)) await data.settings.setSetting('categories', b.categories.map((s) => String(s).trim()).filter(Boolean));
+  if (Array.isArray(b.locations)) await data.settings.setSetting('locations', b.locations.map((s) => String(s).trim()).filter(Boolean));
+  res.json(await data.settings.getSettings());
 });
 app.post('/api/settings/test-email', admin, wrap(async (req, res) => {
   await notify.test(req.user.email);
-  const last = db.prepare('SELECT status, error FROM outbox ORDER BY id DESC LIMIT 1').get();
+  const last = await data.outbox.latest();
   res.json(last);
 }));
-app.get('/api/outbox', admin, (req, res) => {
-  res.json(db.prepare('SELECT id, to_addr, subject, status, error, delivered_to, created_at FROM outbox ORDER BY id DESC LIMIT 100').all());
+app.get('/api/outbox', admin, async (req, res) => {
+  res.json(await data.outbox.recent());
 });
-app.get('/api/activity', admin, (req, res) => {
-  res.json(db.prepare(`
-    SELECT ac.*, ${ACTOR_NAME}, a.name AS asset_name, a.tag FROM activity ac
-    ${ACTOR_JOIN} LEFT JOIN assets a ON a.id = ac.asset_id
-    ORDER BY ac.id DESC LIMIT ?`).all(Math.min(1000, Number(req.query.limit) || 200)));
+app.get('/api/activity', admin, async (req, res) => {
+  res.json(await data.activityLog.recent(Math.min(1000, Number(req.query.limit) || 200)));
 });
 
 const csvCell = (v) => { const s = String(v ?? ''); return /[",\n\r]/.test(s) || /^[=+\-@]/.test(s) ? `"${(/^[=+\-@]/.test(s) ? "'" : '') + s.replace(/"/g, '""')}"` : s; };
-app.get('/api/export/assets.csv', admin, (req, res) => {
-  const rows = db.prepare(`${ASSET_LIST_SQL} WHERE a.archived_at IS NULL ORDER BY a.tag`).all();
+app.get('/api/export/assets.csv', admin, async (req, res) => {
+  const rows = await data.assetViews.exportRows(); // every live asset by tag, each with its catalog path ('' when unlinked)
   const cols = ['tag', 'name', 'category', 'status', 'holder_names', 'due_date', 'brand', 'model', 'serial', 'condition', 'location', 'purchase_date', 'purchase_cost', 'vendor', 'warranty_expires', 'license_seats', 'seats_used', 'license_expires', 'notes', 'catalog_path'];
-  for (const r of rows) r.catalog_path = r.catalog_node_id ? catalog.pathText(db, r.catalog_node_id) : '';
   const csv = [cols.join(',')].concat(rows.map((r) => cols.map((c) => csvCell(r[c])).join(','))).join('\r\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="nutricost-assets-${today()}.csv"`);
@@ -998,76 +952,34 @@ function parseCsv(text) {
   if (cell || row.length) { row.push(cell); rows.push(row); }
   return rows.filter((r) => r.some((c) => c.trim()));
 }
-app.post('/api/import/assets', admin, (req, res) => {
+app.post('/api/import/assets', admin, async (req, res) => {
   const rows = parseCsv(String(req.body || ''));
   if (rows.length < 2) throw httpError(400, 'The file needs a header row and at least one asset');
   const header = rows[0].map((h) => h.trim().toLowerCase().replace(/[^a-z]+/g, '_').replace(/^_|_$/g, ''));
   const alias = { asset_tag: 'tag', serial_number: 'serial', s_n: 'serial', type: 'category', manufacturer: 'brand', cost: 'purchase_cost', price: 'purchase_cost', warranty: 'warranty_expires', seats: 'license_seats', assigned_to: 'assigned_email', email: 'assigned_email', catalog: 'catalog_path' };
   const keys = header.map((h) => alias[h] || h);
-  let created = 0, updated = 0; const errors = [];
-  // assigned_email matches an active employee by work email (or their login email); no login is needed to receive equipment.
-  const users = new Map();
-  for (const u of db.prepare("SELECT e.id, e.name, e.work_email, a.login_email FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id WHERE e.status = 'active'").all()) {
-    for (const k of [u.work_email, u.login_email]) if (k) users.set(k.toLowerCase(), u);
-  }
-  const tx = db.transaction(() => {
-    rows.slice(1).forEach((r, idx) => {
-      const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
-      if (o.purchase_cost) o.purchase_cost = String(o.purchase_cost).replace(/[$,]/g, '');
-      const v = assetValues(o);
-      const tag = clean(o.tag);
-      const existing = tag ? db.prepare('SELECT * FROM assets WHERE tag = ?').get(tag) : null;
-      if (existing && existing.archived_at) { errors.push(`Row ${idx + 2}: tag ${tag} belongs to an archived asset — skipped`); return; }
-      if (!v.name && !existing) { errors.push(`Row ${idx + 2}: missing name`); return; }
-      if (!existing) { v.category = v.category || 'Other'; v.condition = v.condition || 'Good'; }
-      // A serial that belongs to a different asset (already in the inventory, archived or not, or earlier in this file)
-      // skips just this row; an update that leaves the serial blank keeps the stored one.
-      try { assertSerialFree(v.serial, existing ? existing.id : null); } catch (e) { errors.push(`Row ${idx + 2}: ${e.message.split('. ')[0]} — skipped`); return; }
-      let id;
-      if (existing) {
-        db.prepare(`UPDATE assets SET ${ASSET_FIELDS.map((f) => `${f} = COALESCE(?, ${f})`).join(', ')}, serial_normalized = COALESCE(?, serial_normalized), updated_at = datetime('now') WHERE id = ?`)
-          .run(...ASSET_FIELDS.map((f) => v[f]), serialKey(v.serial), existing.id);
-        id = existing.id; updated++;
-      } else {
-        const cols = ['tag', 'serial_normalized', ...ASSET_FIELDS];
-        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(), serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
-        log(id, req.user.account_id, 'created', 'Imported from CSV'); created++;
-        const home = clean(o.catalog_path) ? null : catalog.findLiveByPath(db, v.category); // same default as a manual create (the category's root), unless the row named a path
-        if (home) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(home, catalog.rootOf(db, home).name, id);
-      }
-      // catalog_path ("Laptop > Mac > MacBook Air") must match an active entry exactly (ignoring case/spacing); otherwise the
-      // row is still imported but the link is left alone and the row is reported — nothing is guessed.
-      const cpath = clean(o.catalog_path);
-      if (cpath) {
-        const nid = catalog.findLiveByPath(db, cpath);
-        if (nid) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(nid, catalog.rootOf(db, nid).name, id);
-        else errors.push(`Row ${idx + 2}: catalog path “${cpath}” doesn't match an active catalog entry — imported without a catalog link`);
-      }
-      const em = clean(o.assigned_email)?.toLowerCase();
-      if (em && users.has(em) && !openAssignments(id).length) {
-        const u = users.get(em);
-        db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type, checked_out_by, notes) VALUES (?, ?, 'permanent', ?, ?)").run(id, u.id, req.user.account_id, 'Imported');
-        refreshStatus(id);
-        log(id, req.user.account_id, 'checked_out', `To ${u.name} (import)`, u.id);
-      } else if (em && !users.has(em)) errors.push(`Row ${idx + 2}: no user with email ${em} — imported unassigned`);
-    });
+  // Each data row by column name, with its fields validated (`assetValues` reads no database and cannot refuse a CSV row: every cell is
+  // text). Done here, before the seam call, instead of row by row inside the transaction: the same values either way.
+  const items = rows.slice(1).map((r) => {
+    const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
+    if (o.purchase_cost) o.purchase_cost = String(o.purchase_cost).replace(/[$,]/g, '');
+    return { o, v: assetValues(o) };
   });
-  tx();
-  res.json({ created, updated, errors });
+  // The active employees (for assigned_email), then the WHOLE file in ONE transaction, exactly as before (src/assetRecords.js
+  // importAssets): a row with a problem is skipped or imported partly and reported in `errors`; anything that throws rolls it all back.
+  res.json(await data.assetRecords.importAssets({ rows: items, actorAccountId: req.user.account_id }));
 });
 
 // ---------- overdue reminders ----------
-function overdueSweep() {
-  if (!getSettings().overdue_reminders) return;
-  const rows = db.prepare(`
-    SELECT s.*, u.name AS user_name, COALESCE(u.work_email, ac.login_email) AS user_email FROM assignments s
-    JOIN employees u ON u.id = s.employee_id LEFT JOIN accounts ac ON ac.employee_id = u.id
-    WHERE s.returned_at IS NULL AND s.due_date IS NOT NULL AND s.due_date < date('now')
-      AND (s.last_overdue_notice IS NULL OR s.last_overdue_notice <= date('now','-3 day')) AND u.status = 'active'`).all();
+// The query and the "reminded today" mark: src/overdue.js (moved there verbatim in Slice 5B-4). The setting check, the order (each email,
+// then its mark) and the emails stay here; the timers keep their intervals. (A failure is not caught, as before.)
+async function overdueSweep() {
+  if (!(await data.settings.getSettings()).overdue_reminders) return;
+  const rows = await data.overdue.dueAssignments();
   for (const s of rows) {
-    const a = getAsset(s.asset_id);
+    const a = await data.assetAccess.getAsset(s.asset_id);
     notify.overdue({ name: s.user_name, email: s.user_email }, a, s);
-    db.prepare("UPDATE assignments SET last_overdue_notice = date('now') WHERE id = ?").run(s.id);
+    await data.overdue.markNotified(s.id);
   }
 }
 setInterval(overdueSweep, 3600e3).unref();
@@ -1075,8 +987,10 @@ setTimeout(overdueSweep, 15e3).unref();
 
 // ---------- waitlist sweep ----------
 // Records holds that ran out, offers free dates to the next person in line (this is what notices a check-in or a changed asset setting, which
-// do not touch the waitlist directly) and sends any hold email still owed. Idempotent, so running it often is harmless.
-function waitlistSweep() { try { waitlistRules.sweep(db); } catch (e) { console.error('[waitlist:sweep]', e.message); } }
+// do not touch the waitlist directly) and sends any hold email still owed. Idempotent, so running it often is harmless. Through the seam
+// since Slice 5B-4 (on SQLite the sweep still runs to completion inside the call; a failure is logged, as before). The PostgreSQL
+// single-flight scheduler (src/pg/sweep.js) replaces this timer in Slice 5D.
+function waitlistSweep() { return data.waitlist.sweep().catch((e) => console.error('[waitlist:sweep]', e.message)); }
 setInterval(waitlistSweep, 60e3).unref();
 setTimeout(waitlistSweep, 20e3).unref();
 
