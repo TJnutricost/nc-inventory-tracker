@@ -22,9 +22,20 @@ const MODULES = {
   requests: [require('../requests'), ['transition', 'openRequest', 'lifecycle', 'withLifecycle', 'completeEquipmentRequests', 'completeReturnRequests']],
   assignments: [require('../assignments'), ['refreshStatus', 'createAssignment']],
   // extracted verbatim from server.js in Slice 5B-1 for the routes migrated to the seam
-  assetAccess: [require('../assetAccess'), ['getAsset', 'canViewAsset', 'reservableAsset']],
-  reservationViews: [require('../reservationViews'), ['reservationOut', 'reservationById']],
+  // (assetAccess and reservationViews gained functions in 5B-2: visibleAsset/heldAsset/holdsAsset, listReservations)
+  assetAccess: [require('../assetAccess'), ['getAsset', 'canViewAsset', 'reservableAsset', 'visibleAsset', 'heldAsset', 'holdsAsset']],
+  reservationViews: [require('../reservationViews'), ['reservationOut', 'reservationById', 'listReservations']],
   catalogAdmin: [require('../catalogAdmin'), ['syncAssetCategories', 'catalogOut', 'createNode', 'updateNode']],
+  // extracted verbatim from server.js in Slice 5B-2 (assets, photos, dashboard, scan, and the 5B-1 deferred reads)
+  activityLog: [require('../activityLog'), ['log']],
+  people: [require('../people'), ['getPerson']],
+  assetViews: [require('../assetViews'), ['openAssignments', 'withCatalog', 'sanitizeAsset', 'listAssets', 'lookupCode', 'assetDetail']],
+  assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset']],
+  assetCustody: [require('../assetCustody'), ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice']],
+  photoRecords: [require('../photoRecords'), ['addPhoto', 'touchAsset', 'getPhoto', 'deletePhoto', 'photoAsset', 'setCover', 'photoByFile']],
+  dashboard: [require('../dashboard'), ['dashboard']],
+  catalogViews: [require('../catalogViews'), ['searchCatalog', 'catalogTree']],
+  requestAccess: [require('../requestAccess'), ['loadRequest', 'isSelfInitiated', 'cancelBlock']],
 };
 
 function bindModule(db, name, mod, dbFunctions) {
