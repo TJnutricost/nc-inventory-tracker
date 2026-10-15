@@ -53,22 +53,26 @@ app.get('/health', (req, res) => {
 });
 
 // ---------- sessions (SQLite-backed) ----------
+// The express-session store. Each method is ONE seam call (the SQL is in src/sessions.js since Slice 5B-3); the session's JSON, its
+// expiry time and "an expired session is no session" stay here. The callback runs when the seam call settles (on SQLite a microtask,
+// still before the response is written: express-session waits for save / touch / destroy before it ends the response). A failed call
+// reaches the callback as its error. A PostgreSQL session store is Slice 5D.
 class SqliteStore extends session.Store {
   get(sid, cb) {
-    const row = db.prepare('SELECT sess, expires FROM sessions WHERE sid = ?').get(sid);
-    if (!row || row.expires < Date.now()) return cb(null, null);
-    cb(null, JSON.parse(row.sess));
+    data.sessions.get(sid).then((row) => {
+      let sess;
+      try { sess = !row || row.expires < Date.now() ? null : JSON.parse(row.sess); } catch (err) { return cb(err); }
+      cb(null, sess);
+    }, cb);
   }
   set(sid, sess, cb) {
     const maxAge = sess.cookie?.maxAge ?? 30 * 864e5;
-    db.prepare('INSERT INTO sessions (sid, sess, expires) VALUES (?, ?, ?) ON CONFLICT(sid) DO UPDATE SET sess=excluded.sess, expires=excluded.expires')
-      .run(sid, JSON.stringify(sess), Date.now() + maxAge);
-    cb && cb(null);
+    data.sessions.set(sid, JSON.stringify(sess), Date.now() + maxAge).then(() => cb && cb(null), (err) => cb && cb(err));
   }
-  destroy(sid, cb) { db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid); cb && cb(null); }
+  destroy(sid, cb) { data.sessions.destroy(sid).then(() => cb && cb(null), (err) => cb && cb(err)); }
   touch(sid, sess, cb) { this.set(sid, sess, cb); }
 }
-setInterval(() => db.prepare('DELETE FROM sessions WHERE expires < ?').run(Date.now()), 3600e3).unref();
+setInterval(() => data.sessions.purgeExpired(Date.now()), 3600e3).unref();
 
 let secret = process.env.SESSION_SECRET;
 if (!secret) {
@@ -103,30 +107,23 @@ const wrap = (fn) => (req, res, next) => { try { const r = fn(req, res, next); i
 // Identity model (Phase 1D): a session identifies an ACCOUNT (login + authorization; role lives here).
 // An account optionally links to an EMPLOYEE (the person who holds equipment / makes requests).
 // req.user deliberately has no plain `id`: use account_id when recording who ACTED, employee_id when
-// referring to the PERSON (assignee / requester).
-function currentUser(req) {
-  if (!req.session.uid) return null;
-  return db.prepare(`
-    SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
-      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
-    FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
-    WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(req.session.uid) || null;
-}
-function auth(req, res, next) {
-  const u = currentUser(req);
+// referring to the PERSON (assignee / requester). The signed-in account: src/accounts.js currentUser (moved there verbatim in Slice 5B-3);
+// the guards are async and reach it through the seam (Express 5 hands a rejection to the error handler).
+async function auth(req, res, next) {
+  const u = await data.accounts.currentUser(req.session.uid);
   if (!u) return res.status(401).json({ error: 'Please sign in' });
   req.user = u;
   next();
 }
 function admin(req, res, next) {
-  auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
+  return auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
 }
 // The signed-in user as the UI sees it: `id` is the EMPLOYEE (person) id, null for an account with no employee record.
 const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, building: u.building || null, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email). The SQL is in
-// src/people.js (moved there verbatim in Slice 5B-2).
-const { PERSON_SQL } = people;
+// src/people.js (moved there verbatim in Slices 5B-2 and 5B-3); the request routes not migrated yet use this bound alias.
+const { HISTORY_LIMIT } = people;
 const getPerson = (id) => people.getPerson(db, id);
 const publicPerson = (p) => p && ({
   id: p.id, name: p.name, email: p.email, work_email: p.work_email, department: p.department, title: p.title, phone: p.phone,
@@ -143,13 +140,12 @@ const normEmail = (v) => { const c = clean(v); return c ? c.toLowerCase() : null
 
 // The activity log: src/activityLog.js (moved there verbatim in Slice 5B-2).
 const log = (assetId, actorAccountId, action, details, subjectEmployeeId) => activityLog.log(db, assetId, actorAccountId, action, details, subjectEmployeeId);
-// Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id.
-function makeToken(userId, purpose, hours) {
+// Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id. A new token and its expiry (ISO string),
+// generated here; storing it (replacing the account's previous one of the same purpose) is src/accounts.js replaceToken (Slice 5B-3).
+function newToken(hours) {
   const token = crypto.randomBytes(24).toString('base64url');
-  const exp = new Date(Date.now() + hours * 3600e3).toISOString();
-  db.prepare('DELETE FROM tokens WHERE user_id = ? AND purpose = ?').run(userId, purpose);
-  db.prepare('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, ?, ?)').run(token, userId, purpose, exp);
-  return token;
+  const expiresAt = new Date(Date.now() + hours * 3600e3).toISOString();
+  return { token, expiresAt };
 }
 const getAsset = (id) => assetAccess.getAsset(db, id); // (SQL in src/assetAccess.js since Slice 5B-1)
 
@@ -179,19 +175,18 @@ const allocateTag = () => assetRecords.allocateTag(db, getSettings().tag_prefix)
 const canViewAsset = (user, a) => assetAccess.canViewAsset(db, user, a);
 
 // ---------- setup & auth ----------
-app.get('/api/setup-needed', (req, res) => {
-  res.json({ needed: db.prepare('SELECT COUNT(*) c FROM accounts').get().c === 0 });
+// The SQL of these routes is in src/accounts.js and src/people.js (moved there verbatim in Slice 5B-3); bcrypt, the tokens, the session
+// and the emails stay here, in the same order as before.
+app.get('/api/setup-needed', async (req, res) => {
+  res.json({ needed: await data.accounts.accountCount() === 0 });
 });
 app.post('/api/setup', wrap(async (req, res) => {
-  if (db.prepare('SELECT COUNT(*) c FROM accounts').get().c > 0) throw httpError(400, 'Setup already completed');
+  if (await data.accounts.accountCount() > 0) throw httpError(400, 'Setup already completed');
   const { name, email, password } = req.body;
   if (!clean(name) || !clean(email) || !password || password.length < 8) throw httpError(400, 'Name, email and a password of at least 8 characters are required');
   const hash = await bcrypt.hash(password, 10);
   const mail = normEmail(email);
-  const accountId = db.transaction(() => {
-    const emp = db.prepare("INSERT INTO employees (name, work_email, department) VALUES (?, ?, 'IT')").run(clean(name), mail).lastInsertRowid;
-    return db.prepare("INSERT INTO accounts (employee_id, login_email, password_hash, role) VALUES (?, ?, ?, 'admin')").run(emp, mail, hash).lastInsertRowid;
-  })();
+  const accountId = await data.accounts.createFirstAdmin({ name: clean(name), mail, hash });
   req.session.uid = accountId;
   res.json({ ok: true });
 }));
@@ -203,19 +198,20 @@ app.post('/api/login', wrap(async (req, res) => {
   const att = loginAttempts.get(key) || { n: 0, t: Date.now() };
   if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
   if (att.n >= 10) throw httpError(429, 'Too many attempts. Try again in 15 minutes.');
-  const u = db.prepare(`SELECT a.* FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
-    WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(email);
+  const u = await data.accounts.loginAccount(email);
   const ok = u && u.password_hash && (await bcrypt.compare(String(req.body.password || ''), u.password_hash));
   if (!ok) { att.n++; loginAttempts.set(key, att); throw httpError(401, 'Email or password is incorrect'); }
   loginAttempts.delete(key);
-  db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(u.id);
-  req.session.regenerate((err) => {
-    if (err) throw err;
-    req.session.uid = u.id; // the session identifies the ACCOUNT
-    res.json({ ok: true });
-  });
+  await data.accounts.recordLogin(u.id);
+  // A new session id at sign-in (the old session is destroyed). The store answers asynchronously now (Slice 5B-3), so a store failure
+  // is handed to the error handler here (a 500, as when the store threw synchronously) instead of being thrown inside its callback.
+  await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+  req.session.uid = u.id; // the session identifies the ACCOUNT
+  res.json({ ok: true });
 }));
-app.post('/api/logout', (req, res) => req.session.destroy(() => res.json({ ok: true })));
+// (The store answers asynchronously since Slice 5B-3: a failure to delete the session is a 500, as when the store threw synchronously,
+// never an "ok" that leaves the session signed in.)
+app.post('/api/logout', (req, res, next) => req.session.destroy((err) => (err ? next(err) : res.json({ ok: true }))));
 
 app.get('/api/me', auth, (req, res) => {
   const { it_email_name, it_contact_email, ...shared } = getSettings(); // the IT email identity is IT's to see (Settings), not part of every employee's session
@@ -229,33 +225,34 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   const { current, password } = req.body;
   if (!password || password.length < 8) throw httpError(400, 'New password must be at least 8 characters');
   if (req.user.password_hash && !(await bcrypt.compare(String(current || ''), req.user.password_hash))) throw httpError(400, 'Current password is incorrect');
-  db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), req.user.account_id);
+  await data.accounts.setPassword(req.user.account_id, await bcrypt.hash(password, 10));
   res.json({ ok: true });
 }));
 // Employee profile details are read-only (IT maintains them in People); only admins can edit their own. Passwords are separate.
-app.put('/api/me', auth, (req, res) => {
+app.put('/api/me', auth, async (req, res) => {
   if (req.user.role !== 'admin') throw httpError(403, 'Your profile details are managed by IT. Ask IT to change them.');
   const { name, phone, department, title } = req.body;
   if (req.user.employee_id) {
-    db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
-      .run(clean(name), clean(phone), clean(department), clean(title), req.user.employee_id);
+    await data.people.updateOwnProfile(req.user.employee_id, { name: clean(name), phone: clean(phone), department: clean(department), title: clean(title) });
   }
   res.json({ ok: true });
 });
 
-app.post('/api/forgot', (req, res) => {
-  const a = db.prepare(`SELECT a.id, a.login_email, COALESCE(e.name, a.login_email) AS name FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
-    WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(String(req.body.email || '').trim().toLowerCase());
-  if (a) notify.passwordReset({ name: a.name, email: a.login_email }, `${APP_URL}/#/reset/${makeToken(a.id, 'reset', 1)}`);
+app.post('/api/forgot', async (req, res) => {
+  const a = await data.accounts.resetAccount(String(req.body.email || '').trim().toLowerCase());
+  if (a) {
+    const t = newToken(1);
+    await data.accounts.replaceToken(a.id, 'reset', t.token, t.expiresAt);
+    notify.passwordReset({ name: a.name, email: a.login_email }, `${APP_URL}/#/reset/${t.token}`);
+  }
   res.json({ ok: true }); // never reveal whether an account exists
 });
 app.post('/api/reset', wrap(async (req, res) => {
   const { token, password } = req.body;
   if (!password || password.length < 8) throw httpError(400, 'Password must be at least 8 characters');
-  const t = db.prepare('SELECT * FROM tokens WHERE token = ?').get(String(token || ''));
+  const t = await data.accounts.getToken(String(token || ''));
   if (!t || t.expires_at < new Date().toISOString()) throw httpError(400, 'This link has expired. Ask for a new one.');
-  db.prepare('UPDATE accounts SET password_hash = ? WHERE id = ?').run(await bcrypt.hash(password, 10), t.user_id);
-  db.prepare('DELETE FROM tokens WHERE user_id = ?').run(t.user_id);
+  await data.accounts.completeReset(t.user_id, await bcrypt.hash(password, 10)); // the new password, then every token of the account is gone
   req.session.uid = t.user_id;
   res.json({ ok: true });
 }));
@@ -267,71 +264,63 @@ app.post('/api/reset', wrap(async (req, res) => {
 // Admin only. Employees get no directory: no employee screen needs other people's names (self-checkout and requests always
 // act as the signed-in employee), so exposing one would only leak who works here. Employees read their own record via
 // GET /api/users/:id (which already refuses anyone else's).
-app.get('/api/users', admin, (req, res) => {
-  const rows = db.prepare(`
-    SELECT p.*, (SELECT COUNT(*) FROM assignments s WHERE s.employee_id = p.id AND s.returned_at IS NULL) AS asset_count
-    FROM (${PERSON_SQL}) p ORDER BY (p.status = 'active') DESC, p.name COLLATE NOCASE`).all();
+app.get('/api/users', admin, async (req, res) => {
+  const rows = await data.people.listPeople();
   res.json(rows.map((r) => ({ ...publicPerson(r), asset_count: r.asset_count })));
 });
 
 // Creates the employee and, unless `login: false`, a linked login account (role admin|employee; legacy 'user' = employee).
-app.post('/api/users', admin, (req, res) => {
+app.post('/api/users', admin, async (req, res) => {
   const name = clean(req.body.name); const email = normEmail(req.body.email);
   const wantsLogin = req.body.login !== false;
   if (!name) throw httpError(400, 'Name is required');
   if (email ? !isEmail(email) : wantsLogin) throw httpError(400, wantsLogin ? 'Name and a valid email are required' : 'That email address is not valid');
-  if (email && db.prepare('SELECT 1 FROM employees WHERE work_email = ?').get(email)) throw httpError(400, 'A person with that email already exists');
-  if (email && wantsLogin && db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) throw httpError(400, 'A login with that email already exists');
+  if (email && await data.people.workEmailTaken(email)) throw httpError(400, 'A person with that email already exists');
+  if (email && wantsLogin && await data.people.loginEmailTaken(email)) throw httpError(400, 'A login with that email already exists');
   const role = req.body.role === 'admin' ? 'admin' : 'employee';
-  const id = db.transaction(() => {
-    const empId = db.prepare('INSERT INTO employees (name, work_email, department, title, phone, building) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(name, email, clean(req.body.department), clean(req.body.title), clean(req.body.phone), clean(req.body.building)).lastInsertRowid;
-    if (wantsLogin) db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(empId, email, role);
-    return empId;
-  })();
-  const p = getPerson(id);
-  if (wantsLogin && req.body.invite !== false) notify.welcome({ name: p.name, email: p.login_email }, `${APP_URL}/#/reset/${makeToken(p.account_id, 'reset', 24 * 7)}`);
+  const id = await data.people.createPerson({
+    name, email, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone), building: clean(req.body.building), wantsLogin, role,
+  });
+  const p = await data.people.getPerson(id);
+  if (wantsLogin && req.body.invite !== false) {
+    const t = newToken(24 * 7);
+    await data.accounts.replaceToken(p.account_id, 'reset', t.token, t.expiresAt);
+    notify.welcome({ name: p.name, email: p.login_email }, `${APP_URL}/#/reset/${t.token}`);
+  }
   res.json(publicPerson(p));
 });
 
 // Give an existing employee a login. Links by explicit employee id; never creates a second employee.
-app.post('/api/users/:id/account', admin, (req, res) => {
-  const p = getPerson(Number(req.params.id));
+app.post('/api/users/:id/account', admin, async (req, res) => {
+  const p = await data.people.getPerson(Number(req.params.id));
   if (!p) throw httpError(404, 'Person not found');
   if (p.account_id) throw httpError(400, 'This person already has a login.');
   const email = normEmail(req.body.email) || p.work_email;
   if (!email || !isEmail(email)) throw httpError(400, 'A valid login email is required');
-  if (db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) throw httpError(400, 'A login with that email already exists');
-  if (email !== p.work_email && db.prepare('SELECT 1 FROM employees WHERE work_email = ? AND id != ?').get(email, p.id)) throw httpError(400, 'That email belongs to another person');
+  if (await data.people.loginEmailTaken(email)) throw httpError(400, 'A login with that email already exists');
+  if (email !== p.work_email && await data.people.workEmailTakenByOther(email, p.id)) throw httpError(400, 'That email belongs to another person');
   const role = req.body.role === 'admin' ? 'admin' : 'employee';
-  db.transaction(() => {
-    if (!p.work_email) db.prepare('UPDATE employees SET work_email = ? WHERE id = ?').run(email, p.id);
-    db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(p.id, email, role);
-  })();
-  const q = getPerson(p.id);
-  if (req.body.invite !== false) notify.welcome({ name: q.name, email: q.login_email }, `${APP_URL}/#/reset/${makeToken(q.account_id, 'reset', 24 * 7)}`);
+  await data.people.addAccount(p, { email, role });
+  const q = await data.people.getPerson(p.id);
+  if (req.body.invite !== false) {
+    const t = newToken(24 * 7);
+    await data.accounts.replaceToken(q.account_id, 'reset', t.token, t.expiresAt);
+    notify.welcome({ name: q.name, email: q.login_email }, `${APP_URL}/#/reset/${t.token}`);
+  }
   res.json(publicPerson(q));
 });
-const HISTORY_LIMIT = 200; // most recent returned assignments in a person's record (the employee History screen and the admin person page)
-app.get('/api/users/:id', auth, (req, res) => {
+app.get('/api/users/:id', auth, async (req, res) => {
   const id = Number(req.params.id);
   if (req.user.role !== 'admin' && id !== req.user.employee_id) throw httpError(403, 'Not allowed');
-  const u = getPerson(id);
+  const u = await data.people.getPerson(id);
   if (!u) throw httpError(404, 'User not found');
-  const current = db.prepare(`
-    SELECT s.*, a.name AS asset_name, a.tag, a.category, a.serial,
-      (SELECT thumb FROM photos p WHERE p.id = COALESCE(a.cover_photo_id, (SELECT MIN(id) FROM photos WHERE asset_id = a.id))) AS thumb
-    FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.employee_id = ? AND s.returned_at IS NULL ORDER BY s.assignment_type, s.checked_out_at DESC`).all(id);
-  const past = db.prepare(`
-    SELECT s.*, a.name AS asset_name, a.tag FROM assignments s JOIN assets a ON a.id = s.asset_id
-    WHERE s.employee_id = ? AND s.returned_at IS NOT NULL ORDER BY s.returned_at DESC LIMIT ${HISTORY_LIMIT}`).all(id);
+  const { current, past } = await data.people.personAssignments(id);
   res.json({ user: publicPerson(u), current, past, history_limit: HISTORY_LIMIT });
 });
 // Updates the person and, when they have one, their account (role, login email, login enabled). Nothing here deletes a person.
-app.put('/api/users/:id', admin, (req, res) => {
+app.put('/api/users/:id', admin, async (req, res) => {
   const id = Number(req.params.id);
-  const u = getPerson(id);
+  const u = await data.people.getPerson(id);
   if (!u) throw httpError(404, 'User not found');
   const role = req.body.role === 'admin' ? 'admin' : (req.body.role === 'employee' || req.body.role === 'user') ? 'employee' : u.role;
   const active = req.body.active === undefined ? u.status === 'active' : !!req.body.active;
@@ -339,32 +328,33 @@ app.put('/api/users/:id', admin, (req, res) => {
   const email = normEmail(req.body.email);
   if (email && !isEmail(email)) throw httpError(400, 'That email address is not valid');
   const workEmail = email || u.work_email;
-  if (email && email !== u.work_email && db.prepare('SELECT 1 FROM employees WHERE work_email = ? AND id != ?').get(email, id)) throw httpError(400, 'That email is already in use');
+  if (email && email !== u.work_email && await data.people.workEmailTakenByOther(email, id)) throw httpError(400, 'That email is already in use');
   const loginEmail = u.account_id ? (email || u.login_email) : null;
-  if (u.account_id && loginEmail !== u.login_email && db.prepare('SELECT 1 FROM accounts WHERE login_email = ? AND id != ?').get(loginEmail, u.account_id)) throw httpError(400, 'That email is already in use');
-  db.transaction(() => {
-    // building keeps its value when the client doesn't send the field; an empty string clears it
-    const building = req.body.building === undefined ? u.building : clean(req.body.building);
-    db.prepare('UPDATE employees SET name = ?, work_email = ?, department = ?, title = ?, phone = ?, building = ?, status = ? WHERE id = ?')
-      .run(clean(req.body.name) || u.name, workEmail, clean(req.body.department), clean(req.body.title), clean(req.body.phone), building, active ? 'active' : 'inactive', id);
-    if (u.account_id) db.prepare('UPDATE accounts SET login_email = ?, role = ?, active = ? WHERE id = ?').run(loginEmail, role, active ? 1 : 0, u.account_id);
-  })();
-  if (!active && u.account_id) db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"uid":${u.account_id}}%`);
-  res.json(publicPerson(getPerson(id)));
+  if (u.account_id && loginEmail !== u.login_email && await data.people.loginEmailTakenByOther(loginEmail, u.account_id)) throw httpError(400, 'That email is already in use');
+  // building keeps its value when the client doesn't send the field; an empty string clears it
+  const building = req.body.building === undefined ? u.building : clean(req.body.building);
+  await data.people.updatePerson({
+    id, name: clean(req.body.name) || u.name, workEmail, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone),
+    building, active, accountId: u.account_id, loginEmail, role,
+  });
+  if (!active && u.account_id) await data.sessions.destroyForAccount(u.account_id); // signed out everywhere (only this account's sessions)
+  res.json(publicPerson(await data.people.getPerson(id)));
 });
 // Per-employee self-checkout permission (default on). Admin only; never touches the employee's other fields.
-app.put('/api/users/:id/self-checkout', admin, (req, res) => {
-  const p = getPerson(Number(req.params.id));
+app.put('/api/users/:id/self-checkout', admin, async (req, res) => {
+  const p = await data.people.getPerson(Number(req.params.id));
   if (!p) throw httpError(404, 'Person not found');
   if (typeof req.body.enabled !== 'boolean') throw httpError(400, 'enabled must be true or false');
-  db.prepare('UPDATE employees SET can_self_checkout = ? WHERE id = ?').run(req.body.enabled ? 1 : 0, p.id);
-  res.json(publicPerson(getPerson(p.id)));
+  await data.people.setSelfCheckout(p.id, req.body.enabled);
+  res.json(publicPerson(await data.people.getPerson(p.id)));
 });
-app.post('/api/users/:id/invite', admin, (req, res) => {
-  const u = getPerson(Number(req.params.id));
+app.post('/api/users/:id/invite', admin, async (req, res) => {
+  const u = await data.people.getPerson(Number(req.params.id));
   if (!u) throw httpError(404, 'User not found');
   if (!u.account_id) throw httpError(400, 'This person has no login. Give them one first.');
-  const link = `${APP_URL}/#/reset/${makeToken(u.account_id, 'reset', 24 * 7)}`;
+  const t = newToken(24 * 7);
+  await data.accounts.replaceToken(u.account_id, 'reset', t.token, t.expiresAt);
+  const link = `${APP_URL}/#/reset/${t.token}`;
   notify.welcome({ name: u.name, email: u.login_email }, link);
   res.json({ ok: true, link: mailConfigured() ? undefined : link });
 });
@@ -623,9 +613,9 @@ app.put('/api/assets/:id/cover', admin, async (req, res) => {
   res.json({ ok: true });
 });
 // Photo files follow the asset's visibility: an employee can fetch a photo only if its asset is one they may see. (The signed-in
-// account comes from the session: currentUser, like the auth middleware, moves to the seam in Slice 5B-3.)
+// account comes from the session, read through the seam like the auth middleware since Slice 5B-3.)
 app.use('/uploads', async (req, res, next) => {
-  const u = currentUser(req);
+  const u = await data.accounts.currentUser(req.session.uid);
   if (!u) return res.status(401).end();
   if (u.role === 'admin') return next();
   let file; try { file = path.basename(decodeURIComponent(req.path)); } catch { return res.status(404).end(); }

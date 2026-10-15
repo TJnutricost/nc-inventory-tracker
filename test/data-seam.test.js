@@ -104,7 +104,9 @@ ${REPORT}`).out;
   assert.equal(alone.sqliteDb, false, 'the seam does not open the app database by itself');
   assert.deepEqual(alone.modules.sort(), ['assetAccess', 'assignments', 'availability', 'catalog', 'catalogAdmin', 'driver', 'requests', 'reservationViews', 'reservations', 'waitlist',
     // Slice 5B-2
-    'activityLog', 'people', 'assetViews', 'assetRecords', 'assetCustody', 'photoRecords', 'dashboard', 'catalogViews', 'requestAccess'].sort());
+    'activityLog', 'people', 'assetViews', 'assetRecords', 'assetCustody', 'photoRecords', 'dashboard', 'catalogViews', 'requestAccess',
+    // Slice 5B-3
+    'accounts', 'sessions'].sort());
 });
 
 // ---------------------------------------------------------------- binding
