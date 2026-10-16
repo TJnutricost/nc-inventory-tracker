@@ -1,8 +1,8 @@
 // Asset reads and the employee asset-visibility contract (SQLite). Extracted VERBATIM from src/server.js in PostgreSQL migration
 // Slice 5B-1 (D-48): the SQL is unchanged; the only difference is that the database handle is the first argument, like the other data
-// modules (src/reservations.js, src/waitlist.js, ...). Routes migrated to the temporary driver seam reach these through src/dataSeam
-// (`await data.assetAccess.reservableAsset(user, id)`); the routes not migrated yet keep calling them synchronously through thin
-// bound aliases in server.js (`getAsset(id)`, `canViewAsset(user, a)`). A PostgreSQL twin follows in Slice 5C.
+// modules (src/reservations.js, src/waitlist.js, ...). Routes reach these through the temporary driver seam (src/dataSeam,
+// `await data.assetAccess.reservableAsset(user, id)`; since Slice 5B-4 every route, and the server.js aliases are gone).
+// A PostgreSQL twin follows in Slice 5C.
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
 
 const getAsset = (db, id) => db.prepare('SELECT * FROM assets WHERE id = ?').get(id);

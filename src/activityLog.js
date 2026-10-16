@@ -1,7 +1,7 @@
 // The activity log (SQLite). Extracted VERBATIM from src/server.js in PostgreSQL migration Slice 5B-2 (D-48): the SQL is unchanged;
-// the database handle is the first argument, like the other data modules. Routes migrated to the temporary driver seam reach `log`
-// through src/dataSeam (`await data.activityLog.log(...)`); the routes not migrated yet keep calling it through a thin bound alias in
-// server.js (`log(assetId, ...)`). A PostgreSQL twin follows in Slice 5C.
+// the database handle is the first argument, like the other data modules. Routes reach it through the temporary driver seam
+// (`await data.activityLog.log(...)`; since Slice 5B-4 every route, and the server.js `log` alias is gone). Slice 5B-4 added `recent`
+// (IT's activity list, GET /api/activity, extracted verbatim the same way). A PostgreSQL twin follows in Slice 5C.
 
 // Who did it: an account, shown by its employee's name (or login email if unlinked).
 const ACTOR_JOIN = 'LEFT JOIN accounts aa ON aa.id = ac.actor_id LEFT JOIN employees u ON u.id = aa.employee_id';
@@ -12,4 +12,12 @@ function log(db, assetId, actorAccountId, action, details, subjectEmployeeId = n
     .run(assetId, actorAccountId, subjectEmployeeId, action, details || null);
 }
 
-module.exports = { ACTOR_JOIN, ACTOR_NAME, log };
+// IT's activity list: the newest `limit` rows (the route caps it), with who did it and the asset.
+function recent(db, limit) {
+  return db.prepare(`
+    SELECT ac.*, ${ACTOR_NAME}, a.name AS asset_name, a.tag FROM activity ac
+    ${ACTOR_JOIN} LEFT JOIN assets a ON a.id = ac.asset_id
+    ORDER BY ac.id DESC LIMIT ?`).all(limit);
+}
+
+module.exports = { ACTOR_JOIN, ACTOR_NAME, log, recent };

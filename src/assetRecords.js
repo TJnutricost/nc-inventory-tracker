@@ -1,15 +1,18 @@
 // Writing asset records (SQLite): tag issuance, the serial-uniqueness check, the catalog entry of an asset write, and the create /
 // edit / archive transactions. Extracted VERBATIM from src/server.js in PostgreSQL migration Slice 5B-2 (D-48): the SQL and the
 // transaction boundaries are unchanged; the database handle is the first argument, like the other data modules. Routes migrated to the
-// temporary driver seam reach these through src/dataSeam (`await data.assetRecords.createAsset({...})`); the routes not migrated yet
-// (CSV import, the next-tag preview) keep thin bound aliases in server.js. A PostgreSQL twin follows in Slice 5C.
+// temporary driver seam reach these through src/dataSeam (`await data.assetRecords.createAsset({...})`). Slice 5B-4 added the next-tag
+// preview (`peekTag`) and the CSV import (`importAssets`), extracted verbatim the same way. A PostgreSQL twin follows in Slice 5C.
 const catalog = require('./catalog');
 const { cleanSerial, serialKey } = require('./serial');
 const { getAsset } = require('./assetAccess');
 const { openAssignments } = require('./assetViews');
 const { log } = require('./activityLog');
+const { refreshStatus } = require('./assignments');
+const { getSettings } = require('./settings');
 
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
+const clean = (v) => (v === undefined || v === null || String(v).trim() === '' ? null : String(v).trim()); // (server.js `clean`)
 
 // The two per-asset reservation settings, and the editable asset fields (the validation of a body stays in server.js `assetValues`).
 const FLAGS = ['available_to_request', 'reservation_requires_approval'];
@@ -19,9 +22,9 @@ const ASSET_FIELDS = ['name', 'category', 'brand', 'model', 'serial', 'condition
 // ---- asset tag issuance ----
 // Generated tags are prefix + a number from a durable, ever-increasing counter (asset_tag_counter). The counter is
 // independent of the prefix, is never lowered (archiving keeps tags reserved), and is claimed inside the same
-// transaction that inserts the asset. (server.js `peekTag()` only previews the next number and consumes nothing.)
-// `prefix` is the `tag_prefix` setting: server.js read it here with getSettings(); the settings move to the seam in Slice 5B-4, so
-// until then the caller reads it and passes it in.
+// transaction that inserts the asset. (`peekTag` below only previews the next number and consumes nothing.)
+// `prefix` is the `tag_prefix` setting, read by the caller (POST /api/assets through the seam's `settings.getSettings`, the CSV import
+// inside its transaction) and passed in.
 const formatTag = (prefix, n) => prefix + String(n).padStart(5, '0');
 const tagExists = (db, tag) => !!db.prepare('SELECT 1 FROM assets WHERE tag = ?').get(tag);
 function allocateTag(db, prefix) { // call only inside a transaction
@@ -95,4 +98,71 @@ function archiveAsset(db, id, { actorAccountId, reason }) {
   })();
 }
 
-module.exports = { FLAGS, ASSET_FIELDS, formatTag, tagExists, allocateTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset };
+// ---- Slice 5B-4: the tag preview and the CSV import (extracted verbatim from server.js) ----
+
+// GET /api/next-tag. Preview only: consumes nothing (a blank-tag create claims a number inside its transaction, which may differ if others
+// create first). The `tag_prefix` setting is read here, as server.js `peekTag()` did.
+function peekTag(db) {
+  const prefix = getSettings(db).tag_prefix;
+  let n = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n + 1;
+  while (tagExists(db, formatTag(prefix, n))) n++;
+  return formatTag(prefix, n);
+}
+
+// POST /api/import/assets. `rows` = the file's data rows in order, each { o: the row by column name, v: the validated fields } (server.js
+// parses the CSV and runs `assetValues` on each row, which reads no database and cannot refuse a CSV row: every cell is text). The active
+// employees are read first, outside the transaction, then the WHOLE file is one transaction, exactly as before: a row with a problem
+// (archived tag, missing name, serial in use, unknown catalog path or email) is skipped or imported partly and reported in `errors`
+// ("Row N" counts the header as row 1); anything that throws rolls the whole file back. A blank tag issues the next number with the
+// `tag_prefix` setting read at that moment, inside the transaction (as server.js `allocateTag()` did).
+function importAssets(db, { rows, actorAccountId }) {
+  let created = 0, updated = 0; const errors = [];
+  // assigned_email matches an active employee by work email (or their login email); no login is needed to receive equipment.
+  const users = new Map();
+  for (const u of db.prepare("SELECT e.id, e.name, e.work_email, a.login_email FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id WHERE e.status = 'active'").all()) {
+    for (const k of [u.work_email, u.login_email]) if (k) users.set(k.toLowerCase(), u);
+  }
+  const tx = db.transaction(() => {
+    rows.forEach(({ o, v }, idx) => {
+      const tag = clean(o.tag);
+      const existing = tag ? db.prepare('SELECT * FROM assets WHERE tag = ?').get(tag) : null;
+      if (existing && existing.archived_at) { errors.push(`Row ${idx + 2}: tag ${tag} belongs to an archived asset — skipped`); return; }
+      if (!v.name && !existing) { errors.push(`Row ${idx + 2}: missing name`); return; }
+      if (!existing) { v.category = v.category || 'Other'; v.condition = v.condition || 'Good'; }
+      // A serial that belongs to a different asset (already in the inventory, archived or not, or earlier in this file)
+      // skips just this row; an update that leaves the serial blank keeps the stored one.
+      try { assertSerialFree(db, v.serial, existing ? existing.id : null); } catch (e) { errors.push(`Row ${idx + 2}: ${e.message.split('. ')[0]} — skipped`); return; }
+      let id;
+      if (existing) {
+        db.prepare(`UPDATE assets SET ${ASSET_FIELDS.map((f) => `${f} = COALESCE(?, ${f})`).join(', ')}, serial_normalized = COALESCE(?, serial_normalized), updated_at = datetime('now') WHERE id = ?`)
+          .run(...ASSET_FIELDS.map((f) => v[f]), serialKey(v.serial), existing.id);
+        id = existing.id; updated++;
+      } else {
+        const cols = ['tag', 'serial_normalized', ...ASSET_FIELDS];
+        id = db.prepare(`INSERT INTO assets (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(tag || allocateTag(db, getSettings(db).tag_prefix), serialKey(v.serial), ...ASSET_FIELDS.map((f) => v[f])).lastInsertRowid;
+        log(db, id, actorAccountId, 'created', 'Imported from CSV'); created++;
+        const home = clean(o.catalog_path) ? null : catalog.findLiveByPath(db, v.category); // same default as a manual create (the category's root), unless the row named a path
+        if (home) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(home, catalog.rootOf(db, home).name, id);
+      }
+      // catalog_path ("Laptop > Mac > MacBook Air") must match an active entry exactly (ignoring case/spacing); otherwise the
+      // row is still imported but the link is left alone and the row is reported — nothing is guessed.
+      const cpath = clean(o.catalog_path);
+      if (cpath) {
+        const nid = catalog.findLiveByPath(db, cpath);
+        if (nid) db.prepare('UPDATE assets SET catalog_node_id = ?, category = ? WHERE id = ?').run(nid, catalog.rootOf(db, nid).name, id);
+        else errors.push(`Row ${idx + 2}: catalog path “${cpath}” doesn't match an active catalog entry — imported without a catalog link`);
+      }
+      const em = clean(o.assigned_email)?.toLowerCase();
+      if (em && users.has(em) && !openAssignments(db, id).length) {
+        const u = users.get(em);
+        db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type, checked_out_by, notes) VALUES (?, ?, 'permanent', ?, ?)").run(id, u.id, actorAccountId, 'Imported');
+        refreshStatus(db, id);
+        log(db, id, actorAccountId, 'checked_out', `To ${u.name} (import)`, u.id);
+      } else if (em && !users.has(em)) errors.push(`Row ${idx + 2}: no user with email ${em} — imported unassigned`);
+    });
+  });
+  tx();
+  return { created, updated, errors };
+}
+
+module.exports = { FLAGS, ASSET_FIELDS, formatTag, tagExists, allocateTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
