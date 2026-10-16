@@ -332,6 +332,8 @@ test('ratchet (5B-4): the overdue and waitlist sweeps reach the database only th
   assert.match(allCode, /if \(DB_DRIVER !== 'pg'\) startOverdueTimer\(\);/);
   const bootPg = blockAt('async function bootPg()');
   assert.match(bootPg, /scheduler\.start\(\);\s*setTimeout\(\(\) => \{ scheduler\.tick\(\); \}, 20e3\)\.unref\(\);\s*startOverdueTimer\(\);/);
-  assert.equal((allCode.match(/\bset(Interval|Timeout)\(/g) || []).length, 6,
-    'no other timer (the four sweep timers, the hourly session purge and the first PostgreSQL sweep)');
+  assert.match(allCode, /const timer = setTimeout\(\(\) => \{ forced = true; server\.closeAllConnections\(\); \}, SHUTDOWN_GRACE_MS\);/,
+    'the PostgreSQL shutdown grace timer (no database access)');
+  assert.equal((allCode.match(/\bset(Interval|Timeout)\(/g) || []).length, 7,
+    'no other timer (the four sweep timers, the hourly session purge, the first PostgreSQL sweep and the shutdown grace timer)');
 });

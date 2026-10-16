@@ -171,6 +171,35 @@ describe('Slice 5D-1: the app on DB_DRIVER=pg', pgSuite(), () => {
     assert.equal(me.body.user.email, 'ada@nutricost.com');
   });
 
+  // A request in flight when SIGTERM arrives finishes on the pool before it is ended: the PUT waits on an asset lock held here, the
+  // signal arrives, then the lock is released; the PUT must still answer 200 with its write committed, new connections are refused,
+  // and the process exits 0 only afterwards.
+  test('SIGTERM lets an in-flight request finish before the pool is closed', async () => {
+    const asset = (await admin.post('/api/assets', { name: 'Drain Dock', tag: 'BOOT-3' })).body;
+    const holder = await tdb.pool.connect();
+    let put;
+    try {
+      await holder.query('BEGIN');
+      await holder.query('SELECT id FROM assets WHERE id = $1 FOR UPDATE', [asset.id]);
+      put = admin.put(`/api/assets/${asset.id}`, { ...asset, name: 'Drain Dock 2' });
+      await until(async () => (await tdb.pool.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()")).rows[0].n > 0);
+      app.child.kill('SIGTERM');
+      await until(async () => /SIGTERM: shutting down/.test(app.output()));
+      await assert.rejects(client(() => app).get('/health'), 'a new connection is refused while draining');
+      assert.equal(app.child.exitCode, null, 'the process waits for the request in flight');
+    } finally {
+      await holder.query('ROLLBACK').catch(() => {});
+      holder.release();
+    }
+    const r = await put;
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.name, 'Drain Dock 2');
+    const { code, out } = await app.exited;
+    assert.equal(code, 0, out);
+    assert.doesNotMatch(out, /\[shutdown\]|Cannot use a pool after calling end/);
+    assert.equal((await tdb.pool.query('SELECT name FROM assets WHERE id = $1', [asset.id])).rows[0].name, 'Drain Dock 2');
+  });
+
   test('a boot that cannot reach PostgreSQL exits 1 without listening', async () => {
     const bad = startApp({ url: 'postgres://nobody:nothing@127.0.0.1:1/none', dataDir: fs.mkdtempSync(path.join(os.tmpdir(), 'nc-pg-boot-bad-')), port: await freePort() });
     await assert.rejects(bad.ready, /exited \(1\) before listening/);

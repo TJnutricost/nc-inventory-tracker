@@ -1092,16 +1092,27 @@ function listen({ stop }) {
     console.error(`\nPort ${PORT} is already in use by another process, so THIS server did not start and the browser is still talking to the old one.\nFind it with:  lsof -nP -iTCP:${PORT} -sTCP:LISTEN   then stop it (kill <PID>) and start again, or choose another port with PORT=<number>.\n`);
     process.exit(1);
   });
-  // PostgreSQL: on SIGTERM / SIGINT stop taking connections, stop the sweep (waiting for one in flight) and end the pool, then exit.
-  // (SQLite keeps Node's default signal handling, as before.)
+  // PostgreSQL: on SIGTERM / SIGINT stop taking connections and let the requests in flight finish (idle keep-alive connections are closed
+  // at once; after SHUTDOWN_GRACE_MS the rest are cut and the exit code is 1), THEN stop the sweep (waiting for one in flight), uninstall
+  // the notifier and end the pool, and exit: a request never loses the pool halfway. (SQLite keeps Node's default signal handling.)
   if (DB_DRIVER === 'pg') {
+    const SHUTDOWN_GRACE_MS = 10_000;
     let stopping = false;
-    const shutdown = (signal) => {
+    const drain = () => new Promise((resolve) => {
+      let forced = false;
+      const timer = setTimeout(() => { forced = true; server.closeAllConnections(); }, SHUTDOWN_GRACE_MS);
+      timer.unref();
+      server.close(() => { clearTimeout(timer); resolve(forced); });
+      server.closeIdleConnections();
+    });
+    const shutdown = async (signal) => {
       if (stopping) return;
       stopping = true;
       console.log(`${signal}: shutting down`);
-      server.close();
-      stop().then(() => process.exit(0), (e) => { console.error('[shutdown]', e.message); process.exit(1); });
+      let code = 0;
+      if (await drain()) { console.error(`[shutdown] requests still running after ${SHUTDOWN_GRACE_MS / 1000} s were cut off`); code = 1; }
+      try { await stop(); } catch (e) { console.error('[shutdown]', e.message); code = 1; }
+      process.exit(code);
     };
     process.on('SIGTERM', () => shutdown('SIGTERM'));
     process.on('SIGINT', () => shutdown('SIGINT'));
