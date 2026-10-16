@@ -1,11 +1,8 @@
-// People on PostgreSQL, the READ side (D-46, D-48, migration Slice 5C-2): the PG twin of the reads of src/people.js (a person with their
-// optional login account, the People list, a person's assignments, the email-in-use checks, an employee's status). NOT used by the
-// running app yet (Slice 5D binds it to the driver seam under the same names). Same names, parallel signatures, the same rows; async,
-// executor `q` first.
-//
-// The WRITES of src/people.js (createPerson, addAccount, updatePerson, setSelfCheckout, updateOwnProfile) are Slice 5C-3 (carry-overs
-// (aa), (ab)): they are listed in test/pg/seam-parity.test.js MISSING until then. The email-in-use checks here are plain reads; on
-// PostgreSQL the write routes must run them INSIDE the write's transaction (pass its client) or rely on the unique indexes, (ab).
+// People on PostgreSQL (D-46, D-48): the PG twin of src/people.js. The READS (a person with their optional login account, the People
+// list, a person's assignments, the email-in-use checks, an employee's status) are migration Slice 5C-2; the WRITES (createPerson,
+// addAccount, updatePerson, setSelfCheckout, updateOwnProfile, at the end of this file) are Slice 5C-3 (carry-overs (aa), (ab)). NOT
+// used by the running app yet (Slice 5D binds it to the driver seam under the same names). Same names, parallel signatures, the same
+// rows; async, executor `q` first. The writes' transactions, locks and email checks are described above them.
 //
 // Differences from SQLite (output identical):
 //   - `?` -> `$n`; ids that are not integers in the column's range find nothing (src/pg/reservations.js toId), as on SQLite.
@@ -22,6 +19,7 @@
 //     matters). These follow SQLite's current query plans; SQLite itself guarantees no tie order.
 const { toId } = require('./reservations');
 const base = require('../people');
+const { withTransaction, isInTransaction } = require('./transaction');
 
 const { PERSON_SQL, HISTORY_LIMIT } = base;
 const one = async (q, sql, params) => (await q.query(sql, params)).rows[0];
@@ -61,7 +59,99 @@ async function personAssignments(q, id) {
 // POST /api/requests: the status of the person a request is for ({ status }, or undefined when there is no such employee).
 const employeeStatus = async (q, id) => one(q, 'SELECT status FROM employees WHERE id = $1', [toId(id)]);
 
+// ---- the WRITES (Slice 5C-3) ----
+// Transactions: createPerson (employee + optional account), addAccount (work email + account) and updatePerson (employee + account) are
+// each ONE transaction: a caller's transaction when `q` is a transaction client, else their own (isInTransaction(q) ? run(q) :
+// withTransaction(run, q)). A failure anywhere (a taken email, a refused role, a NOT NULL) rolls the whole write back.
+//
+// Email-in-use checks (carry-over (ab)). The routes run them before the write (src/server.js); on SQLite route + write were atomic in
+// practice. Here each write runs the SAME checks again INSIDE its transaction, with the route's messages, and the baseline's unique
+// indexes (idx_employees_work_email and accounts_login_email_lower_key on lower(...), the "C" collation folding ASCII letters only, like
+// NOCASE) are the backstop: a concurrent writer that slips between the check and the INSERT / UPDATE makes it fail with 23505, which is
+// turned into the same readable 400 (CLASH below), so the loser of two simultaneous creates with one email gets the route's message,
+// never a 500. Give-a-login also re-checks, under the employee lock, that the person has no login yet (the route's 400 'This person
+// already has a login.'; backstop: the UNIQUE accounts.employee_id), and uses the employee's work email as it is under that lock.
+// updatePerson checks the values it writes (a work email / login email that is unchanged cannot be taken by another row: the indexes).
+//
+// Locks: addAccount and updatePerson lock the employee row first (FOR NO KEY UPDATE: it does not block foreign-key checks of other
+// writers), then write the account. LOCK ORDER: employee -> account -> tokens (src/pg/accounts.js locks account -> tokens and never an
+// employee), so concurrent updates of one person queue on the employee row and cannot deadlock.
+// Differences from SQLite for direct calls the routes never make (they check first): the PG writes refuse a taken email with a 400
+// where the SQLite module would throw its raw UNIQUE error.
+const inTransaction = (q, run) => (isInTransaction(q) ? run(q) : withTransaction(run, q));
+const httpError = (status, msg) => Object.assign(new Error(msg), { status });
+const WORK_INDEX = 'idx_employees_work_email';
+const LOGIN_INDEX = 'accounts_login_email_lower_key';
+const EMPLOYEE_INDEX = 'accounts_employee_id_key';
+const PERSON_EXISTS = 'A person with that email already exists';
+const LOGIN_EXISTS = 'A login with that email already exists';
+const OTHER_PERSON = 'That email belongs to another person';
+const HAS_LOGIN = 'This person already has a login.';
+const IN_USE = 'That email is already in use';
+const CLASH = {
+  create: { [WORK_INDEX]: PERSON_EXISTS, [LOGIN_INDEX]: LOGIN_EXISTS },
+  addAccount: { [WORK_INDEX]: OTHER_PERSON, [LOGIN_INDEX]: LOGIN_EXISTS, [EMPLOYEE_INDEX]: HAS_LOGIN },
+  update: { [WORK_INDEX]: IN_USE, [LOGIN_INDEX]: IN_USE },
+};
+// Runs `run`, turning a unique violation of one of `messages`' indexes into its readable 400 (the transaction still rolls back).
+async function clashGuarded(messages, run) {
+  try {
+    return await run();
+  } catch (err) {
+    const message = err && err.code === '23505' && messages[err.constraint];
+    if (message) throw Object.assign(httpError(400, message), { cause: err });
+    throw err;
+  }
+}
+
+// POST /api/users: the employee and, when `wantsLogin`, its linked account (no password: the invite sets it). The fields are cleaned by
+// the route. Returns the new employee id.
+const createPerson = async (q, { name, email, department, title, phone, building, wantsLogin, role }) => inTransaction(q, (c) => clashGuarded(CLASH.create, async () => {
+  if (email && await workEmailTaken(c, email)) throw httpError(400, PERSON_EXISTS);
+  if (email && wantsLogin && await loginEmailTaken(c, email)) throw httpError(400, LOGIN_EXISTS);
+  const empId = (await one(c, 'INSERT INTO employees (name, work_email, department, title, phone, building) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+    [name, email, department, title, phone, building])).id;
+  if (wantsLogin) await c.query('INSERT INTO accounts (employee_id, login_email, role) VALUES ($1, $2, $3)', [empId, email, role]);
+  return empId;
+}));
+
+// POST /api/users/:id/account: gives an existing employee (`p`, from getPerson) a login; a person with no work email gets this one.
+async function addAccount(q, p, { email, role }) {
+  await inTransaction(q, (c) => clashGuarded(CLASH.addAccount, async () => {
+    // (people are never deleted; an unknown p.id falls through to the account INSERT's foreign-key error, as on SQLite)
+    const e = (await one(c, 'SELECT id, work_email FROM employees WHERE id = $1 FOR NO KEY UPDATE', [toId(p.id)])) || { id: p.id, work_email: p.work_email };
+    if (await one(c, `${ONE} FROM accounts WHERE employee_id = $1`, [toId(e.id)])) throw httpError(400, HAS_LOGIN);
+    if (await loginEmailTaken(c, email)) throw httpError(400, LOGIN_EXISTS);
+    if (email !== e.work_email && await workEmailTakenByOther(c, email, e.id)) throw httpError(400, OTHER_PERSON);
+    if (!e.work_email) await c.query('UPDATE employees SET work_email = $1 WHERE id = $2', [email, toId(e.id)]);
+    await c.query('INSERT INTO accounts (employee_id, login_email, role) VALUES ($1, $2, $3)', [toId(e.id), email, role]);
+  }));
+}
+
+// PUT /api/users/:id: the person and, when they have one (`accountId`), their account. The values are worked out and validated by the
+// route (`active` is a boolean). Nothing here deletes a person; signing a deactivated account out is src/pg/sessions.js.
+async function updatePerson(q, { id, name, workEmail, department, title, phone, building, active, accountId, loginEmail, role }) {
+  const key = toId(id);
+  await inTransaction(q, (c) => clashGuarded(CLASH.update, async () => {
+    await c.query('SELECT 1 FROM employees WHERE id = $1 FOR NO KEY UPDATE', [key]);
+    if (workEmail && await workEmailTakenByOther(c, workEmail, key)) throw httpError(400, IN_USE);
+    if (accountId && await loginEmailTakenByOther(c, loginEmail, accountId)) throw httpError(400, IN_USE);
+    await c.query('UPDATE employees SET name = $1, work_email = $2, department = $3, title = $4, phone = $5, building = $6, status = $7 WHERE id = $8',
+      [name, workEmail, department, title, phone, building, active ? 'active' : 'inactive', key]);
+    if (accountId) await c.query('UPDATE accounts SET login_email = $1, role = $2, active = $3 WHERE id = $4', [loginEmail, role, active ? 1 : 0, toId(accountId)]);
+  }));
+}
+
+// PUT /api/users/:id/self-checkout: the per-employee self-checkout permission; never touches the employee's other fields.
+async function setSelfCheckout(q, id, enabled) { await q.query('UPDATE employees SET can_self_checkout = $1 WHERE id = $2', [enabled ? 1 : 0, toId(id)]); }
+
+// PUT /api/me (admins only; the route checks): an admin's own person details. A blank name keeps the stored one; the fields are cleaned
+// by the route.
+async function updateOwnProfile(q, employeeId, { name, phone, department, title }) {
+  await q.query('UPDATE employees SET name = COALESCE($1, name), phone = $2, department = $3, title = $4 WHERE id = $5', [name, phone, department, title, toId(employeeId)]);
+}
+
 module.exports = {
   PERSON_SQL, HISTORY_LIMIT, getPerson, listPeople, workEmailTaken, workEmailTakenByOther, loginEmailTaken, loginEmailTakenByOther,
-  personAssignments, employeeStatus,
+  createPerson, addAccount, personAssignments, updatePerson, setSelfCheckout, updateOwnProfile, employeeStatus,
 };

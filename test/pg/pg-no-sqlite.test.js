@@ -6,7 +6,8 @@
 // PG mailer, notifier and sweep scheduler, and the shared mail core they load (src/mailCore.js), never load SQLite either, and
 // the mail core loads nodemailer only when it builds a transport. Slice 5C-1: the nine twins of the 5B-extracted helper modules too,
 // and each of them requires only src/pg modules and the pure (database-free) SQLite-side files listed in TWIN_REQUIRES. Slice 5C-2:
-// the twins of assetViews, dashboard and the people reads, the same way.
+// the twins of assetViews, dashboard and the people reads, the same way. Slice 5C-3: the accounts and sessions twins and the people
+// writes (src/pg/people.js now also loads the transaction helpers).
 // Needs no database, so it runs under plain `npm test` too.
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
@@ -28,7 +29,7 @@ test('every src/pg module loads without SQLite, the mailer or a data directory',
     const { loaded, cache } = JSON.parse(res.stdout);
     for (const m of ['availability.js', 'reservations.js', 'waitlist.js', 'effects.js', 'transaction.js', 'time.js', 'catalog.js', 'assignments.js', 'requests.js', 'settings.js', 'mailer.js', 'notifier.js', 'sweep.js',
       'activityLog.js', 'outbox.js', 'overdue.js', 'photoRecords.js', 'assetAccess.js', 'reservationViews.js', 'requestAccess.js', 'catalogViews.js', 'catalogAdmin.js',
-      'assetViews.js', 'dashboard.js', 'people.js']) {
+      'assetViews.js', 'dashboard.js', 'people.js', 'accounts.js', 'sessions.js']) {
       assert.ok(loaded.includes(m), `src/pg/${m} was loaded`);
     }
     const rel = cache.map((k) => path.relative(ROOT, k).split(path.sep).join('/'));
@@ -73,9 +74,12 @@ const TWIN_REQUIRES = {
   // Slice 5C-2
   'assetViews.js': ['./catalog', './availability', './requests', './reservations', './waitlist', './reservationViews', './assignments', '../serial', './activityLog', './time'],
   'dashboard.js': ['./requests', './activityLog', './time'],
-  'people.js': ['./reservations', '../people'],
+  'people.js': ['./reservations', '../people', './transaction'], // (./transaction: the 5C-3 writes)
+  // Slice 5C-3
+  'accounts.js': ['./reservations', './transaction', './time'],
+  'sessions.js': [],
 };
-test('the Slice 5C-1 / 5C-2 twins require only src/pg modules and pure SQLite-side files', () => {
+test('the Slice 5C twins require only src/pg modules and pure SQLite-side files', () => {
   for (const [file, expected] of Object.entries(TWIN_REQUIRES)) {
     const src = fs.readFileSync(path.join(ROOT, 'src', 'pg', file), 'utf8');
     const required = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
