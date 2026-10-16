@@ -18,7 +18,8 @@ before(async () => {
 after(() => stopServer(server));
 
 let seq = 0;
-const TODAY = new Date().toISOString().slice(0, 10);
+// "Today" is the app's date (APP_TIMEZONE wall clock), not the UTC date: they differ every evening, and offers are timed against the app's now.
+const TODAY = T.nowKey().slice(0, 10);
 const plus = (n) => new Date(Date.parse(`${TODAY}T00:00:00Z`) + n * 864e5).toISOString().slice(0, 10);
 const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { name, tag: `PF-${++seq}`, available_to_request: true, ...extra }); assert.equal(r.status, 200); return r.body; };
 async function makeLogin(name) {
@@ -258,10 +259,12 @@ test('freed time that only touches a waitlisted range (or does not reach it) is 
 
 // ---------------------------------------------------------------- manual / scan checkout vs. waitlist holds
 // A hold (and only a hold) makes its interval unavailable to a checkout; the hold's own employee checking it out in person accepts the offer.
+// The hold sits on a LATER day (not today): an offered hold never outlives its interval, so a 1-5 PM interval today would already be over in the evening.
+const HOLD_DAY = plus(1);
 async function heldToday(label) {
   const a = await newAsset(label); const owner = await makeLogin(`${label} Owner`); const waiter = await makeLogin(`${label} Waiter`); const other = await makeLogin(`${label} Other`);
-  const res = (await ask(owner, a, TODAY, TODAY, ['08:00', '17:00'])).body.reserved[0];
-  const entry = (await join(waiter, a, TODAY, TODAY, ['13:00', '17:00'])).body;
+  const res = (await ask(owner, a, HOLD_DAY, HOLD_DAY, ['08:00', '17:00'])).body.reserved[0];
+  const entry = (await join(waiter, a, HOLD_DAY, HOLD_DAY, ['13:00', '17:00'])).body;
   await owner.client.post(`/api/reservations/${res.id}/cancel`, {});
   assert.equal(await phase(waiter, entry.id), 'held');
   return { a, waiter, other, entry };
@@ -273,7 +276,7 @@ test('checkout across another employee\'s active hold is refused with a plain ex
   assert.equal(byIt.status, 409);
   assert.match(byIt.body.error, /being held for another employee/i);
   assert.doesNotMatch(byIt.body.error, /Hold checkout Waiter/);
-  const self = await other.client.post(`/api/assets/${a.id}/checkout`, { due_date: TODAY, due_time: '15:00' });
+  const self = await other.client.post(`/api/assets/${a.id}/checkout`, { due_date: HOLD_DAY, due_time: '15:00' });
   assert.equal(self.status, 409, 'a self-checkout / scan that runs into the held 1-5 PM');
   assert.match(self.body.error, /being held for another employee/i);
   assert.match(self.body.error, /1:00 PM/);
@@ -283,14 +286,14 @@ test('checkout across another employee\'s active hold is refused with a plain ex
 
 test('a hold blocks only its own interval: a checkout back before the hold starts is allowed', async () => {
   const { a, other, entry, waiter } = await heldToday('Hold edge');
-  const early = await admin.post(`/api/assets/${a.id}/checkout`, { employee_id: other.id, assignment_type: 'checkout', due_date: TODAY, due_time: '12:00' });
+  const early = await admin.post(`/api/assets/${a.id}/checkout`, { employee_id: other.id, assignment_type: 'checkout', due_date: HOLD_DAY, due_time: '12:00' });
   assert.equal(early.status, 200, JSON.stringify(early.body));
   assert.equal(await phase(waiter, entry.id), 'held', 'someone else\'s checkout does not touch the hold');
 });
 
 test('checkout by the hold owner is accepted and resolves the hold: no email confirmation needed, audit kept', async () => {
   const { a, waiter, entry } = await heldToday('Hold owner');
-  const out = await admin.post(`/api/assets/${a.id}/checkout`, { employee_id: waiter.id, assignment_type: 'checkout', due_date: TODAY, due_time: '17:00' });
+  const out = await admin.post(`/api/assets/${a.id}/checkout`, { employee_id: waiter.id, assignment_type: 'checkout', due_date: HOLD_DAY, due_time: '17:00' });
   assert.equal(out.status, 200, JSON.stringify(out.body));
   const e = (await waiter.client.get(`/api/waitlist/${entry.id}`)).body;
   assert.equal(e.phase, 'checked_out');
