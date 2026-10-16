@@ -1,6 +1,6 @@
 require('./env');
 // TEMPORARY database driver seam (D-48; removed at the PostgreSQL cutover). DB_DRIVER is checked before anything opens a database:
-// unset / 'sqlite' is the default; 'pg' (wired in Slice 5D) and anything else stop the server with a clear error.
+// unset / 'sqlite' is the default; 'pg' (Slice 5D) runs on PostgreSQL; anything else stops the server with a clear error.
 const dataSeam = require('./dataSeam');
 const DB_DRIVER = dataSeam.resolveDriver();
 const path = require('path');
@@ -11,15 +11,28 @@ const session = require('express-session');
 const bcrypt = require('bcryptjs');
 const multer = require('multer');
 const sharp = require('sharp');
-// src/db.js opens (and migrates) SQLite; server.js takes only the handle, to bind it into the seam below, and the data directory.
+// Per driver. SQLite: src/db.js opens (and migrates) the database at require time; server.js takes only the handle, to bind it into the
+// seam below, and the SQLite mailer. PostgreSQL (Slice 5D): the pool is created lazily (src/pg/pool.js, DATABASE_URL), nothing connects
+// until boot() below migrates the schema; the mailer is the PostgreSQL one. Neither driver's code is loaded for the other.
 // The settings are read and written through the seam (src/settings.js) since Slice 5B-4.
-const { db, DATA_DIR } = require('./db');
-const { notify, APP_URL, mailConfigured, mailEnvelope, testRecipient } = require('./mailer');
+const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data'); // (as src/db.js: uploads, tmp and the session secret live here for both drivers)
+fs.mkdirSync(path.join(DATA_DIR, 'uploads'), { recursive: true });
+let db = null;
+let pool = null;
+let mailer;
+if (DB_DRIVER === 'pg') {
+  pool = require('./pg/pool').getPool();
+  mailer = require('./pg/mailer').createPgMailer(pool);
+} else {
+  ({ db } = require('./db'));
+  mailer = require('./mailer');
+}
+const { notify, APP_URL, mailConfigured, mailEnvelope, testRecipient } = mailer;
 const { cleanSerial } = require('./serial');
 // The data modules with the database bound (`await data.waitlist.join({...})`). Since PostgreSQL migration Slice 5B-4 every route, the
 // middleware, the session store and the timers reach the database ONLY through this (test/data-seam-ratchet.test.js); the modules' pure
 // exports (constants, validators) are read through it too (`data.assignments.capacity`).
-const data = dataSeam.open({ driver: DB_DRIVER, db });
+const data = dataSeam.open({ driver: DB_DRIVER, db, pool });
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -44,11 +57,12 @@ app.get('/health', (req, res) => {
   res.json({ ok: true });
 });
 
-// ---------- sessions (SQLite-backed) ----------
+// ---------- sessions (database-backed, through the seam) ----------
 // The express-session store. Each method is ONE seam call (the SQL is in src/sessions.js since Slice 5B-3); the session's JSON, its
 // expiry time and "an expired session is no session" stay here. The callback runs when the seam call settles (on SQLite a microtask,
-// still before the response is written: express-session waits for save / touch / destroy before it ends the response). A failed call
-// reaches the callback as its error. A PostgreSQL session store is Slice 5D.
+// on PostgreSQL after the query; still before the response is written: express-session waits for save / touch / destroy before it ends
+// the response). A failed call reaches the callback as its error. The same class serves both drivers (the PostgreSQL SQL is
+// src/pg/sessions.js); the name is kept from before the seam.
 class SqliteStore extends session.Store {
   get(sid, cb) {
     data.sessions.get(sid).then((row) => {
@@ -64,7 +78,7 @@ class SqliteStore extends session.Store {
   destroy(sid, cb) { data.sessions.destroy(sid).then(() => cb && cb(null), (err) => cb && cb(err)); }
   touch(sid, sess, cb) { this.set(sid, sess, cb); }
 }
-setInterval(() => data.sessions.purgeExpired(Date.now()), 3600e3).unref();
+setInterval(() => data.sessions.purgeExpired(Date.now()).catch((e) => console.error('[sessions:purge]', e.message)), 3600e3).unref();
 
 let secret = process.env.SESSION_SECRET;
 if (!secret) {
@@ -881,7 +895,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
 // On the seam since Slice 5B-4: the settings (src/settings.js, the SQL of src/db.js getSettings / setSetting), the outbox (src/outbox.js),
 // IT's activity list (src/activityLog.js recent), the CSV export query (src/assetViews.js exportRows) and the import transaction
 // (src/assetRecords.js importAssets). Validation, the CSV text and the emails stay here.
-app.get('/api/settings', admin, async (req, res) => res.json({ ...(await data.settings.getSettings()), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null, mailEnvelope: mailEnvelope(), mailTestRecipient: testRecipient() }));
+app.get('/api/settings', admin, async (req, res) => res.json({ ...(await data.settings.getSettings()), mailConfigured: mailConfigured(), appUrl: APP_URL, mailFrom: process.env.MAIL_FROM || process.env.SMTP_USER || null, mailEnvelope: await mailEnvelope(), mailTestRecipient: testRecipient() }));
 // The IT email identity is just a display name and a contact address. Anything credential-shaped is refused outright: passwords, app
 // passwords, API keys and OAuth secrets belong in the server environment (SMTP_PASS etc.), never in the database or this screen.
 const CREDENTIAL_KEY = /pass(word)?|secret|token|api[_-]?key|smtp|credential|oauth/i;
@@ -972,27 +986,35 @@ app.post('/api/import/assets', admin, async (req, res) => {
 
 // ---------- overdue reminders ----------
 // The query and the "reminded today" mark: src/overdue.js (moved there verbatim in Slice 5B-4). The setting check, the order (each email,
-// then its mark) and the emails stay here; the timers keep their intervals. (A failure is not caught, as before.)
+// then its mark) and the emails stay here; the timers keep their intervals.
 async function overdueSweep() {
-  if (!(await data.settings.getSettings()).overdue_reminders) return;
-  const rows = await data.overdue.dueAssignments();
-  for (const s of rows) {
-    const a = await data.assetAccess.getAsset(s.asset_id);
-    notify.overdue({ name: s.user_name, email: s.user_email }, a, s);
-    await data.overdue.markNotified(s.id);
-  }
+  // (Since Slice 5D a failure is logged, never an unhandled rejection: a lost connection is a routine error on PostgreSQL.)
+  try {
+    if (!(await data.settings.getSettings()).overdue_reminders) return;
+    const rows = await data.overdue.dueAssignments();
+    for (const s of rows) {
+      const a = await data.assetAccess.getAsset(s.asset_id);
+      notify.overdue({ name: s.user_name, email: s.user_email }, a, s);
+      await data.overdue.markNotified(s.id);
+    }
+  } catch (e) { console.error('[overdue:sweep]', e.message); }
 }
-setInterval(overdueSweep, 3600e3).unref();
-setTimeout(overdueSweep, 15e3).unref();
+function startOverdueTimer() {
+  setInterval(overdueSweep, 3600e3).unref();
+  setTimeout(overdueSweep, 15e3).unref();
+}
+if (DB_DRIVER !== 'pg') startOverdueTimer(); // (on PostgreSQL boot() starts it, once the schema is migrated)
 
 // ---------- waitlist sweep ----------
 // Records holds that ran out, offers free dates to the next person in line (this is what notices a check-in or a changed asset setting, which
 // do not touch the waitlist directly) and sends any hold email still owed. Idempotent, so running it often is harmless. Through the seam
 // since Slice 5B-4 (on SQLite the sweep still runs to completion inside the call; a failure is logged, as before). The PostgreSQL
-// single-flight scheduler (src/pg/sweep.js) replaces this timer in Slice 5D.
+// single-flight scheduler (src/pg/sweep.js) replaces this timer on PostgreSQL (started by boot() below, with the same first run at 20 s).
 function waitlistSweep() { return data.waitlist.sweep().catch((e) => console.error('[waitlist:sweep]', e.message)); }
-setInterval(waitlistSweep, 60e3).unref();
-setTimeout(waitlistSweep, 20e3).unref();
+if (DB_DRIVER !== 'pg') {
+  setInterval(waitlistSweep, 60e3).unref();
+  setTimeout(waitlistSweep, 20e3).unref();
+}
 
 // ---------- static front-end ----------
 const PUB = path.join(__dirname, '..', 'public');
@@ -1029,11 +1051,37 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Something went wrong. Please try again.' });
 });
 
-if (require.main === module) {
+// ---------- boot ----------
+// SQLite is ready when this module loads (src/db.js migrated it). PostgreSQL needs async work first: boot() migrates the schema, installs
+// the effects notifier (the after-commit emails of the PostgreSQL write paths, src/pg/notifier.js) and starts the single-flight waitlist
+// sweep (src/pg/sweep.js, every 60 s, first run at 20 s) and the overdue timer. Idempotent (a second call returns the first result).
+// It resolves to `{ stop }`, which stops the sweep timer, waits for a sweep in flight, uninstalls the notifier and ends the pool.
+// The PostgreSQL driver must be booted before the first request; `require.main` does it below and awaits it before listen.
+let booting = null;
+function boot() {
+  if (!booting) booting = DB_DRIVER === 'pg' ? bootPg() : Promise.resolve({ stop: async () => {} });
+  return booting;
+}
+async function bootPg() {
+  const { runMigrations } = require('./pg/migrate');
+  const { installNotifier } = require('./pg/notifier');
+  const { createSweepScheduler } = require('./pg/sweep');
+  const ran = await runMigrations(pool);
+  if (ran.length) console.log(`PostgreSQL: applied schema migration(s) ${ran.join(', ')}`);
+  const uninstall = installNotifier(pool, mailer);
+  const scheduler = createSweepScheduler({ pool });
+  scheduler.start();
+  setTimeout(() => { scheduler.tick(); }, 20e3).unref();
+  startOverdueTimer();
+  return { stop: async () => { await scheduler.stop(); uninstall(); await require('./pg/pool').close(); } };
+}
+app.boot = boot;
+
+function listen({ stop }) {
   // (Express 5 hands a listen failure to this callback as `err`; it must not print the success banner then. The 'error' handler below reports it.)
   const server = app.listen(PORT, (err) => {
     if (err) return;
-    console.log(`Nutricost IT Assets running on http://localhost:${PORT}  (APP_URL=${APP_URL})`);
+    console.log(`Nutricost IT Assets running on http://localhost:${PORT}  (APP_URL=${APP_URL}, database: ${DB_DRIVER === 'pg' ? 'PostgreSQL' : 'SQLite'})`);
     if (DEV) console.log('Dev mode: this server restarts itself when backend files change; the browser caches nothing and no service worker is kept. Just refresh the page.');
     else if (process.env.npm_lifecycle_event === 'start' && process.env.NODE_ENV !== 'production') console.log('Note: `npm start` does NOT restart on code changes. For development use `npm run dev` (auto-restart, no stale browser cache).');
     console.log(mailConfigured() ? `Email: sending via ${process.env.SMTP_HOST || 'smtp.gmail.com'} as ${process.env.SMTP_USER}` : 'Email: NOT configured — messages are logged to the Outbox (Settings → Email).');
@@ -1042,6 +1090,38 @@ if (require.main === module) {
   server.on('error', (err) => {
     if (err.code !== 'EADDRINUSE') throw err;
     console.error(`\nPort ${PORT} is already in use by another process, so THIS server did not start and the browser is still talking to the old one.\nFind it with:  lsof -nP -iTCP:${PORT} -sTCP:LISTEN   then stop it (kill <PID>) and start again, or choose another port with PORT=<number>.\n`);
+    process.exit(1);
+  });
+  // PostgreSQL: on SIGTERM / SIGINT stop taking connections and let the requests in flight finish (idle keep-alive connections are closed
+  // at once; after SHUTDOWN_GRACE_MS the rest are cut and the exit code is 1), THEN stop the sweep (waiting for one in flight), uninstall
+  // the notifier and end the pool, and exit: a request never loses the pool halfway. (SQLite keeps Node's default signal handling.)
+  if (DB_DRIVER === 'pg') {
+    const SHUTDOWN_GRACE_MS = 10_000;
+    let stopping = false;
+    const drain = () => new Promise((resolve) => {
+      let forced = false;
+      const timer = setTimeout(() => { forced = true; server.closeAllConnections(); }, SHUTDOWN_GRACE_MS);
+      timer.unref();
+      server.close(() => { clearTimeout(timer); resolve(forced); });
+      server.closeIdleConnections();
+    });
+    const shutdown = async (signal) => {
+      if (stopping) return;
+      stopping = true;
+      console.log(`${signal}: shutting down`);
+      let code = 0;
+      if (await drain()) { console.error(`[shutdown] requests still running after ${SHUTDOWN_GRACE_MS / 1000} s were cut off`); code = 1; }
+      try { await stop(); } catch (e) { console.error('[shutdown]', e.message); code = 1; }
+      process.exit(code);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+  }
+}
+
+if (require.main === module) {
+  boot().then(listen, (err) => {
+    console.error(`Startup failed: ${err.message}`);
     process.exit(1);
   });
 }

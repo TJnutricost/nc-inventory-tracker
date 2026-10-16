@@ -65,19 +65,19 @@ test('DB_DRIVER: unset, empty or sqlite selects SQLite (the default)', () => {
   assert.equal(data.driver, 'sqlite');
 });
 
-test('DB_DRIVER=pg is refused with a clear error (wired in Slice 5D); any other value is refused too', () => {
-  assert.throws(() => seam.resolveDriver({ DB_DRIVER: 'pg' }), (e) => e.code === 'DB_DRIVER_NOT_WIRED' && /DB_DRIVER=pg is not available yet/.test(e.message) && /Slice 5D/.test(e.message) && /DB_DRIVER=sqlite/.test(e.message));
+test('DB_DRIVER=pg selects PostgreSQL (Slice 5D); any other value is refused with a clear error', () => {
+  for (const env of [{ DB_DRIVER: 'pg' }, { DB_DRIVER: ' pg ' }]) assert.equal(seam.resolveDriver(env), 'pg', JSON.stringify(env));
   for (const v of ['postgres', 'PG', 'mysql', 'sqlite3', 'Sqlite']) {
     assert.throws(() => seam.resolveDriver({ DB_DRIVER: v }), (e) => e.code === 'DB_DRIVER_INVALID' && e.message.includes(`DB_DRIVER="${v}" is not a known database driver`), v);
   }
-  assert.throws(() => seam.open({ driver: 'pg', db }), (e) => e.code === 'DB_DRIVER_NOT_WIRED');
+  assert.throws(() => seam.open({ driver: 'pg', db }), /needs a node-postgres pool/, 'the SQLite handle is not a pool');
   assert.throws(() => seam.open({ driver: 'nope', db }), (e) => e.code === 'DB_DRIVER_INVALID');
   assert.throws(() => seam.open({ driver: 'sqlite' }), /needs the better-sqlite3 database handle/);
   assert.throws(() => seam.open({ driver: 'sqlite', db: {} }), /needs the better-sqlite3 database handle/);
 });
 
-test('the app refuses to start with DB_DRIVER=pg (or an unknown value) before opening SQLite and without loading PostgreSQL code', () => {
-  for (const [value, code] of [['pg', 'DB_DRIVER_NOT_WIRED'], ['bogus', 'DB_DRIVER_INVALID']]) {
+test('the app refuses to start with an unknown DB_DRIVER before opening SQLite and without loading PostgreSQL code', () => {
+  for (const [value, code] of [['bogus', 'DB_DRIVER_INVALID'], ['postgres', 'DB_DRIVER_INVALID']]) {
     const { out, dir } = inChild(`const report = {};
 try { require('./src/server'); report.started = true; } catch (e) { report.code = e.code; report.message = e.message; }
 ${REPORT}`, { DB_DRIVER: value });
@@ -87,6 +87,23 @@ ${REPORT}`, { DB_DRIVER: value });
     assert.equal(out.sqliteDb, false, 'the check runs before src/db.js opens the SQLite database');
     assert.equal(fs.existsSync(path.join(dir, 'assets.db')), false, 'no database file was created');
   }
+});
+
+// Slice 5D: with DB_DRIVER=pg the app module loads without touching SQLite and without connecting: the pool is lazy and only boot()
+// (awaited before listen) migrates. A database that does not exist is fine here, since nothing connects.
+test('DB_DRIVER=pg loads the app on the PostgreSQL seam without opening SQLite or connecting', () => {
+  const { out, dir } = inChild(`const report = {};
+const app = require('./src/server'); report.started = true; report.boot = typeof app.boot;
+const pool = require('./src/pg/pool').getPool(); report.connections = pool.totalCount;
+${REPORT}`, { DB_DRIVER: 'pg', DATABASE_URL: 'postgres://nobody:nothing@127.0.0.1:1/none' });
+  assert.equal(out.started, true);
+  assert.equal(out.boot, 'function');
+  assert.equal(out.connections, 0, 'loading the app opens no connection');
+  assert.equal(out.sqliteDb, false, 'src/db.js is not loaded');
+  assert.equal(fs.existsSync(path.join(dir, 'assets.db')), false, 'no SQLite database file was created');
+  const sep = path.sep;
+  assert.ok(out.pg.some((k) => k.endsWith(`${sep}src${sep}pg${sep}pool.js`)) && out.pg.some((k) => k.endsWith(`${sep}src${sep}pg${sep}mailer.js`)));
+  for (const lazy of ['migrate.js', 'notifier.js', 'sweep.js']) assert.ok(!out.pg.some((k) => k.endsWith(`${sep}src${sep}pg${sep}${lazy}`)), `${lazy} waits for boot()`);
 });
 
 test('the app on the default driver, and the seam itself, load no PostgreSQL code (no pool, no connection, no migration)', () => {
