@@ -7,14 +7,13 @@
 // MISSING is the explicit list of names that have NO twin yet. The test fails both ways: a name not in MISSING without a twin, and a
 // name in MISSING that now HAS one (remove it from the list when its twin lands, so the list only ever shrinks). THE LIST MUST BE EMPTY
 // BY THE END OF SLICE 5C. Owners (the approved 5C split, docs/briefs/postgresql-slice-5-overview.md):
-//   5C-3 accounts / sessions . accounts, sessions, people writes (carry-overs aa, ab, ac, af; the writes run the email-in-use
-//                              checks, twinned in 5C-2, inside their transaction)
 //   5C-4 request records ..... requestRecords (ag, ah)
 //   5C-5 asset records ....... assetRecords (incl. the 5B-4 peekTag / importAssets), assetCustody (v, w, x, ai)
 // (5C-1 added activityLog (incl. the 5B-4 `recent`), outbox, overdue, photoRecords, assetAccess, reservationViews, requestAccess,
 // catalogViews, catalogAdmin; settings already had its twin, src/pg/settings.js, since Slice 3. 5C-2 added assetViews (incl. the 5B-4
 // `exportRows`), dashboard, and the people reads: getPerson, listPeople, personAssignments, employeeStatus and the four email-in-use
-// checks.)
+// checks. 5C-3 added accounts, sessions and the people writes: createPerson, addAccount, updatePerson, setSelfCheckout,
+// updateOwnProfile.)
 //
 // KNOWN_DIFFERENCES are deliberate, pre-existing (Slices 4B/4C) gaps that are NOT twins and never will be; 5D's binding must not bind
 // them: no route calls them through the seam (the SQLite modules call them internally).
@@ -27,9 +26,6 @@ const ROOT = path.join(__dirname, '..', '..');
 const { MODULES } = require('../../src/dataSeam/sqlite');
 
 const MISSING = {
-  people: { slice: '5C-3 (writes)', names: ['createPerson', 'addAccount', 'updatePerson', 'setSelfCheckout', 'updateOwnProfile'] },
-  accounts: { slice: '5C-3', names: ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset'] },
-  sessions: { slice: '5C-3', names: ['get', 'set', 'destroy', 'purgeExpired', 'destroyForAccount'] },
   requestRecords: { slice: '5C-4', names: ['listRequests', 'createEquipmentRequest', 'approveRequest'] },
   assetRecords: { slice: '5C-5', names: ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset', 'peekTag', 'importAssets'] },
   assetCustody: { slice: '5C-5', names: ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice'] },
