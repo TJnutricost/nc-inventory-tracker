@@ -237,7 +237,8 @@ test('ratchet: the session store and its purge timer reach the sessions table on
   const store = blockAt('class SqliteStore extends session.Store');
   for (const fn of ['get', 'set', 'destroy']) assert.match(store, new RegExp(`\\bdata\\.sessions\\.${fn}\\(`), `the store's ${fn} uses data.sessions.${fn}`);
   for (const [re, what] of FORBIDDEN) assert.doesNotMatch(store, re, `the session store uses ${what}`);
-  assert.match(srcCode, /setInterval\(\(\) => data\.sessions\.purgeExpired\(Date\.now\(\)\), 3600e3\)\.unref\(\);/, 'the hourly purge goes through the seam');
+  assert.match(srcCode, /setInterval\(\(\) => data\.sessions\.purgeExpired\(Date\.now\(\)\)\.catch\(\(e\) => console\.error\('\[sessions:purge\]', e\.message\)\), 3600e3\)\.unref\(\);/,
+    'the hourly purge goes through the seam (a failure is logged, Slice 5D)');
   // no SQL against the session, token or account tables is left in server.js
   assert.doesNotMatch(srcCode, /\b(FROM|INTO|UPDATE)\s+(sessions|tokens)\b/, 'server.js has no SQL on sessions or tokens');
   assert.doesNotMatch(srcCode, /\b(INTO|UPDATE)\s+accounts\b/, 'server.js writes no account rows itself');
@@ -251,14 +252,23 @@ test('ratchet: no route outside the list uses the seam (a half-migrated route is
   }
 });
 
-test('ratchet: server.js opens the seam once, after checking DB_DRIVER and before opening SQLite', () => {
+// Slice 5D: each driver's database code is loaded only on its own branch (the SQLite database and mailer, or the PostgreSQL pool and
+// mailer); boot() loads the PostgreSQL runner, notifier and sweep scheduler, and nothing else of src/pg/* is required by server.js.
+test('ratchet: server.js opens the seam once, after checking DB_DRIVER and loading only that driver', () => {
   const body = code(src);
   assert.equal((body.match(/dataSeam\.open\(/g) || []).length, 1, 'the seam is opened once');
-  assert.match(body, /const data = dataSeam\.open\(\{ driver: DB_DRIVER, db \}\)/);
+  assert.match(body, /const data = dataSeam\.open\(\{ driver: DB_DRIVER, db, pool \}\)/);
   const resolveAt = body.indexOf('dataSeam.resolveDriver()');
   assert.ok(resolveAt > 0, 'DB_DRIVER is resolved at startup');
   assert.ok(resolveAt < body.indexOf("require('./db')"), 'DB_DRIVER is checked before src/db.js opens the SQLite database');
-  assert.doesNotMatch(body, /require\(['"]\.\/pg\//, 'server.js does not load src/pg/* before Slice 5D');
+  const branch = blockAt("if (DB_DRIVER === 'pg') {\n  pool");
+  assert.match(branch, /pool = require\('\.\/pg\/pool'\)\.getPool\(\);\s*mailer = require\('\.\/pg\/mailer'\)\.createPgMailer\(pool\);\s*\}$/);
+  const sqliteBranch = body.slice(body.indexOf(branch) + branch.length, body.indexOf("const { notify, APP_URL"));
+  assert.match(sqliteBranch, /^ else \{\s*\(\{ db \} = require\('\.\/db'\)\);\s*mailer = require\('\.\/mailer'\);\s*\}\s*$/);
+  const pgRequires = [...body.matchAll(/require\(['"](\.\/pg\/[^'"]+)['"]\)/g)].map((m) => m[1]).sort();
+  assert.deepEqual(pgRequires, ['./pg/mailer', './pg/migrate', './pg/notifier', './pg/pool', './pg/pool', './pg/sweep']);
+  const bootPg = blockAt('async function bootPg()');
+  for (const m of ['./pg/migrate', './pg/notifier', './pg/sweep']) assert.ok(bootPg.includes(`require('${m}')`), `${m} is loaded only by bootPg`);
 });
 
 // ---------------------------------------------------------------- Slice 5B-4: the final audit of server.js
@@ -280,13 +290,15 @@ test('ratchet (5B-4): every route in server.js is either on the seam (MIGRATED) 
 
 test('ratchet (5B-4): server.js has no database access outside the seam (no db use, SQL, settings access or data module)', () => {
   // src/db.js: only the handle (to bind the seam) and the data directory; the settings come through the seam (src/settings.js)
+  // (since Slice 5D the data directory is computed in server.js, as src/db.js does, so the PostgreSQL driver never loads src/db.js)
   const dbRequires = allCode.match(/^.*require\(['"]\.\/db['"]\).*$/gm) || [];
-  assert.deepEqual(dbRequires, ["const { db, DATA_DIR } = require('./db');"], 'server.js takes only `db` and `DATA_DIR` from src/db.js');
+  assert.deepEqual(dbRequires.map((l) => l.trim()), ["({ db } = require('./db'));"], 'server.js takes only `db` from src/db.js');
   const dbLines = allCode.split('\n').filter((l) => /\bdb\b/.test(l)).map((l) => l.trim());
-  assert.deepEqual(dbLines, ["const { db, DATA_DIR } = require('./db');", 'const data = dataSeam.open({ driver: DB_DRIVER, db });'],
+  assert.deepEqual(dbLines, ['let db = null;', "({ db } = require('./db'));", 'const data = dataSeam.open({ driver: DB_DRIVER, db, pool });'],
     'the SQLite handle is used only to open the seam');
-  // the only local modules: the env loader, the seam, src/db.js (above), the mailer (the SQLite mail adapter) and the pure serial helpers
-  const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).sort();
+  // the only local modules: the env loader, the seam, src/db.js (above), the mailers (the SQLite mail adapter, or the PostgreSQL one),
+  // the pure serial helpers and, since Slice 5D, the PostgreSQL pool and boot services (checked in the test above)
+  const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).filter((m) => !m.startsWith('./pg/')).sort();
   assert.deepEqual(locals, ['./dataSeam', './db', './env', './mailer', './serial'], 'no data module is loaded by server.js (only the seam)');
   assert.doesNotMatch(allCode, /\.prepare\s*\(/, 'no prepared statement');
   assert.doesNotMatch(allCode, /\.transaction\s*\(/, 'no transaction');
@@ -314,5 +326,12 @@ test('ratchet (5B-4): the overdue and waitlist sweeps reach the database only th
     'setInterval(waitlistSweep, 60e3).unref();', 'setTimeout(waitlistSweep, 20e3).unref();']) {
     assert.equal(allCode.split(timer).length - 1, 1, `${timer} (unchanged interval, unref'd, once)`);
   }
-  assert.equal((allCode.match(/\bset(Interval|Timeout)\(/g) || []).length, 5, 'no other timer (the four sweep timers and the hourly session purge)');
+  // Slice 5D: the SQLite waitlist timers run only on SQLite; on PostgreSQL boot() starts the single-flight scheduler (its own 60 s
+  // interval, plus this one first run at 20 s) and the same overdue timers, once the schema is migrated.
+  assert.match(allCode, /if \(DB_DRIVER !== 'pg'\) \{\s*setInterval\(waitlistSweep, 60e3\)\.unref\(\);\s*setTimeout\(waitlistSweep, 20e3\)\.unref\(\);\s*\}/);
+  assert.match(allCode, /if \(DB_DRIVER !== 'pg'\) startOverdueTimer\(\);/);
+  const bootPg = blockAt('async function bootPg()');
+  assert.match(bootPg, /scheduler\.start\(\);\s*setTimeout\(\(\) => \{ scheduler\.tick\(\); \}, 20e3\)\.unref\(\);\s*startOverdueTimer\(\);/);
+  assert.equal((allCode.match(/\bset(Interval|Timeout)\(/g) || []).length, 6,
+    'no other timer (the four sweep timers, the hourly session purge and the first PostgreSQL sweep)');
 });

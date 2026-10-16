@@ -165,13 +165,17 @@ test('PG migration list: baseline is migration 1 and its SQL file exists', () =>
   assert.doesNotMatch(code, /\bAUTOINCREMENT\b|datetime\(|\bGLOB\b|\bNOCASE\b|\bEXCLUDE\b/i);
 });
 
-test('nothing in the running app imports the PostgreSQL modules or pg (the app stays on SQLite)', () => {
+// Since Slice 5D only server.js (the pool, the mailer and the boot services, on the PostgreSQL branch: test/data-seam-ratchet.test.js) and
+// the seam's PostgreSQL side (src/dataSeam/pg.js: the twins, by name; loaded by src/dataSeam/index.js) load PostgreSQL code; every other SQLite-side module still must not.
+test('nothing in the running app imports the PostgreSQL modules or pg, except server.js and the PostgreSQL seam', () => {
   const srcDir = path.join(__dirname, '..', '..', 'src');
   const files = fs.readdirSync(srcDir, { recursive: true }).filter((f) => f.endsWith('.js') && !f.startsWith(`pg${path.sep}`));
   assert.ok(files.includes('server.js') && files.includes('db.js'));
   for (const f of files) {
+    // (dataSeam/index.js requires './pg' = src/dataSeam/pg.js, only for the 'pg' driver: test/data-seam.test.js checks that at run time)
+    if (f === 'server.js' || f === path.join('dataSeam', 'pg.js') || f === path.join('dataSeam', 'index.js')) continue;
     const code = fs.readFileSync(path.join(srcDir, f), 'utf8');
-    assert.doesNotMatch(code, /require\(\s*['"](pg|pg\/.*|\.\.?\/pg(\/.*)?)['"]\s*\)/, `${f} must not import pg yet`);
+    assert.doesNotMatch(code, /require\(\s*['"](pg|pg\/.*|\.\.?\/pg(\/.*)?)['"]\s*\)|require\(`\.\.?\/pg\//, `${f} must not import pg`);
   }
 });
 
