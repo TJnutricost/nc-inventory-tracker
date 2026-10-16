@@ -4,15 +4,15 @@
 // async (an AsyncFunction; the few pre-existing non-async twins are listed in NOT_ASYNC and checked to return a promise); and every
 // pure export of the SQLite module exists on the twin too. Needs no database, so it runs under plain `npm test`.
 //
-// MISSING is the explicit list of names that have NO twin yet. The test fails both ways: a name not in MISSING without a twin, and a
-// name in MISSING that now HAS one (remove it from the list when its twin lands, so the list only ever shrinks). THE LIST MUST BE EMPTY
-// BY THE END OF SLICE 5C. Owners (the approved 5C split, docs/briefs/postgresql-slice-5-overview.md):
-//   5C-5 asset records ....... assetRecords (incl. the 5B-4 peekTag / importAssets), assetCustody (v, w, x, ai)
+// MISSING was the explicit list of names that had NO twin yet; it shrank PR by PR and is EMPTY since Slice 5C-5 (5C is complete): every
+// seam database function has its twin, with no exceptions. The test fails both ways: a name not in MISSING without a twin, and a name in
+// MISSING that has one; a further test pins MISSING to empty, so a new seam function without a twin cannot be parked there.
 // (5C-1 added activityLog (incl. the 5B-4 `recent`), outbox, overdue, photoRecords, assetAccess, reservationViews, requestAccess,
 // catalogViews, catalogAdmin; settings already had its twin, src/pg/settings.js, since Slice 3. 5C-2 added assetViews (incl. the 5B-4
 // `exportRows`), dashboard, and the people reads: getPerson, listPeople, personAssignments, employeeStatus and the four email-in-use
 // checks. 5C-3 added accounts, sessions and the people writes: createPerson, addAccount, updatePerson, setSelfCheckout,
-// updateOwnProfile. 5C-4 added requestRecords: listRequests, createEquipmentRequest, approveRequest.)
+// updateOwnProfile. 5C-4 added requestRecords: listRequests, createEquipmentRequest, approveRequest. 5C-5 added assetRecords (incl. the
+// 5B-4 peekTag / importAssets) and assetCustody.)
 //
 // KNOWN_DIFFERENCES are deliberate, pre-existing (Slices 4B/4C) gaps that are NOT twins and never will be; 5D's binding must not bind
 // them: no route calls them through the seam (the SQLite modules call them internally).
@@ -24,10 +24,7 @@ const path = require('path');
 const ROOT = path.join(__dirname, '..', '..');
 const { MODULES } = require('../../src/dataSeam/sqlite');
 
-const MISSING = {
-  assetRecords: { slice: '5C-5', names: ['tagExists', 'allocateTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset', 'peekTag', 'importAssets'] },
-  assetCustody: { slice: '5C-5', names: ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice'] },
-};
+const MISSING = {};
 
 const KNOWN_DIFFERENCES = {
   'reservations.sendRecorded': 'absent on PostgreSQL: reservations.create registers a `request_recorded` effect after COMMIT instead of emailing (D-47, Slice 4B)',
@@ -39,6 +36,11 @@ const NOT_ASYNC = { 'reservations.note': (fn, q) => fn(q, 1, 1, 'x', 'y', null),
 const twinFile = (name) => path.join(ROOT, 'src', 'pg', `${name}.js`);
 const missingSet = new Set(Object.entries(MISSING).flatMap(([m, { names }]) => names.map((n) => `${m}.${n}`)));
 const stubExecutor = () => ({ query: async () => ({ rows: [{ v: '2026-01-01' }], rowCount: 1 }) });
+
+test('Slice 5C is complete: MISSING is empty and every seam module has a twin file', () => {
+  assert.deepEqual(MISSING, {});
+  assert.deepEqual(Object.keys(MODULES).filter((name) => !fs.existsSync(twinFile(name))), []);
+});
 
 test('MISSING and KNOWN_DIFFERENCES name only real seam functions', () => {
   for (const key of [...missingSet, ...Object.keys(KNOWN_DIFFERENCES)]) {
