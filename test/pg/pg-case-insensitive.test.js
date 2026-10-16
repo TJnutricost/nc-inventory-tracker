@@ -46,6 +46,20 @@ describe('PostgreSQL case-insensitive lookup idiom (lower(col) = lower($1))', pg
     assert.deepEqual({ found: pgFound, insert: pgDup }, { found: 0, insert: 'inserted' });
   });
 
+  // Slice 5C-2 finding: the PARAMETER needs COLLATE "C" too. A bare lower($1) folds with the database's default collation, which also
+  // folds non-ASCII letters, so a stored 'NC-É2' scanned as 'nc-É2' (found by SQLite NOCASE) would be missed.
+  test('the idiom is lower(col) = lower($1 COLLATE "C"): an ASCII-case variant with the same non-ASCII letter is found, as on SQLite', async () => {
+    await fx.insertAsset(pool, { tag: 'NC-É2' });
+    const sqlite = buildSqliteReference();
+    sqlite.prepare("INSERT INTO assets (tag, name) VALUES ('NC-É2', 'x')").run();
+    const sqliteFound = sqlite.prepare('SELECT tag FROM assets WHERE tag = ? COLLATE NOCASE').all('nc-É2').length;
+    sqlite.close();
+    const pgFound = (await pool.query('SELECT tag FROM assets WHERE lower(tag) = lower($1 COLLATE "C")', ['nc-É2'])).rows.length;
+    assert.deepEqual([pgFound, sqliteFound], [1, 1]);
+    const bareFoldsLikeC = (await pool.query('SELECT lower($1::text) = lower($1::text COLLATE "C") AS same', ['É'])).rows[0].same;
+    if (!bareFoldsLikeC) assert.equal((await pool.query('SELECT tag FROM assets WHERE lower(tag) = lower($1)', ['nc-É2'])).rows.length, 0, 'a bare lower($1) misses it under this database\'s default collation');
+  });
+
   test('text search keeps ASCII-insensitive matching: lower() on both sides (or ILIKE) behaves like SQLite LIKE', async () => {
     await fx.insertAsset(pool, { tag: 'NC-SRCH1', name: 'MacBook Air M3' });
     const sqlite = buildSqliteReference();
