@@ -107,7 +107,7 @@ test('moving a node cannot create a cycle (self, child, or deep descendant), and
   assert.equal(ok.body.path, 'Move Target > Sony');
   assert.equal((await admin.get('/api/catalog')).body.find((n) => n.id === t.a7.id).path, 'Move Target > Sony > A7 IV');
   // the schema itself refuses a self-parent even if the code were bypassed
-  assert.throws(() => db.prepare('UPDATE catalog_nodes SET parent_id = id WHERE id = ?').run(t.canon.id), /CHECK/);
+  assert.throws(() => db.prepare('UPDATE catalog_nodes SET parent_id = id WHERE id = ?').run(t.canon.id), /CHECK|check constraint/);
   // move to root; collision at the destination is refused
   await node('Sony', other.id).catch(() => {});
   const dup = await admin.put(`/api/catalog/${t.canon.id}`, { parent_id: other.id, name: 'Sony' });
@@ -144,7 +144,7 @@ test('a referenced node cannot be deleted (children, assets or requests); an unu
   assert.equal((await admin.del(`/api/catalog/${t.camera.id}`)).status, 400, 'has children');
   const asset = await newAsset('Sony A7 IV Body', { catalog_node_id: t.a7.id });
   assert.equal((await admin.del(`/api/catalog/${t.a7.id}`)).status, 400, 'has an asset');
-  assert.throws(() => db.prepare('DELETE FROM catalog_nodes WHERE id = ?').run(t.a7.id), /FOREIGN KEY/, 'the schema backs the rule up');
+  assert.throws(() => db.prepare('DELETE FROM catalog_nodes WHERE id = ?').run(t.a7.id), /FOREIGN KEY|foreign key constraint|RESTRICT/, 'the schema backs the rule up');
   const emp = await makeLogin('Req Holder');
   assert.equal((await emp.client.post('/api/requests', { catalog_node_id: t.r5.id })).status, 200);
   assert.equal((await admin.del(`/api/catalog/${t.r5.id}`)).status, 400, 'a request refers to it');
@@ -501,7 +501,7 @@ test('renaming or moving catalog nodes does not change what an existing request 
   assert.equal(mine.category, t.camera.name);
   assert.equal(mine.asset_label, `${a.tag} — History A7`);
   assert.equal(mine.catalog_node_id, t.a7.id, 'the stable id still points at the (renamed, moved) node');
-  assert.equal(catalogLib.pathText(db, t.a7.id), 'Elsewhere > A7 Mark IV');
+  if (!require('./helpers').isPg) assert.equal(catalogLib.pathText(db, t.a7.id), 'Elsewhere > A7 Mark IV'); // (the SQLite module on the SQLite handle)
   const adm = (await admin.get('/api/requests')).body.find((r) => r.id === made.id);
   assert.equal(adm.catalog_path, mine.catalog_path);
 });

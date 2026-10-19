@@ -1,5 +1,7 @@
 // The TEMPORARY database driver seam (D-48, PostgreSQL migration Slice 5B-1): DB_DRIVER handling, the SQLite binding, error
 // pass-through, and that nothing here loads or touches PostgreSQL. Runs on SQLite only; never needs Docker and never sends email.
+// The SQLite side of the temporary driver seam: it opens SQLite itself, so it does not run in the PostgreSQL pass (test/pg covers the PG side).
+if (process.env.NC_TEST_DRIVER === 'pg') { require('node:test').test(`${require('path').basename(__filename)} (SQLite seam)`, { skip: 'SQLite seam; the PG side is covered by test/pg' }, () => {}); return; }
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

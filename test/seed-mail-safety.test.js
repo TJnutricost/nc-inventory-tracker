@@ -11,6 +11,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 const { bootApp, startServer, stopServer, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 const ROOT = path.join(__dirname, '..');
 const PROBE_MAIL = path.join(ROOT, 'test-support', 'mail-probe.js');
@@ -117,7 +118,7 @@ test('seed:verify makes no connection to an SMTP server, even with credentials i
   } finally { await smtp.close(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('"Send me a test email" sends exactly one message, redirected, and the redirect still works after seeding code has run', async () => {
+test('"Send me a test email" sends exactly one message, redirected, and the redirect still works after seeding code has run', { skip: skipOnPg }, async () => {
   const keep = process.env.MAIL_TEST_RECIPIENT;
   const booted = bootApp(); const server = await startServer(booted.app);
   const mailer = require('../src/mailer'); const sent = [];

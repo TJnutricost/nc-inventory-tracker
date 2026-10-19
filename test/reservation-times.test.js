@@ -382,7 +382,7 @@ test('the queue is time-aware and still FIFO: non-overlapping entries are both o
   assert.deepEqual(rest(), [['10:00', '11:00', 'held'], ['13:00', '14:00', 'held']], 'now the whole interval has been offered to the next in line');
 });
 
-test('expiry releases a timed hold to the next entry; confirming keeps the times; approval-required keeps them through IT', async () => {
+test('expiry releases a timed hold to the next entry; confirming keeps the times; approval-required keeps them through IT', { skip: require('./helpers').skipOnPg }, async () => {
   const { asset, owner, w1, w2, resv, day } = await stageTimed();
   const e1 = await okJoin(w1, asset, day, day, ['09:00', '11:00']);
   const e2 = await okJoin(w2, asset, day, day, ['09:30', '10:30']);

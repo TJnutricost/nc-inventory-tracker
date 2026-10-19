@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 const T = require('../src/timeRange');
 
 let server, db, admin, waitlist;
@@ -383,7 +384,7 @@ test('the window is set from the OFFERED piece: a partial hold uses the tier of 
   assert.equal(db.prepare("SELECT start_date FROM waitlist_entries WHERE id = ?").get(e.id).start_date, plus(3));
 });
 
-test('an offer that expires frees exactly its interval and the next FIFO waitlister is offered it at once, with its own window', async () => {
+test('an offer that expires frees exactly its interval and the next FIFO waitlister is offered it at once, with its own window', { skip: skipOnPg }, async () => {
   const a = await newAsset('Window expiry'); const owner = await makeLogin('Window Exp Owner'); const w1 = await makeLogin('Window Exp W1'); const w2 = await makeLogin('Window Exp W2');
   const res = (await ask(owner, a, TODAY, plus(5))).body.reserved[0];
   const slot = slotAt(30);

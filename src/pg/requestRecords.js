@@ -55,6 +55,7 @@ const { createAssignment } = require('./assignments');
 const { cancelBlock } = require('./requestAccess');
 const { withTransaction, lockAsset, isInTransaction } = require('./transaction');
 const { toId } = require('./reservations');
+const activityLog = require('./activityLog');
 
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
 
@@ -81,11 +82,54 @@ async function listRequests(q, user, { status, type } = {}) {
   return withLifecycle(q, out);
 }
 
-// POST /api/requests: the new equipment request (a permanent-assignment request only records the ask), returned as stored.
-async function createEquipmentRequest(q, { forUser, assetId, category, message, neededBy, createdBy, wantedType, nodeId, catalogPath, assetLabel }) {
-  return (await q.query(`INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type, catalog_node_id, catalog_path, asset_label)
-    VALUES ('equipment', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-  [forUser, assetId, category, message, neededBy, createdBy, wantedType, nodeId, catalogPath, assetLabel])).rows[0];
+// POST /api/requests: the new equipment request (a permanent-assignment request only records the ask), returned as stored. Since Slice 5D-2
+// (carry-over (ah)) it is ONE transaction (the caller's when `q` is a client): the asset row lock first (when an asset is attached; the 5A
+// timeout gives 503 ASSET_BUSY), the route's person / asset checks again under it (`recheck`, see assertRequestable), the INSERT, and the
+// 'requested' activity row (`activity`): an asset archived or taken meanwhile is refused, and a request never exists without its activity row.
+async function createEquipmentRequest(q, { recheck, activity, ...v }) {
+  const run = async (c) => {
+    if (recheck) {
+      if (v.assetId !== null && v.assetId !== undefined) {
+        try { await lockAsset(c, v.assetId); } catch (err) {
+          if (err.code === 'ASSET_NOT_FOUND') throw httpError(404, 'Asset not found');
+          throw err;
+        }
+      }
+      await assertRequestable(c, v, recheck);
+    }
+    const r = (await c.query(`INSERT INTO requests (type, user_id, asset_id, category, message, needed_by, created_by, requested_assignment_type, catalog_node_id, catalog_path, asset_label)
+      VALUES ('equipment', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
+    [v.forUser, v.assetId, v.category, v.message, v.neededBy, v.createdBy, v.wantedType, v.nodeId, v.catalogPath, v.assetLabel])).rows[0];
+    if (activity) await activityLog.log(c, v.assetId, activity.actorAccountId, 'requested', activity.details, v.forUser);
+    return r;
+  };
+  return isInTransaction(q) ? run(q) : withTransaction(run, q);
+}
+
+// The route's checks about the person and the asset, again inside the write's transaction (same refusals, same words).
+async function assertRequestable(c, v, recheck) {
+  const person = (await c.query('SELECT status FROM employees WHERE id = $1', [toId(v.forUser)])).rows[0];
+  if (!person) throw httpError(404, 'User not found');
+  if (person.status !== 'active') throw httpError(400, "That person is inactive, so a request can't be made for them");
+  if (v.assetId === null || v.assetId === undefined) return;
+  const asset = (await c.query('SELECT status, archived_at FROM assets WHERE id = $1', [toId(v.assetId)])).rows[0];
+  if (!asset) throw httpError(404, 'Asset not found');
+  if (asset.archived_at) throw httpError(400, "This asset is archived and can't be requested.");
+  if (recheck.restrictToAvailable && (asset.status !== 'available'
+    || (await c.query('SELECT 1 FROM assignments WHERE asset_id = $1 AND employee_id = $2 AND returned_at IS NULL', [toId(v.assetId), toId(v.forUser)])).rows[0])) throw httpError(404, 'Asset not found');
+}
+
+// resolve / dropped-off (Slice 5D-2, carry-over (ah)): the status change and its activity row in ONE transaction. Locks the request row
+// first (it takes no asset lock, as before: the request-only writes never wait for an asset). Same `activity` / return as SQLite.
+async function transitionLogged(q, { id, to, opts, activity }) {
+  const run = async (c) => {
+    await c.query('SELECT id FROM requests WHERE id = $1 FOR UPDATE', [toId(id)]);
+    const request = await transition(c, id, to, opts);
+    const asset = request.asset_id == null ? undefined : (await c.query('SELECT * FROM assets WHERE id = $1', [toId(request.asset_id)])).rows[0];
+    if (asset || !activity.onlyIfAsset) await activityLog.log(c, request.asset_id, activity.actorAccountId, activity.action, activity.details, activity.subjectUserId);
+    return { request, asset };
+  };
+  return isInTransaction(q) ? run(q) : withTransaction(run, q);
 }
 
 // The transition's own refusal for a request that can no longer move to `to` (src/pg/requests.js transition, same wording).
@@ -120,4 +164,4 @@ async function approveRequest(q, { request: r, asset, employeeId, actorAccountId
   return isInTransaction(q) ? run(q) : withTransaction(run, q);
 }
 
-module.exports = { listRequests, createEquipmentRequest, approveRequest };
+module.exports = { listRequests, createEquipmentRequest, approveRequest, transitionLogged };

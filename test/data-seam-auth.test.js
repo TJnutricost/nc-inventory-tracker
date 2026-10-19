@@ -3,6 +3,8 @@
 // older suites (auth, people, employee-access, self-checkout) do not already: what a login stores and refuses, the session id renewed at
 // sign-in, logout and expiry, the store finishing its work before the response, deactivation signing out ONLY that account, and the
 // single-use reset / invite tokens. SQLite only; never sends email.
+// The SQLite side of the temporary driver seam: it opens SQLite itself, so it does not run in the PostgreSQL pass (test/pg covers the PG side).
+if (process.env.NC_TEST_DRIVER === 'pg') { require('node:test').test(`${require('path').basename(__filename)} (SQLite seam)`, { skip: 'SQLite seam; the PG side is covered by test/pg' }, () => {}); return; }
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const bcrypt = require('bcryptjs');

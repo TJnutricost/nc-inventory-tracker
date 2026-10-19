@@ -80,7 +80,7 @@ const TWIN_REQUIRES = {
   'accounts.js': ['./reservations', './transaction', './time'],
   'sessions.js': [],
   // Slice 5C-4
-  'requestRecords.js': ['./requests', './assignments', './requestAccess', './transaction', './reservations'],
+  'requestRecords.js': ['./requests', './assignments', './requestAccess', './transaction', './reservations', './activityLog'],
   // Slice 5C-5
   'assetRecords.js': ['./catalog', '../serial', './assetViews', './activityLog', './assignments', './settings', './transaction', './time', './reservations'],
   'assetCustody.js': ['./assignments', './requests', './waitlist', './activityLog', './assetAccess', './assetViews', './transaction', './time', './reservations'],

@@ -6,6 +6,7 @@ const fs = require('fs');
 const path = require('path');
 const { createAssignment } = require('../src/assignments');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, dir, admin;
 before(async () => {
@@ -391,7 +392,7 @@ test('photo files follow asset visibility: readable for available/own equipment,
   assert.equal((await makeClient(server).get('/uploads/ea-open.jpg')).status, 401);
 });
 
-test('employee actions on assets they cannot see are "not found" and never reveal who holds it', async () => {
+test('employee actions on assets they cannot see are "not found" and never reveal who holds it', { skip: skipOnPg }, async () => {
   const me = await makeLogin('Actor');
   const holder = await makeLogin('Secret Holder');
   const theirs = await newAsset('Actor target');

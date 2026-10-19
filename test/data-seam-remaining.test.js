@@ -4,6 +4,8 @@
 // uses the handle it is bound to, employees vs IT on settings, the outbox / activity listings, the import's all-or-nothing transaction and
 // its row errors, the tag preview with the prefix setting, the approval transaction, the request transitions, and the liveness probe
 // with a failing database. SQLite only; never sends email (NC_NO_EXTERNAL_MAIL, set by the helpers).
+// The SQLite side of the temporary driver seam: it opens SQLite itself, so it does not run in the PostgreSQL pass (test/pg covers the PG side).
+if (process.env.NC_TEST_DRIVER === 'pg') { require('node:test').test(`${require('path').basename(__filename)} (SQLite seam)`, { skip: 'SQLite seam; the PG side is covered by test/pg' }, () => {}); return; }
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
