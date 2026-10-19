@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, admin, waitlist, mailer;
 before(async () => {
@@ -252,7 +253,7 @@ test('an expired hold releases the dates and the next eligible person is offered
   assert.equal(db.prepare("SELECT COUNT(*) c FROM reservations WHERE asset_id = ? AND status IN ('pending','confirmed')").get(asset.id).c, 0);
 });
 
-test('the sweep alone moves the queue past an expired hold', async () => {
+test('the sweep alone moves the queue past an expired hold', { skip: skipOnPg }, async () => {
   const { asset, owner, w1, w2, resv } = await stage();
   const e1 = await okJoin(w1, asset, plus(10), plus(12));
   const e2 = await okJoin(w2, asset, plus(10), plus(12));
@@ -298,7 +299,7 @@ test('shortening a reservation hands the freed days to the waitlist when the who
   assert.equal(await phaseOf(w1, e1.id), 'held');
 });
 
-test('if the dates stop being reservable before the hold is confirmed, confirming is refused and the entry goes back in line', async () => {
+test('if the dates stop being reservable before the hold is confirmed, confirming is refused and the entry goes back in line', { skip: skipOnPg }, async () => {
   const { asset, owner, w1, resv } = await stage();
   const e1 = await okJoin(w1, asset, plus(10), plus(12));
   await owner.client.post(`/api/reservations/${resv.id}/cancel`, {});
@@ -402,7 +403,7 @@ test('joining emails the current reserver once, informationally, with no release
   assert.equal(mailsTo(owner, 'Available for you%').length, 0, 'the former reserver gets no hold email');
 });
 
-test('the hold email carries asset, tag, dates, expiry and the confirm instruction, and is sent exactly once however often the queue is re-evaluated', async () => {
+test('the hold email carries asset, tag, dates, expiry and the confirm instruction, and is sent exactly once however often the queue is re-evaluated', { skip: skipOnPg }, async () => {
   const { asset, owner, w1, resv } = await stage();
   const e1 = await okJoin(w1, asset, plus(10), plus(12));
   await owner.client.post(`/api/reservations/${resv.id}/cancel`, {});
@@ -438,7 +439,7 @@ test('the hold email for an approval-required asset says it goes to IT', async (
   assert.match(mailsTo(w1, 'Available for you%')[0].body, /IT for approval/);
 });
 
-test('an email problem never changes waitlist or reservation state (a throwing hook, and a failing SMTP transport)', async () => {
+test('an email problem never changes waitlist or reservation state (a throwing hook, and a failing SMTP transport)', { skip: skipOnPg }, async () => {
   // 1. the notification hooks themselves blow up
   const { notify } = mailer;
   const saved = { j: notify.waitlistJoined, h: notify.waitlistHold };
@@ -526,7 +527,7 @@ test('credentials can never be stored through the settings API', async () => {
   assert.equal(/SMTP_PASS|pass/i.test(Object.keys((await admin.get('/api/settings')).body).join(' ')), false, 'the settings API exposes no password field');
 });
 
-test('From / Reply-To: the verified sender stays the From address; the IT contact is the Reply-To; an operator flag may promote it', async () => {
+test('From / Reply-To: the verified sender stays the From address; the IT contact is the Reply-To; an operator flag may promote it', { skip: skipOnPg }, async () => {
   const keep = { MAIL_FROM: process.env.MAIL_FROM, SMTP_USER: process.env.SMTP_USER, MAIL_ALLOW_IT_FROM: process.env.MAIL_ALLOW_IT_FROM };
   const sent = [];
   mailer.setTransportForTests({ sendMail: async (m) => { sent.push(m); } });
@@ -772,7 +773,7 @@ test('shortening a reservation answers with the resulting range, so the screen c
 });
 
 // ---------------------------------------------------------------- MAIL_TEST_RECIPIENT
-test('MAIL_TEST_RECIPIENT redirects every message, keeps the intended recipient visible, and changes nothing else', async () => {
+test('MAIL_TEST_RECIPIENT redirects every message, keeps the intended recipient visible, and changes nothing else', { skip: skipOnPg }, async () => {
   const keep = process.env.MAIL_TEST_RECIPIENT;
   const sent = [];
   mailer.setTransportForTests({ sendMail: async (m) => { sent.push(m); } });
@@ -821,7 +822,7 @@ test('MAIL_TEST_RECIPIENT redirects every message, keeps the intended recipient 
 });
 const emp = (who) => who.client;
 
-test('without MAIL_TEST_RECIPIENT nothing is redirected or prefixed; an invalid value fails closed', async () => {
+test('without MAIL_TEST_RECIPIENT nothing is redirected or prefixed; an invalid value fails closed', { skip: skipOnPg }, async () => {
   const keep = process.env.MAIL_TEST_RECIPIENT;
   const sent = [];
   mailer.setTransportForTests({ sendMail: async (m) => { sent.push(m); } });
@@ -852,7 +853,7 @@ test('without MAIL_TEST_RECIPIENT nothing is redirected or prefixed; an invalid 
   }
 });
 
-test('in test mode without SMTP the outbox still shows what would have happened, and a failing transport still leaves the waitlist intact', async () => {
+test('in test mode without SMTP the outbox still shows what would have happened, and a failing transport still leaves the waitlist intact', { skip: skipOnPg }, async () => {
   const keep = process.env.MAIL_TEST_RECIPIENT;
   try {
     process.env.MAIL_TEST_RECIPIENT = 'qa.tester@nutricost.com';

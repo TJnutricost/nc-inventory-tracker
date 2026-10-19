@@ -41,14 +41,14 @@ const MODULES = {
   requestAccess: [require('../requestAccess'), ['loadRequest', 'isSelfInitiated', 'cancelBlock']],
   // extracted verbatim from server.js in Slice 5B-3 (people, authentication, sessions; people.js gained the /api/users functions)
   accounts: [require('../accounts'), ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset']],
-  sessions: [require('../sessions'), ['get', 'set', 'destroy', 'purgeExpired', 'destroyForAccount']],
+  sessions: [require('../sessions'), ['get', 'set', 'touch', 'destroy', 'purgeExpired', 'destroyForAccount']],
   // Slice 5B-4: settings (the SQL of src/db.js getSettings / setSetting, copied verbatim: src/db.js is unchanged), the outbox and the
   // overdue sweep, the request list / create / approve (extracted verbatim from server.js; additions to activityLog, people, assetViews,
   // assetRecords above). Since 5B-4 server.js reaches the database only through this seam.
   settings: [require('../settings'), ['getSettings', 'setSetting']],
   outbox: [require('../outbox'), ['latest', 'recent']],
   overdue: [require('../overdue'), ['dueAssignments', 'markNotified']],
-  requestRecords: [require('../requestRecords'), ['listRequests', 'createEquipmentRequest', 'approveRequest']],
+  requestRecords: [require('../requestRecords'), ['listRequests', 'createEquipmentRequest', 'approveRequest', 'transitionLogged']],
 };
 
 function bindModule(db, name, mod, dbFunctions) {

@@ -202,7 +202,7 @@ test('import: updating an existing asset by tag keeps its own serial valid, can 
 test('the database itself refuses a duplicate normalized serial, while NULLs never collide', () => {
   const ins = db.prepare('INSERT INTO assets (tag, name, serial, serial_normalized) VALUES (?, ?, ?, ?)');
   ins.run('DB-1', 'one', 'Raw-1', 'raw-1');
-  assert.throws(() => ins.run('DB-2', 'two', 'RAW-1', 'raw-1'), /UNIQUE/);
+  assert.throws(() => ins.run('DB-2', 'two', 'RAW-1', 'raw-1'), /UNIQUE|unique constraint/);
   ins.run('DB-3', 'blank 1', null, null);
   ins.run('DB-4', 'blank 2', null, null);
 });
@@ -234,7 +234,7 @@ test('migration 8: backfills the normalized serial, trims stored values, turns b
   assert.equal(by['M-6'].serial_normalized, 'abc123', '"ABC-123" and "ABC123" were NOT merged');
   assert.equal(d.prepare('SELECT COUNT(*) c FROM assets').get().c, 6);
   assert.equal(d.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'assets'").get().seq, seqBefore);
-  assert.throws(() => d.prepare("INSERT INTO assets (tag, name, serial_normalized) VALUES ('M-7', 'x', 'abc-123')").run(), /UNIQUE/);
+  assert.throws(() => d.prepare("INSERT INTO assets (tag, name, serial_normalized) VALUES ('M-7', 'x', 'abc-123')").run(), /UNIQUE|unique constraint/);
   assert.equal(d.pragma('foreign_key_check').length, 0);
 });
 

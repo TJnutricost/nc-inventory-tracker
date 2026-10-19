@@ -12,6 +12,10 @@ function set(db, sid, sess, expires) {
     .run(sid, sess, expires);
 }
 
+// Extends a session's life (the rolling cookie): an UPDATE only, never an insert. A request still running when its account is deactivated
+// (or after logout) must not bring a deleted session back (Slice 5D-2, carry-over (af)). Does nothing when the row is gone.
+function touch(db, sid, expires) { db.prepare('UPDATE sessions SET expires = ? WHERE sid = ?').run(expires, sid); }
+
 function destroy(db, sid) { db.prepare('DELETE FROM sessions WHERE sid = ?').run(sid); }
 
 // The hourly clean-up: every session whose expiry time is before `now` (ms).
@@ -21,4 +25,4 @@ function purgeExpired(db, now) { db.prepare('DELETE FROM sessions WHERE expires 
 // JSON (`..."uid":12}`), so the closing brace keeps account 1 from matching 12 or 100. (PostgreSQL needs its own form of this: 5C/5D.)
 function destroyForAccount(db, accountId) { db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"uid":${accountId}}%`); }
 
-module.exports = { get, set, destroy, purgeExpired, destroyForAccount };
+module.exports = { get, set, touch, destroy, purgeExpired, destroyForAccount };

@@ -9,6 +9,7 @@ const { runMigrations } = require('../src/migrate');
 const migrations = require('../src/migrations');
 const { createAssignment } = require('../src/assignments');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, dir, admin;
 before(async () => {
@@ -67,10 +68,10 @@ test('the database itself rejects a checkout without a return date and a permane
   const p = await newPerson('Constraint Person');
   const a = await newAsset('Constraint Asset');
   const ins = (type, date, time) => () => db.prepare('INSERT INTO assignments (asset_id, employee_id, assignment_type, due_date, due_time) VALUES (?, ?, ?, ?, ?)').run(a.id, p.id, type, date, time);
-  assert.throws(ins('checkout', null, null), /CHECK/);
-  assert.throws(ins('checkout', null, '10:00'), /CHECK/);
-  assert.throws(ins('permanent', '2099-01-01', null), /CHECK/);
-  assert.throws(ins('permanent', null, '10:00'), /CHECK/);
+  assert.throws(ins('checkout', null, null), /CHECK|check constraint/);
+  assert.throws(ins('checkout', null, '10:00'), /CHECK|check constraint/);
+  assert.throws(ins('permanent', '2099-01-01', null), /CHECK|check constraint/);
+  assert.throws(ins('permanent', null, '10:00'), /CHECK|check constraint/);
 });
 
 test('the assignment type comes from the request, never from the asset category', async () => {
@@ -165,7 +166,7 @@ test('the same employee cannot hold the same asset twice, at the API or the data
   const again = await assign(seats, p);
   assert.equal(again.status, 400);
   assert.match(again.body.error, /already has this asset/);
-  assert.throws(() => db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type) VALUES (?, ?, 'permanent')").run(seats.id, p.id), /UNIQUE/);
+  assert.throws(() => db.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type) VALUES (?, ?, 'permanent')").run(seats.id, p.id), /UNIQUE|unique constraint/);
   // once returned, the same person may take it again
   await admin.post(`/api/assets/${seats.id}/checkin`, {});
   assert.equal((await assign(seats, p, loan())).status, 200);
@@ -204,7 +205,7 @@ test('concurrent HTTP assignment attempts cannot exceed capacity', async () => {
   assert.equal(count('SELECT COUNT(*) c FROM assignments WHERE asset_id = ? AND returned_at IS NULL', a.id), 1);
 });
 
-test('capacity is enforced across separate processes hitting the same database file', async () => {
+test('capacity is enforced across separate processes hitting the same database file', { skip: skipOnPg }, async () => {
   const a = await newAsset('Cross-process Seats', { license_seats: 2 });
   const people = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => newPerson(`Proc ${i}`)));
   const code = `
@@ -223,7 +224,7 @@ test('capacity is enforced across separate processes hitting the same database f
   assert.equal(count('SELECT COUNT(*) c FROM assignments WHERE asset_id = ? AND returned_at IS NULL', a.id), 2);
 });
 
-test('the capacity check and insert run in a single BEGIN IMMEDIATE transaction', async () => {
+test('the capacity check and insert run in a single BEGIN IMMEDIATE transaction', { skip: skipOnPg }, async () => {
   const a = await newAsset('Mode Probe');
   const p = await newPerson('Mode Prober');
   const modes = [];
@@ -259,8 +260,8 @@ test('raw deletes that would erase history are blocked by RESTRICT', async () =>
   await admin.post(`/api/assets/${a.id}/checkin`, {});
   await admin.post('/api/requests', { asset_id: a.id, user_id: p.id, message: 'about this' });
 
-  assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY/);
-  assert.throws(() => db.prepare('DELETE FROM employees WHERE id = ?').run(p.id), /FOREIGN KEY/);
+  assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY|foreign key constraint|RESTRICT/);
+  assert.throws(() => db.prepare('DELETE FROM employees WHERE id = ?').run(p.id), /FOREIGN KEY|foreign key constraint|RESTRICT/);
   // each of assignments / activity / requests blocks the asset delete on its own
   for (const [table, keep] of [['assignments', ['activity', 'requests']], ['activity', ['assignments', 'requests']], ['requests', ['assignments', 'activity']]]) {
     db.exec('PRAGMA foreign_keys = OFF');
@@ -268,7 +269,7 @@ test('raw deletes that would erase history are blocked by RESTRICT', async () =>
     for (const t of keep) db.prepare(`DELETE FROM ${t} WHERE asset_id = ?`).run(a.id);
     db.exec('PRAGMA foreign_keys = ON');
     try {
-      assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY/, `${table} must block deleting its asset`);
+      assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY|foreign key constraint|RESTRICT/, `${table} must block deleting its asset`);
     } finally {
       db.exec('PRAGMA foreign_keys = OFF');
       keep.forEach((t, i) => { for (const r of saved[i]) { const cols = Object.keys(r); db.prepare(`INSERT INTO ${t} (${cols.join(',')}) VALUES (${cols.map(() => '?').join(',')})`).run(...Object.values(r)); } });
@@ -280,7 +281,7 @@ test('raw deletes that would erase history are blocked by RESTRICT', async () =>
   assert.ok(count('SELECT COUNT(*) c FROM activity WHERE asset_id = ?', a.id) >= 3);
 });
 
-test('history foreign keys are declared ON DELETE RESTRICT and the database is clean', () => {
+test('history foreign keys are declared ON DELETE RESTRICT and the database is clean', { skip: skipOnPg }, () => {
   const onDelete = (table, col) => db.pragma(`foreign_key_list(${table})`).find((f) => f.from === col).on_delete;
   assert.equal(onDelete('assignments', 'asset_id'), 'RESTRICT');
   assert.equal(onDelete('assignments', 'employee_id'), 'RESTRICT');
@@ -322,8 +323,8 @@ test('migrating a pre-1E database: a legacy due date means checkout, none means 
   assert.equal(old.pragma('foreign_key_check').length, 0);
   assert.equal(old.pragma('foreign_keys', { simple: true }), 1);
   assert.ok(old.prepare("SELECT 1 FROM sqlite_master WHERE name = 'idx_assign_active_unique'").get());
-  assert.throws(() => old.prepare('INSERT INTO assignments (asset_id, employee_id) VALUES (1, 1)').run(), /UNIQUE/);
-  assert.throws(() => old.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type) VALUES (2, 1, 'loaner')").run(), /CHECK/);
+  assert.throws(() => old.prepare('INSERT INTO assignments (asset_id, employee_id) VALUES (1, 1)').run(), /UNIQUE|unique constraint/);
+  assert.throws(() => old.prepare("INSERT INTO assignments (asset_id, employee_id, assignment_type) VALUES (2, 1, 'loaner')").run(), /CHECK|check constraint/);
   old.close();
   fs.rmSync(tmp, { recursive: true, force: true });
 });
@@ -459,10 +460,10 @@ test('denying a permanent request creates no assignment', async () => {
   assert.equal((await admin.get(`/api/assets/${a.id}`)).body.asset.status, 'available');
 });
 
-test('requests gained only one nullable column, and legacy requests keep NULL', () => {
+test('requests gained only one nullable column, and legacy requests keep NULL', { skip: skipOnPg }, () => {
   const col = db.pragma('table_info(requests)').find((c) => c.name === 'requested_assignment_type');
   assert.ok(col && col.notnull === 0);
-  assert.throws(() => db.prepare("UPDATE requests SET requested_assignment_type = 'forever' WHERE id = (SELECT MIN(id) FROM requests)").run(), /CHECK/);
+  assert.throws(() => db.prepare("UPDATE requests SET requested_assignment_type = 'forever' WHERE id = (SELECT MIN(id) FROM requests)").run(), /CHECK|check constraint/);
 });
 
 // The UI is a plain browser script with no DOM test harness here, so these pin its source-level guarantees.

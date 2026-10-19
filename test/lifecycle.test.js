@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, admin;
 before(async () => {
@@ -196,7 +197,7 @@ function bootAt(dir) {
   return { app, db: require('../src/db').db };
 }
 
-test('the tag counter survives an application restart and archiving', async () => {
+test('the tag counter survives an application restart and archiving', { skip: skipOnPg }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-restart-'));
   let boot = bootAt(dir);
   let srv = await startServer(boot.app);

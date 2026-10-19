@@ -2,6 +2,8 @@
 // reach SQLite through src/dataSeam. These tests pin what the conversion must not change: the photo row / file / cover lifecycle (no
 // other test deletes a photo), the refusals of the extracted helpers reaching the client unchanged, and the read views answering through
 // the seam (and over HTTP) exactly what the extracted module answers when called directly. SQLite only; never sends email.
+// The SQLite side of the temporary driver seam: it opens SQLite itself, so it does not run in the PostgreSQL pass (test/pg covers the PG side).
+if (process.env.NC_TEST_DRIVER === 'pg') { require('node:test').test(`${require('path').basename(__filename)} (SQLite seam)`, { skip: 'SQLite seam; the PG side is covered by test/pg' }, () => {}); return; }
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');

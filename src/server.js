@@ -43,6 +43,12 @@ app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use('/api/import', express.text({ type: '*/*', limit: '5mb' }));
 app.use(express.json({ limit: '2mb' }));
+// A NUL character (U+0000) cannot be stored in PostgreSQL text, and no real input contains one: refuse it with a 400 before any route runs
+// (Slice 5D-2, carry-over (as) / (at)), on both drivers, in the URL, a JSON body or a CSV body.
+const hasNul = (v) => (typeof v === 'string' ? v.includes('\u0000')
+  : Array.isArray(v) ? v.some(hasNul)
+    : v && typeof v === 'object' ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false);
+app.use('/api', (req, res, next) => (/%00/i.test(req.url) || hasNul(req.body) ? res.status(400).json({ error: 'That text contains a character that is not allowed.' }) : next()));
 app.use((req, res, next) => { if (req.body === undefined) req.body = {}; next(); });
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -76,7 +82,11 @@ class SqliteStore extends session.Store {
     data.sessions.set(sid, JSON.stringify(sess), Date.now() + maxAge).then(() => cb && cb(null), (err) => cb && cb(err));
   }
   destroy(sid, cb) { data.sessions.destroy(sid).then(() => cb && cb(null), (err) => cb && cb(err)); }
-  touch(sid, sess, cb) { this.set(sid, sess, cb); }
+  // The rolling cookie only extends the expiry, and never re-creates a session row that was deleted meanwhile (deactivation, logout).
+  touch(sid, sess, cb) {
+    const maxAge = sess.cookie?.maxAge ?? 30 * 864e5;
+    data.sessions.touch(sid, Date.now() + maxAge).then(() => cb && cb(null), (err) => cb && cb(err));
+  }
 }
 setInterval(() => data.sessions.purgeExpired(Date.now()).catch((e) => console.error('[sessions:purge]', e.message)), 3600e3).unref();
 
@@ -406,6 +416,9 @@ function assetValues(body) {
   if (body.serial !== undefined && body.serial !== null && !['string', 'number'].includes(typeof body.serial)) throw httpError(400, 'Serial number must be text');
   for (const f of ASSET_FIELDS) v[f] = ['purchase_cost', 'license_seats'].includes(f) ? num(body[f]) : clean(body[f]);
   v.serial = cleanSerial(body.serial); // trimmed; blank => no serial
+  // Seats are a whole number that fits the database integer (Slice 5D-2, carry-over (au)): 2.5 or 1e10 is refused, never rounded. (Not a
+  // number at all, NaN, stays NULL as before.)
+  if (Number.isFinite(v.license_seats) ? !Number.isInteger(v.license_seats) || v.license_seats < 0 || v.license_seats > 2147483647 : v.license_seats === Infinity || v.license_seats === -Infinity) throw httpError(400, 'Seats must be a whole number (0 to 2,147,483,647)');
   return v;
 }
 
@@ -552,8 +565,11 @@ const upload = multer({
 });
 // (Only the photo rows are in src/photoRecords.js, moved there verbatim in Slice 5B-2; the files stay here.)
 app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async (req, res) => {
-  const asset = await data.assetAccess.getAsset(Number(req.params.id));
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
+  // multer has already stored the uploads in the temp directory: a NUL in a text field (the caption) is refused before anything permanent
+  // is made (the JSON guard above does not see multipart fields).
+  if (hasNul(req.body)) { cleanup(); throw httpError(400, 'That text contains a character that is not allowed.'); }
+  const asset = await data.assetAccess.getAsset(Number(req.params.id));
   if (!asset || !(await data.assetAccess.canViewAsset(req.user, asset))) { cleanup(); throw httpError(404, 'Asset not found'); }
   const holder = await data.assetAccess.holdsAsset(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }
@@ -745,7 +761,9 @@ app.post('/api/requests', auth, async (req, res) => {
   const wanted = assetId === null ? null : await data.assetAccess.getAsset(assetId);
   if (assetId !== null && (!wanted || !(await data.assetAccess.canViewAsset(req.user, wanted)))) throw httpError(404, 'Asset not found'); // an employee can only ask for equipment they can see
   if (wanted && wanted.archived_at) throw httpError(400, 'This asset is archived and can\'t be requested.');
+  let restrictedPick = false;
   if (wanted && nodeId !== null) {
+    restrictedPick = true;
     // A specific item picked under a catalog selection: it must really be filed under that entry, and an employee may only
     // pick what they could get anyway (available, not archived, not theirs already) — never something someone else holds.
     if (req.user.role !== 'admin' && (wanted.status !== 'available' || await data.assetAccess.holdsAsset(wanted.id, forUser))) throw httpError(404, 'Asset not found');
@@ -757,12 +775,15 @@ app.post('/api/requests', auth, async (req, res) => {
   const catalogPath = nodeId !== null ? await data.catalog.pathText(nodeId) : null;
   if (nodeId !== null) category = (await data.catalog.rootOf(nodeId)).name;
   const assetLabel = wanted ? `${wanted.tag} — ${wanted.name}` : null;
-  // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it.
+  // A permanent-assignment request only records the ask; nothing is assigned until an admin approves it. The person / asset checks run again
+  // inside the write (one transaction with the insert and its activity row since Slice 5D-2): an asset archived or taken after the reads
+  // above is refused, and a request never exists without its activity row.
   const r = await data.requestRecords.createEquipmentRequest({
     forUser, assetId, category: category || (wantedType === 'permanent' ? wanted.category : null), message, neededBy: clean(req.body.needed_by),
     createdBy: req.user.account_id, wantedType, nodeId, catalogPath, assetLabel,
+    recheck: { restrictToAvailable: !!wanted && req.user.role !== 'admin' && restrictedPick },
+    activity: assetId ? { actorAccountId: req.user.account_id, details: `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || catalogPath || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}` } : null,
   });
-  if (assetId) await data.activityLog.log(assetId, req.user.account_id, 'requested', `${wantedType === 'permanent' ? 'Permanent assignment requested' : (message || catalogPath || category || 'Requested')}${wantedType === 'permanent' && message ? ` · ${message}` : ''}`, forUser);
   notify.equipmentRequested(await data.people.getPerson(forUser), r);
   res.json(r);
 });
@@ -823,12 +844,14 @@ app.post('/api/requests/:id/deny', admin, async (req, res) => {
   res.json({ ok: true });
 });
 // Resolves an issue report. Issues have no approve/deny: IT either resolves one (here) or dismisses it (cancel). The status change and
-// the activity row are two steps, as before (not one transaction).
+// the activity row are ONE transaction since Slice 5D-2 (src/requestRecords.js transitionLogged).
 app.post('/api/requests/:id/resolve', admin, async (req, res) => {
   const r = await data.requestAccess.loadRequest(req.params.id);
   if (r.type !== 'issue') throw httpError(400, 'Only issue reports can be marked resolved');
-  await data.requests.transition(r.id, 'completed', { actorAccountId: req.user.account_id, actorIsAdmin: true, note: clean(req.body.note), setNote: true });
-  await data.activityLog.log(r.asset_id, req.user.account_id, 'issue_resolved', clean(req.body.note) || 'Marked resolved', r.user_id);
+  await data.requestRecords.transitionLogged({
+    id: r.id, to: 'completed', opts: { actorAccountId: req.user.account_id, actorIsAdmin: true, note: clean(req.body.note), setNote: true },
+    activity: { action: 'issue_resolved', details: clean(req.body.note) || 'Marked resolved', actorAccountId: req.user.account_id, subjectUserId: r.user_id },
+  });
   res.json({ ok: true });
 });
 // Rescind/cancel policy, one place for the route and for the `can_cancel` flag on the list: src/requestAccess.js cancelBlock (admin:
@@ -843,15 +866,16 @@ app.post('/api/requests/:id/cancel', auth, async (req, res) => {
   await data.requests.transition(r.id, 'cancelled', { actorAccountId: req.user.account_id, actorIsAdmin: isIT, requireUnopened: !isIT });
   res.json({ ok: true });
 });
-// The status change, then (if the asset still exists) the activity row and the email: separate steps, as before.
+// The status change and (if the asset still exists) the activity row in ONE transaction since Slice 5D-2; the email after it.
 app.post('/api/requests/:id/dropped-off', auth, async (req, res) => {
   const r = await data.requestAccess.loadRequest(req.params.id);
   if (r.user_id !== req.user.employee_id && req.user.role !== 'admin') throw httpError(403, 'Not allowed');
   if (r.type !== 'return') throw httpError(400, 'This request is not open');
-  await data.requests.transition(r.id, 'dropped_off', { actorIsAdmin: req.user.role === 'admin' });
-  const asset = await data.assetAccess.getAsset(r.asset_id);
+  const { asset } = await data.requestRecords.transitionLogged({
+    id: r.id, to: 'dropped_off', opts: { actorIsAdmin: req.user.role === 'admin' },
+    activity: { action: 'dropped_off', details: clean(req.body.note) || 'User says it was dropped off', actorAccountId: req.user.account_id, subjectUserId: r.user_id, onlyIfAsset: true },
+  });
   if (asset) {
-    await data.activityLog.log(asset.id, req.user.account_id, 'dropped_off', clean(req.body.note) || 'User says it was dropped off', r.user_id);
     notify.droppedOff(await data.people.getPerson(r.user_id), asset);
   }
   res.json({ ok: true });
@@ -974,10 +998,10 @@ app.post('/api/import/assets', admin, async (req, res) => {
   const keys = header.map((h) => alias[h] || h);
   // Each data row by column name, with its fields validated (`assetValues` reads no database and cannot refuse a CSV row: every cell is
   // text). Done here, before the seam call, instead of row by row inside the transaction: the same values either way.
-  const items = rows.slice(1).map((r) => {
+  const items = rows.slice(1).map((r, n) => {
     const o = {}; keys.forEach((k, i) => { o[k] = r[i]; });
     if (o.purchase_cost) o.purchase_cost = String(o.purchase_cost).replace(/[$,]/g, '');
-    return { o, v: assetValues(o) };
+    try { return { o, v: assetValues(o) }; } catch (e) { if (e.status === 400) e.message = `Row ${n + 2}: ${e.message}`; throw e; } // (nothing imported)
   });
   // The active employees (for assigned_email), then the WHOLE file in ONE transaction, exactly as before (src/assetRecords.js
   // importAssets): a row with a problem is skipped or imported partly and reported in `errors`; anything that throws rolls it all back.
@@ -1047,6 +1071,13 @@ app.get(/^\/(?!api\/|uploads\/).*/, (req, res) => res.sendFile(path.join(PUB, 'i
 // ---------- errors ----------
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError) return res.status(400).json({ error: err.code === 'LIMIT_FILE_SIZE' ? 'Photo is too large (25 MB max)' : err.message });
+  // A PostgreSQL deadlock (40P01) or serialization failure (40001) aborted this request's transaction and rolled it back: nothing was written,
+  // and the same request can simply be sent again (Slice 5D-2). There is no retry system; the client is told it may retry.
+  if (err.code === '40P01' || err.code === '40001') {
+    console.error('[retryable]', err.code, err.message);
+    res.set('Retry-After', '1');
+    return res.status(503).json({ error: 'The system is busy right now. Please try again in a moment.', retryable: true });
+  }
   if (!err.status) console.error(err);
   res.status(err.status || 500).json({ error: err.status ? err.message : 'Something went wrong. Please try again.' });
 });

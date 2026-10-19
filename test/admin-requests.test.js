@@ -10,6 +10,7 @@ const { runMigrations } = require('../src/migrate');
 const migrations = require('../src/migrations');
 const requestRules = require('../src/requests');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, admin;
 before(async () => {
@@ -302,7 +303,7 @@ test('an unavailable, archived or in-repair asset cannot fulfil a request, and n
   assert.equal(db.prepare('SELECT status FROM assets WHERE id = ?').get(repair.id).status, 'maintenance');
 });
 
-test('fulfillment is all-or-nothing: if closing the request fails, the assignment is rolled back', async () => {
+test('fulfillment is all-or-nothing: if closing the request fails, the assignment is rolled back', { skip: skipOnPg }, async () => {
   const me = await makeLogin('Rollback');
   const asset = await newAsset('Rollback laptop');
   const r = await ask(me, { category: 'Laptop' });
@@ -360,7 +361,7 @@ test('return request: the employee drops it off, IT checks it in, and the reques
   assert.equal(db.prepare('SELECT status FROM assets WHERE id = ?').get(asset.id).status, 'available');
 });
 
-test('check-in is all-or-nothing with its return request', async () => {
+test('check-in is all-or-nothing with its return request', { skip: skipOnPg }, async () => {
   const me = await makeLogin('Checkin Rollback');
   const asset = await newAsset('Checkin rollback laptop');
   await give(asset, me);

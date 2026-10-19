@@ -13,6 +13,7 @@ const net = require('net');
 const http = require('http');
 const { spawnSync } = require('node:child_process');
 const { bootApp, startServer, stopServer } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 const ROOT = path.join(__dirname, '..');
 
@@ -75,7 +76,7 @@ test('the browser side never registers the service worker on a developer machine
   assert.match(block, /else navigator\.serviceWorker\.register\('\/sw\.js'\)/, 'any other host (the deployed app) still registers it');
 });
 
-test('a server that cannot get its port reports it, exits non-zero and never prints the "running" banner', async () => {
+test('a server that cannot get its port reports it, exits non-zero and never prints the "running" banner', { skip: skipOnPg }, async () => {
   const blocker = net.createServer();
   await new Promise((r) => blocker.listen(0, r)); // dual-stack, like the app itself
   const port = blocker.address().port;

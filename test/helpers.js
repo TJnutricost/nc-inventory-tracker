@@ -1,12 +1,42 @@
 // Shared test harness: boots the real Express app against a throwaway SQLite DB
 // (temp DATA_DIR) so tests never touch the real data/ directory, and gives each
 // test a tiny cookie-aware HTTP client to exercise the API like the front end does.
+//
+// Driver-aware (Slice 5D-2): NC_TEST_DRIVER=pg boots the same app on DB_DRIVER=pg against a fresh local nc_test_<hex> database (created
+// here, migrated by app.boot(), dropped by stopServer or at exit; never DATABASE_URL from the environment). `db` is then a synchronous
+// better-sqlite3-shaped handle over that database (test-support/pg-sync.js), so tests that seed or read tables directly run unchanged.
+// `isPg` tells a test which engine it is on (SQLite-only tests skip themselves with it). `npm run test:pg-suite` runs the suite this way.
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const http = require('http');
 
+const isPg = process.env.NC_TEST_DRIVER === 'pg';
+const pgBooted = new Map(); // app -> { url, name, db, stop }
+
+function pgDatabase() {
+  const crypto = require('crypto');
+  const { serverUrl, testDatabaseUrl, assertTestDatabaseName } = require('../test-support/pg-harness');
+  const { createSyncSql, createSqliteLikeDb } = require('../test-support/pg-sync');
+  const name = assertTestDatabaseName(`nc_test_${crypto.randomBytes(8).toString('hex')}`);
+  const admin = createSyncSql(serverUrl());
+  admin.query(`CREATE DATABASE "${name}" TEMPLATE template0`);
+  const url = testDatabaseUrl(serverUrl(), name);
+  const entry = { name, url, db: null, admin, dropped: false };
+  entry.drop = () => {
+    if (entry.dropped) return;
+    entry.dropped = true;
+    try { entry.db && entry.db.close(); } catch { /* gone */ }
+    try { admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`); } catch { /* best effort */ }
+    admin.close();
+  };
+  process.on('exit', entry.drop);
+  entry.makeDb = () => { entry.db = createSqliteLikeDb(url); return entry.db; };
+  return entry;
+}
+
 function bootApp() {
+  if (isPg) return bootAppPg();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-assets-test-'));
   process.env.NC_NO_EXTERNAL_MAIL = '1'; // tests never read a developer's .env and never create a real SMTP transport (a test may inject a fake one)
   process.env.DATA_DIR = dir;
@@ -20,15 +50,40 @@ function bootApp() {
   return { app, db, dir };
 }
 
-function startServer(app) {
+function bootAppPg() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-assets-test-'));
+  const entry = pgDatabase();
+  process.env.NC_NO_EXTERNAL_MAIL = '1';
+  process.env.DATA_DIR = dir;
+  process.env.SESSION_SECRET = 'test-secret-not-for-production';
+  process.env.APP_URL = 'http://localhost';
+  process.env.DB_DRIVER = 'pg';
+  process.env.DATABASE_URL = entry.url;
+  delete process.env.SMTP_USER;
+  delete process.env.SMTP_PASS;
+  const src = path.join(__dirname, '..', 'src') + path.sep;
+  for (const k of Object.keys(require.cache)) if (k.startsWith(src)) delete require.cache[k]; // a fresh pool, seam and server per boot
+  const app = require('../src/server');
+  pgBooted.set(app, entry);
+  return { app, db: entry.makeDb(), dir };
+}
+
+async function startServer(app) {
+  const entry = pgBooted.get(app);
+  if (entry) entry.stop = (await app.boot()).stop; // PostgreSQL: migrate, install the notifier, start the sweep (before the first request)
   return new Promise((resolve) => {
     const server = http.createServer(app);
-    server.listen(0, '127.0.0.1', () => resolve(server));
+    server.listen(0, '127.0.0.1', () => { server.ncApp = app; resolve(server); });
   });
 }
 
-function stopServer(server) {
-  return new Promise((resolve) => server.close(resolve));
+async function stopServer(server) {
+  await new Promise((resolve) => server.close(resolve));
+  const entry = server.ncApp && pgBooted.get(server.ncApp);
+  if (entry) {
+    if (entry.stop) await entry.stop().catch(() => {});
+    entry.drop();
+  }
 }
 
 // Minimal cookie-jar fetch client. State-changing requests get the
@@ -87,4 +142,7 @@ async function setupAdmin(server, overrides = {}) {
 // reservation (its fields at the top) with the whole answer under `.group`. A refusal passes through untouched.
 const asReservation = (res) => (res.status === 200 && res.body && res.body.reserved ? { ...res, body: { ...res.body.reserved[0], group: res.body } } : res);
 
-module.exports = { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation };
+// For tests that exercise SQLite itself (its modules called with the better-sqlite3 handle, its triggers, files, error text): `test(name, { skip: skipOnPg }, fn)`.
+const skipOnPg = isPg ? 'SQLite-specific: the PostgreSQL twin of this behaviour is covered by test/pg' : false;
+
+module.exports = { isPg, skipOnPg, bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation };
