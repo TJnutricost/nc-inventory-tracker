@@ -418,7 +418,7 @@ function assetValues(body) {
   v.serial = cleanSerial(body.serial); // trimmed; blank => no serial
   // Seats are a whole number that fits the database integer (Slice 5D-2, carry-over (au)): 2.5 or 1e10 is refused, never rounded. (Not a
   // number at all, NaN, stays NULL as before.)
-  if (Number.isFinite(v.license_seats) ? !Number.isInteger(v.license_seats) || Math.abs(v.license_seats) > 2147483647 : v.license_seats === Infinity || v.license_seats === -Infinity) throw httpError(400, 'Seats must be a whole number (0 to 2,147,483,647)');
+  if (Number.isFinite(v.license_seats) ? !Number.isInteger(v.license_seats) || v.license_seats < 0 || v.license_seats > 2147483647 : v.license_seats === Infinity || v.license_seats === -Infinity) throw httpError(400, 'Seats must be a whole number (0 to 2,147,483,647)');
   return v;
 }
 

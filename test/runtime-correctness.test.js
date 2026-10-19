@@ -38,12 +38,12 @@ test('(af) over HTTP: a request in flight when its session is deleted does not b
   assert.equal((await admin.post('/api/login', { email: 'ada@nutricost.com', password: 'correct-horse-1' })).status, 200); // (the deleted rows included the admin's)
 });
 
-test('(au) license_seats: whole numbers in range are stored; 2.5 and 1e10 are a 400 and write nothing', async () => {
+test('(au) license_seats: whole numbers in range are stored; 2.5, 1e10 and negatives are a 400 and write nothing', async () => {
   const ok = await admin.post('/api/assets', { name: 'Seats OK', license_seats: 5 });
   assert.equal(ok.status, 200, JSON.stringify(ok.body));
   assert.equal(ok.body.license_seats, 5);
   const before = await count('assets');
-  for (const bad of [2.5, 1e10, '2.5', -1e10]) {
+  for (const bad of [2.5, 1e10, '2.5', -1, '-1', -1e10]) {
     const r = await admin.post('/api/assets', { name: 'Seats bad', license_seats: bad });
     assert.equal(r.status, 400, `${bad}: ${JSON.stringify(r.body)}`);
     assert.match(r.body.error, /whole number/);
@@ -53,13 +53,15 @@ test('(au) license_seats: whole numbers in range are stored; 2.5 and 1e10 are a 
   assert.equal(await count('assets'), before);
 });
 
-test('(au) a CSV with a fractional seats value is refused with its row number and imports nothing', async () => {
+test('(au) a CSV with a fractional or negative seats value is refused with its row number and imports nothing', async () => {
   const before = await count('assets');
-  const csv = 'name,seats\nGood One,3\nBad One,2.5\n';
-  const r = await admin.rawPost('/api/import/assets', { headers: { 'Content-Type': 'text/csv', 'X-Requested-With': 'fetch' }, body: csv });
-  assert.equal(r.status, 400, r.text);
-  assert.match(r.body.error, /Row 3: .*whole number/);
-  assert.equal(await count('assets'), before, 'the good row was not imported either');
+  for (const bad of ['2.5', '-1']) {
+    const csv = `name,seats\nGood One,3\nBad One,${bad}\n`;
+    const r = await admin.rawPost('/api/import/assets', { headers: { 'Content-Type': 'text/csv', 'X-Requested-With': 'fetch' }, body: csv });
+    assert.equal(r.status, 400, r.text);
+    assert.match(r.body.error, /Row 3: .*whole number/, bad);
+    assert.equal(await count('assets'), before, 'the good row was not imported either');
+  }
 });
 
 test('(as)/(at) NUL characters are a 400 in a body, the URL, a login and a CSV', async () => {
