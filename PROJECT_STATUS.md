@@ -4,7 +4,24 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-16 (PostgreSQL migration Slice 5D-1 built: `DB_DRIVER=pg` now runs the app on PostgreSQL locally: `src/dataSeam/pg.js` binds the pool to the 5C twins, `src/server.js` loads only the chosen driver's database code and, on PostgreSQL, `boot()` migrates the schema before listening, installs the effects notifier with the PostgreSQL mailer, starts the single-flight waitlist sweep and the overdue timer, and ends the pool on SIGTERM / SIGINT; sessions go through the same seam store; `test/pg/pg-boot.test.js` boots the real server against a fresh local test database. SQLite stays the default; PR into `integration/postgresql`, awaiting review. Slice 5C-5 merged (#47, `d72a9ee`): **5C is complete**. Integration-to-stage merges stay frozen until the cutover)
+**Last updated:** 2026-10-19 (pause/handoff checkpoint; PostgreSQL Slice 5 complete through merged PR #49; resume with Slice 6)
+
+---
+
+## Pause / handoff checkpoint — Oct 19, 2026
+
+**Paused indefinitely:** the owner is stepping away; no return date is set. PostgreSQL **Slice 5 is complete through PR #49**, merged into `integration/postgresql` (`7544703`). This is a development checkpoint; **SQLite remains the live/default driver**. Keep `integration/postgresql` isolated from `stage`, `main` and Railway until the planned cutover; do not merge or deploy it early.
+
+- **Next — Slice 6: SQLite-to-Postgres data validation and migration.** Audit legacy invalid `license_seats` (fractional, negative or outside 0..2,147,483,647; the existing audit query is retained below), verify migration integrity and data preservation, and prove backup/restore procedures before cutover.
+- **Then — Slice 7: Railway staging cutover and QA**, when access is available and the cutover is approved. **Current Railway access is still unconfirmed**; the October 13 access/deployment entries below are historical evidence, not confirmation of access on return.
+- **Scope on return:** resume Slice 6 only. Keep the existing backlog and status history for reference; do not start unrelated work. The completed Slice 5 implementation/carry-over notes below retain their historical review wording; this checkpoint supersedes that wording.
+
+**Return to work**
+
+1. In the intended repository, confirm the remote is `TJnutricost/nc-inventory-tracker` and run `git status --short --branch`. Preserve any uncommitted teammate work; use a separate clean checkout if needed.
+2. Fetch the latest `integration/postgresql` (`git fetch origin integration/postgresql`) and review team commits/PRs since this checkpoint before changing anything. Do not reset or overwrite teammate changes.
+3. From the latest `origin/integration/postgresql`, create a fresh short-lived feature branch in a clean working tree. Read `PROJECT_STATUS.md` again, then resume **Slice 6** and open its PR into `integration/postgresql`.
+4. Reconfirm Railway access before planning Slice 7 execution. Leave `stage`, `main` and Railway unchanged until the planned, approved cutover.
 
 ---
 
@@ -14,8 +31,8 @@
 |---|---|
 | **Project status** | Early MVP / prototype. **Staging is deployed on Railway** (SQLite on a `/data` Volume; `stage` also carries the dormant, unloaded `src/pg/*` code of Slices 2–4C from PRs #34 and #37, historical D-46 exceptions). Railway PostgreSQL and the S3-compatible bucket are provisioned but **UNUSED**. No production environment yet. |
 | **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
-| **Active slice** | PostgreSQL migration, Slice 5D-1 (for the temporary `integration/postgresql` branch; D-48; the first of two 5D PRs): the PostgreSQL runtime wiring. `src/dataSeam/pg.js` (the pool bound to the same names as `src/dataSeam/sqlite.js` MODULES, each twin called with the pool; `reservations.sendRecorded` and `waitlist.announceJoined` are not bound, as in `test/pg/seam-parity.test.js`); `DB_DRIVER=pg` accepted; `src/server.js` computes the data directory itself and loads `src/db.js` + the SQLite mailer only on SQLite, the lazy pool + the PostgreSQL mailer only on PostgreSQL; `app.boot()` (awaited before listen; a failure exits 1): migrate, `installNotifier(pool, mailer)`, `createSweepScheduler({ pool }).start()` (first run at 20 s) replacing the SQLite waitlist timers, the overdue timers; graceful SIGTERM / SIGINT (stop the sweep, uninstall the notifier, end the pool); the overdue sweep and the session purge log a failure instead of an unhandled rejection; `/api/settings` awaits the mail envelope. Built; awaiting review. (5C-5, merged #47: asset records and custody; 5C complete.) |
-| **Next slice** | PostgreSQL migration Slice 5D-2 (built, awaiting review; then the Railway / cutover planning), on `integration/postgresql` (D-46, D-48): the remaining transaction / concurrency fixes and validation per the owner decisions of 2026-10-16 (see the 5D-1 carry-over status below), the driver-aware test harness and the whole existing suite on PostgreSQL. Plan: `docs/briefs/postgresql-slice-5-overview.md` |
+| **Active slice** | Paused indefinitely as of 2026-10-19. PostgreSQL Slice 5 is complete through PR #49, merged into `integration/postgresql`; SQLite remains live/default. See the pause/handoff checkpoint above. |
+| **Next slice** | Slice 6 — SQLite-to-Postgres data validation and migration, legacy invalid `license_seats` audit, migration integrity and backup/restore verification. Slice 7 follows: Railway staging cutover and QA when access is confirmed and cutover is approved. |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
 | **Tests** | **613 tests** (`npm test` without PostgreSQL: the PostgreSQL suites of 37 test files are skipped with a message; the no-SQLite checks, the seam parity test, the pure-export check of the asset-records twin, the SQLite mailer golden master and the driver-seam tests need no database and always run) · **902** with the local database up (`npm run db:up`). `npm run test:pg` runs only the 311 tests under `test/pg/` and **fails** if PostgreSQL is unavailable. The 3 time-dependent hold-expiry tests were fixed in #42 (see PROJECT_HISTORY.md); a possible midnight fragility is listed under Technical Debt. |
@@ -86,14 +103,15 @@ Merged into `stage` (PR numbers from the repository history). Detail: [PROJECT_H
 - [x] **PostgreSQL migration Slice 5C-3 (PG twins of accounts, sessions and the people WRITES)** — merged into `integration/postgresql` (#45, `8426c27`; commit `bcaf4bb`). Brief: `docs/briefs/postgresql-slice-5c-3-accounts-sessions.md`; detail: PROJECT_HISTORY.md.
 - [x] **PostgreSQL migration Slice 5C-4 (PG twin of requestRecords: request list, create, approve)** — merged into `integration/postgresql` (#46, `5b6212d`; commit `94e7a42`). Brief: `docs/briefs/postgresql-slice-5c-4-request-records.md`; detail: PROJECT_HISTORY.md.
 - [x] **PostgreSQL migration Slice 5C-5 (PG twins of assetRecords + assetCustody; 5C complete)** — merged into `integration/postgresql` (#47, `d72a9ee`; commit `e27194b`). Brief: `docs/briefs/postgresql-slice-5c-5-asset-records-custody.md`; detail: PROJECT_HISTORY.md.
-- [ ] **PostgreSQL migration Slice 5D-1 (`DB_DRIVER=pg` runtime wiring: seam binding, async boot, sessions, notifier, sweeps, shutdown)** — built on `feature/pg-slice-5d-1-runtime-wiring`, PR into `integration/postgresql` (never `stage`). Awaiting review.
+- [x] **PostgreSQL migration Slice 5D-1 (`DB_DRIVER=pg` runtime wiring: seam binding, async boot, sessions, notifier, sweeps, shutdown)** — merged into `integration/postgresql` (#48, `35dc30e`).
+- [x] **PostgreSQL migration Slice 5D-2 (runtime correctness and driver-aware test harness; Slice 5 complete)** — merged into `integration/postgresql` (#49, `7544703`). See the historical implementation/carry-over notes below.
 - [x] **`integration/postgresql` → `stage` merges are frozen until the cutover** (D-46 notes: PR #34 and PR #37 (merged by accident 2026-10-15; Railway deployed it; staging still on SQLite) are historical exceptions, not precedents). Necessary `stage` hotfixes are manually ported to `integration/postgresql` and verified there (D-48).
 
 ---
 
 ## Next
 
-PostgreSQL migration Slice 5D-2 (transaction / concurrency fixes, validation, the whole suite on PostgreSQL), after 5D-1 is reviewed and merged, on `integration/postgresql` (D-46, D-48; `docs/briefs/postgresql-slice-5-overview.md`). Other candidates are under Priority Future Work. Slice 8.1 follow-ups (past-time checks, edit/extend of reservations) are listed there and under Technical Debt.
+On return, resume **PostgreSQL migration Slice 6 — data validation and migration**, as scoped in the Oct 19 pause/handoff checkpoint above, on a feature branch from `integration/postgresql` (D-46, D-48). Slice 7 follows with Railway staging cutover and QA when access is available and cutover is approved. Other candidates and Slice 8.1 follow-ups remain in Priority Future Work / Technical Debt; do not start them as part of this handoff.
 
 ---
 
@@ -154,9 +172,9 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 
 ## Blockers / External Dependencies
 
-**There is no active blocker.** These are external dependencies that matter only when the matching task starts:
+**Slice 6 is next on return; Railway access remains unconfirmed for Slice 7.** These external dependencies matter when the matching task starts:
 
-- [x] **Railway account/project access** — *available as of 2026-10-13* (staging service created, Volume mounted at `/data`). Previously recorded 2026-09-28 as no access.
+- [ ] **Railway account/project access — reconfirm before Slice 7.** Current access is unconfirmed as of this 2026-10-19 handoff. Historical record: available 2026-10-13 (staging service created, Volume mounted at `/data`); previously recorded 2026-09-28 as no access.
 - [ ] **HTTPS-accessible environment** — needed only for real phone-camera scanner QA (camera access requires HTTPS).
 - [ ] **Physical scanner hardware** — USB / Bluetooth scanners exist at the company but were not on hand at the campus used for QA.
 
@@ -265,7 +283,7 @@ Short and authoritative. The reasoning is in [PROJECT_DECISIONS.md](docs/PROJECT
 - [ ] Barcode label dimensions/printer; whether QR is needed alongside Code 128
 - [ ] Inventory / cycle-count V1 scope; paired-phone-scanner scope
 - [ ] **When to promote `stage` → `main`** — a deliberate release/staging decision; the workflow stays `feature/*` → `stage` → `main`, and `stage` being many commits ahead is not itself a reason to promote
-- [x] Railway access status — confirmed available 2026-10-13
+- [ ] Railway access status — current access unconfirmed at the 2026-10-19 handoff; reconfirm before Slice 7. Historical confirmation: 2026-10-13.
 
 ---
 
