@@ -1,6 +1,8 @@
 // PostgreSQL migration Slice 5D-2: runtime correctness fixes, on BOTH drivers (SQLite by default; NC_TEST_DRIVER=pg runs the same file on
 // PostgreSQL). (af) a rolling-cookie touch never re-creates a deleted session; (au) a fractional / out-of-range license_seats is a 400;
 // (as)/(at) NUL-containing input is a 400; deadlocks (40P01) are a retryable 503; (ah) resolve / dropped-off / request create are one write.
+const fs = require('fs');
+const path = require('path');
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { isPg, bootApp, startServer, stopServer, setupAdmin, makeClient } = require('./helpers');
@@ -144,4 +146,27 @@ test('(ah) a new request and its activity row are one write, and an asset archiv
   }), (e) => e.status === 400 && /archived/.test(e.message));
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM requests').get().n, r0);
   assert.equal(acts(), a0 + 1);
+});
+
+const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+const photoForm = (caption) => { const fd = new FormData(); fd.append('photos', new Blob([PNG], { type: 'image/png' }), 'a.png'); fd.append('caption', caption); return fd; };
+const files = (dir) => { try { return fs.readdirSync(path.join(process.env.DATA_DIR, dir)).filter((f) => !f.startsWith('.')); } catch { return []; } };
+const settle = () => new Promise((r) => setTimeout(r, 300)); // (fs.rm of the temp upload is not awaited by the route)
+
+test('(as) a NUL in a multipart photo caption is a 400 before any file or row is made, and the temp upload is removed', async () => {
+  const asset = (await admin.post('/api/assets', { name: 'Photo Cam' })).body;
+  const post = (caption) => admin.rawPost(`/api/assets/${asset.id}/photos`, { headers: { 'X-Requested-With': 'fetch' }, body: photoForm(caption) });
+  const photos = () => db.prepare('SELECT COUNT(*) AS n FROM photos WHERE asset_id = ?').get(asset.id).n;
+  const up0 = files('uploads').length;
+  const bad = await post('nice\u0000caption');
+  assert.equal(bad.status, 400, bad.text);
+  await settle();
+  assert.equal(photos(), 0, 'no photo row');
+  assert.equal(files('uploads').length, up0, 'no permanent image file');
+  assert.deepEqual(files('tmp'), [], 'the temporary upload was removed');
+  const ok = await post('nice caption');
+  assert.equal(ok.status, 200, ok.text);
+  await settle();
+  assert.equal(photos(), 1, 'a normal caption still works');
+  assert.deepEqual(files('tmp'), []);
 });

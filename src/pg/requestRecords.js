@@ -36,8 +36,10 @@
 // Lock order: asset row -> assignment rows (createAssignment: assignments, held waitlist entries, the asset row it already holds) ->
 // request row. It cannot deadlock against the 5A / 4B / 4C paths: reservations, waitlist actions, createAssignment, the photo writes
 // (and check-in from 5C-5) all lock the asset FIRST and none of them locks a request row and then an asset; the request-only writes
-// (deny, cancel / rescind, resolve, dropped-off, open) are one autocommit UPDATE each and never wait for an asset while holding a
-// request row. The foreign-key checks of the INSERTs take KEY SHARE on employee / account rows, which the people / accounts writes'
+// (deny, cancel / rescind, open) are one autocommit UPDATE each and never wait for an asset while holding a request row. (Resolve and
+// dropped-off were the same until Slice 5D-2; they also write an activity row, whose foreign key takes a KEY SHARE lock on the asset row, so
+// `transitionLogged` below locks the asset FIRST like the others: the request row first would deadlock against check-in.)
+// The foreign-key checks of the INSERTs take KEY SHARE on employee / account rows, which the people / accounts writes'
 // FOR NO KEY UPDATE locks do not conflict with.
 //
 // Races with the route's pre-reads (carry-over (ah)): the route reads the request, the person, the asset and the catalog subtree in
@@ -119,10 +121,16 @@ async function assertRequestable(c, v, recheck) {
     || (await c.query('SELECT 1 FROM assignments WHERE asset_id = $1 AND employee_id = $2 AND returned_at IS NULL', [toId(v.assetId), toId(v.forUser)])).rows[0])) throw httpError(404, 'Asset not found');
 }
 
-// resolve / dropped-off (Slice 5D-2, carry-over (ah)): the status change and its activity row in ONE transaction. Locks the request row
-// first (it takes no asset lock, as before: the request-only writes never wait for an asset). Same `activity` / return as SQLite.
+// resolve / dropped-off (Slice 5D-2, carry-over (ah)): the status change and its activity row in ONE transaction. Lock order: the request's
+// asset row FIRST (when it has one; the 5A timeout gives 503 ASSET_BUSY; an asset that is gone is skipped, as dropped-off tolerates it), then
+// the request row: the activity row's foreign key needs the asset row anyway, and check-in holds the asset before the return requests.
+// Same `activity` / return as SQLite.
 async function transitionLogged(q, { id, to, opts, activity }) {
   const run = async (c) => {
+    const pre = (await c.query('SELECT asset_id FROM requests WHERE id = $1', [toId(id)])).rows[0];
+    if (pre && pre.asset_id != null) {
+      try { await lockAsset(c, pre.asset_id); } catch (err) { if (err.code !== 'ASSET_NOT_FOUND') throw err; }
+    }
     await c.query('SELECT id FROM requests WHERE id = $1 FOR UPDATE', [toId(id)]);
     const request = await transition(c, id, to, opts);
     const asset = request.asset_id == null ? undefined : (await c.query('SELECT * FROM assets WHERE id = $1', [toId(request.asset_id)])).rows[0];

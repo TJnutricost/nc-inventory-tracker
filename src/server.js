@@ -565,8 +565,11 @@ const upload = multer({
 });
 // (Only the photo rows are in src/photoRecords.js, moved there verbatim in Slice 5B-2; the files stay here.)
 app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async (req, res) => {
-  const asset = await data.assetAccess.getAsset(Number(req.params.id));
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
+  // multer has already stored the uploads in the temp directory: a NUL in a text field (the caption) is refused before anything permanent
+  // is made (the JSON guard above does not see multipart fields).
+  if (hasNul(req.body)) { cleanup(); throw httpError(400, 'That text contains a character that is not allowed.'); }
+  const asset = await data.assetAccess.getAsset(Number(req.params.id));
   if (!asset || !(await data.assetAccess.canViewAsset(req.user, asset))) { cleanup(); throw httpError(404, 'Asset not found'); }
   const holder = await data.assetAccess.holdsAsset(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }

@@ -3,6 +3,7 @@
 //     none is created once the archive has committed (the recheck under the asset lock refuses it with the route's 400);
 //   - concurrent resolves of one issue: exactly one wins, exactly one activity row, the others get the 400;
 //   - concurrent dropped-offs of one return request: same;
+//   - dropped-off racing check-in of the SAME asset (asset lock first, then the request row): no deadlock, either order;
 //   - the session touch never re-creates a row, even in a burst against destroyForAccount.
 const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -11,6 +12,8 @@ const fx = require('../../test-support/pg-fixtures');
 const records = require('../../src/pg/requestRecords');
 const assetRecords = require('../../src/pg/assetRecords');
 const sessions = require('../../src/pg/sessions');
+const custody = require('../../src/pg/assetCustody');
+const { withTransaction, lockAsset } = require('../../src/pg/transaction');
 
 const settled = (ps) => Promise.allSettled(ps);
 const base = (emp, asset, extra = {}) => ({ forUser: emp.id, assetId: asset.id, category: null, message: 'm', neededBy: null, createdBy: null, wantedType: null, nodeId: null, catalogPath: null, assetLabel: null, ...extra });
@@ -56,6 +59,39 @@ describe('Slice 5D-2 concurrency on PostgreSQL', pgSuite(), () => {
     const ok = await records.transitionLogged(pool, { id: ret.id, to: 'dropped_off', opts: {}, activity: { action: 'dropped_off', details: 'x', actorAccountId: null, subjectUserId: emp.id, onlyIfAsset: true } });
     assert.equal(ok.request.status, 'dropped_off');
     assert.equal(ok.asset.id, asset.id);
+  });
+
+  test('dropped-off racing check-in of the same asset: asset lock first, so no deadlock, in either order', async () => {
+    for (const checkInFirst of [true, false]) {
+      const emp = await fx.insertEmployee(pool);
+      const asset = await fx.insertAsset(pool, { status: 'checked_out' });
+      const asg = await fx.insertCheckout(pool, { asset_id: asset.id, employee_id: emp.id, due_date: '2099-01-01' });
+      const ret = await fx.insertRequest(pool, { type: 'return', user_id: emp.id, asset_id: asset.id, status: 'open' });
+      const act = { action: 'dropped_off', details: 'x', actorAccountId: null, subjectUserId: emp.id, onlyIfAsset: true };
+      const dropped = () => records.transitionLogged(pool, { id: ret.id, to: 'dropped_off', opts: {}, activity: act });
+      const checkIn = () => custody.checkin(pool, { asset, target: asg, actorAccountId: null });
+      const out = await settled(checkInFirst ? [checkIn(), dropped()] : [dropped(), checkIn()]);
+      for (const r of out) if (r.status === 'rejected') assert.notEqual(r.reason.code, '40P01', 'no deadlock');
+    }
+  });
+
+  test('transitionLogged waits for a held asset lock BEFORE taking the request row (so check-in holding the asset cannot be crossed)', async () => {
+    const emp = await fx.insertEmployee(pool);
+    const asset = await fx.insertAsset(pool);
+    const ret = await fx.insertRequest(pool, { type: 'return', user_id: emp.id, asset_id: asset.id, status: 'open' });
+    let release;
+    const held = new Promise((r) => { release = r; });
+    const holder = withTransaction(async (c) => { await lockAsset(c, asset.id); await held; }, pool);
+    await new Promise((r) => setTimeout(r, 100));
+    const act = { action: 'dropped_off', details: 'x', actorAccountId: null, subjectUserId: emp.id, onlyIfAsset: true };
+    const p = records.transitionLogged(pool, { id: ret.id, to: 'dropped_off', opts: {}, activity: act });
+    await new Promise((r) => setTimeout(r, 200));
+    // while the asset is held, the request row must still be free for others to lock (it was not taken first)
+    const probe = await pool.query('SELECT id FROM requests WHERE id = $1 FOR UPDATE NOWAIT', [ret.id]);
+    assert.equal(probe.rows.length, 1, 'the request row is not locked while waiting for the asset');
+    release();
+    await holder;
+    assert.equal((await p).request.status, 'dropped_off');
   });
 
   test('a burst of touches against destroyForAccount never leaves a session behind', async () => {
