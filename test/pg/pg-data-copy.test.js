@@ -1,54 +1,16 @@
 // PostgreSQL Slice 6B: the SQLite -> PostgreSQL data copy (scripts/pg-copy.js) and its verification (scripts/pg-verify.js),
-// on local throwaway databases. The source is the deterministic dev seed (built once, in a child process, into a temp
-// directory) plus rows the seed leaves out: photos, tokens, a waitlist hold and its reservation, a closed entry, a
-// catalog node moved under a newer parent, an id gap, a session (never copied). Skipped without PostgreSQL.
+// on local throwaway databases. The source is test-support/slice6-fixture.js (the dev seed plus the rows it leaves out).
+// Skipped without PostgreSQL.
 const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const { spawnSync } = require('child_process');
-const Database = require('better-sqlite3');
 const { pgSuite, createTestDatabase } = require('../../test-support/pg-harness');
+const { createFixture } = require('../../test-support/slice6-fixture');
 const { copy } = require('../../scripts/pg-copy');
 const { verify } = require('../../scripts/pg-verify');
-const { openReadOnly } = require('../../scripts/pg-preflight');
 const sqliteSettings = require('../../src/settings');
 const pgSettings = require('../../src/pg/settings');
 const sqlitePeople = require('../../src/people');
 const pgPeople = require('../../src/pg/people');
-
-const ROOT = path.join(__dirname, '..', '..');
-let dir;
-let seeded;
-
-function extraRows(db) {
-  db.pragma('foreign_keys = ON');
-  const photo = db.prepare("INSERT INTO photos (asset_id, filename, thumb, caption, uploaded_by) VALUES (2, 'p.jpg', 'p_t.jpg', 'Caption ✓ ünï', 1)").run().lastInsertRowid;
-  db.prepare('UPDATE assets SET cover_photo_id = ?, purchase_cost = 1234.5678, notes = ? WHERE id = 2').run(photo, 'Notes with "quotes", emoji 🎧 and\nnew lines');
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('tok-abc', 1, 'invite', '2026-12-01 00:00:00')").run();
-  db.prepare(`INSERT INTO waitlist_entries (id, asset_id, employee_id, start_date, end_date, status, hold_started_at, hold_expires_at, queue_seq, start_time, end_time, request_group)
-    VALUES (900, 2, 2, '2026-11-10', '2026-11-12', 'held', '2026-10-26 10:00:00', '2026-10-27 10:00:00', 1, '09:00', '17:30', 'g1')`).run();
-  db.prepare(`INSERT INTO waitlist_entries (asset_id, employee_id, start_date, end_date, status, closed_at, queue_seq)
-    VALUES (2, 3, '2026-11-01', '2026-11-02', 'expired', '2026-10-20 08:00:00', 2)`).run();
-  db.prepare(`INSERT INTO reservations (asset_id, employee_id, start_date, end_date, status, requires_approval, waitlist_entry_id, start_time, end_time, request_group)
-    VALUES (2, 2, '2026-11-10', '2026-11-12', 'confirmed', 0, 900, '09:00', '17:30', 'g1')`).run();
-  const zeta = db.prepare("INSERT INTO catalog_nodes (name, name_key) VALUES ('Zeta', 'zeta')").run().lastInsertRowid;
-  db.prepare('UPDATE catalog_nodes SET parent_id = ? WHERE id = 2').run(zeta);
-  db.prepare("INSERT INTO employees (id, name, status) VALUES (5000, 'High Id', 'active')").run();
-  db.prepare("INSERT INTO sessions (sid, sess, expires) VALUES ('s1', '{\"uid\":1}', ?)").run(Date.now() + 60_000);
-}
-
-// A fresh copy of the seeded database (with the extra rows unless clean: false), opened read-only.
-function source({ extras = true, edit } = {}) {
-  const file = path.join(dir, `src-${Math.random().toString(16).slice(2)}.db`);
-  fs.copyFileSync(seeded, file);
-  const db = new Database(file);
-  if (extras) extraRows(db);
-  if (edit) edit(db);
-  db.close();
-  return openReadOnly(file);
-}
 
 const countAll = async (pool) => {
   const out = {};
@@ -58,26 +20,14 @@ const countAll = async (pool) => {
 
 describe('Slice 6B: SQLite -> PostgreSQL data copy', pgSuite(), () => {
   const dbs = [];
-  const sources = [];
+  let fixture;
   const fresh = async () => { const d = await createTestDatabase(); dbs.push(d); return d; };
-  const src = (opts) => { const s = source(opts); sources.push(s); return s; };
+  const src = (opts) => fixture.source(opts);
 
-  before(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nc-pgcopy-'));
-    const dataDir = path.join(dir, 'seed');
-    const res = spawnSync(process.execPath, ['-e', `require('./scripts/seed-dev').seedDatabase({ dataDir: ${JSON.stringify(dataDir)}, quiet: true }).then(() => process.exit(0), (e) => { console.error(e); process.exit(1); })`],
-      { cwd: ROOT, encoding: 'utf8', timeout: 120_000, env: { ...process.env, NC_NO_EXTERNAL_MAIL: '1' } });
-    assert.equal(res.status, 0, res.stderr);
-    seeded = path.join(dir, 'seed.db');
-    const db = new Database(path.join(dataDir, 'assets.db'));
-    db.pragma('wal_checkpoint(TRUNCATE)');
-    db.close();
-    fs.copyFileSync(path.join(dataDir, 'assets.db'), seeded);
-  });
+  before(() => { fixture = createFixture(); });
   after(async () => {
-    for (const s of sources) if (s.open) s.close();
     await Promise.all(dbs.map((d) => d.drop()));
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (fixture) fixture.cleanup();
   });
 
   test('copies every table exactly (ids, text, reals, NULLs), drops sessions, and verifies clean', async () => {
