@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const Database = require('better-sqlite3');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, admin;
 before(async () => {
@@ -362,7 +363,7 @@ test('what cannot be reserved: not-requestable, archived, repair/retired/lost/di
   assert.throws(() => rules.create(db, { assetId: off.id, employeeId: me.id, actorAccountId: null, start: plus(5), end: plus(6) }), /not found/i);
 });
 
-test('a permanent assignment, a temporary checkout through its due date (inclusive) and an overdue one make their time unavailable (waitlist time); the days AFTER a due date are only "expected back", so they can be reserved', async () => {
+test('a permanent assignment, a temporary checkout through its due date (inclusive) and an overdue one make their time unavailable (waitlist time); the days AFTER a due date are only "expected back", so they can be reserved', { skip: skipOnPg }, async () => {
   const holder = await makeLogin('Occupied Holder');
   const rules = require('../src/reservations');
   let k = 0; const people = []; for (let i = 0; i < 6; i++) people.push(await makeLogin(`Occupied Reserver ${i}`));

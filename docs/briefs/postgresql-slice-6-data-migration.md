@@ -1,0 +1,91 @@
+# PostgreSQL migration — Slice 6 (SQLite → PostgreSQL data validation and migration)
+
+**Decisions:** D-46, D-48. **Status:** APPROVED by owner 2026-10-26 with the recommended answers to Q1–Q5 (see "Owner decisions" below). **6A built 2026-10-26** (`scripts/pg-preflight.js`, `test/pg-preflight.test.js`: 10 tests, no PostgreSQL needed; the seeded dev database passes with no findings). **6B built 2026-10-26** (`scripts/pg-copy.js`, `scripts/pg-verify.js`, `test/pg/pg-data-copy.test.js`: 8 tests; see "6B as built"). **6C built 2026-10-26** (`scripts/pg-backup.js`, `scripts/pg-restore.js`, `test/pg/pg-backup-restore.test.js`: 6 tests; see "6C as built"). **Slice 6 is complete pending review.** Next: Slice 7 (owner approval of the cutover). Base: `origin/integration/postgresql` (head `3d29655` = PR #50, the Oct 19 pause/handoff checkpoint; no team commits since). Branch `feature/pg-slice-6-data-migration`. PRs into `integration/postgresql` ONLY. NEVER merge. No `stage` / `main`, no Railway.
+
+Read first: `PROJECT_STATUS.md` (the Oct 19 pause/handoff checkpoint; carry-over (au) and the 5D-2 "Pre-cutover data-validation requirement"), `src/pg/schema/001_baseline.sql` (header: porting rules), `src/pg/migrate.js` (fresh-database guard), `test-support/pg-parity.js` (allow-list), `src/migrations.js` (SQLite migrations 1–17), `docs/briefs/postgresql-slice-5-overview.md`.
+
+## Scope change from the Slice 5 overview
+
+The Slice 5 overview planned *Slice 6 = seeds/tests, SQLite removal* and *Slice 7 = cutover + tested backup/restore*. The Oct 19 checkpoint (which wins) redefines **Slice 6 = data validation, the SQLite → PostgreSQL data move and a proven backup/restore procedure**, all local, before Slice 7 touches Railway. The seed conversion and the removal of SQLite / the seam are **not** in this slice; they come after the cutover (owner decision Q4 below).
+
+## Goal
+
+A repeatable, verified way to move an existing SQLite database (`$DATA_DIR/assets.db`, schema at migration 17) into a fresh PostgreSQL database (baseline migration 1) **without losing or changing any data**, plus a tested backup/restore procedure for the PostgreSQL side. Everything runs locally (Docker `postgres:18`, `npm run db:up`) against copies of SQLite databases. SQLite stays the live/default driver; no runtime behavior changes.
+
+## Proposed split (three PRs)
+
+| PR | Scope |
+|---|---|
+| **6A** Preflight audit (read-only) | `scripts/pg-preflight.js <sqlite file>`: opens the SQLite file **read-only** and reports every row that cannot be copied as is. Never writes. Exit code ≠ 0 when anything blocks the copy. |
+| **6B** Data copy + verification | `scripts/pg-copy.js <sqlite file>` into a fresh, migrated PostgreSQL database (`DATABASE_URL`, local-URL rule unless an explicit flag is given; Slice 7 decides the flag). One transaction; refuses if preflight fails. `scripts/pg-verify.js` compares both databases afterwards. |
+| **6C** Backup / restore | A documented, scripted `pg_dump` / `pg_restore` procedure (custom format), proven by a test: copy → dump → restore into a new database → `pg-verify` against the original SQLite file, and the app boots on the restored database (`DB_DRIVER=pg`). |
+
+## 6A — what the preflight checks
+
+1. **Schema version:** SQLite `schema_migrations` holds exactly ids 1–17 (an older database must be migrated by the SQLite app first; a newer one means the PG baseline is out of date).
+2. **`license_seats` (carry-over (au)):** the existing audit query, retained verbatim:
+   `SELECT id, tag, license_seats FROM assets WHERE license_seats IS NOT NULL AND (license_seats <> CAST(license_seats AS INTEGER) OR license_seats < 0 OR license_seats > 2147483647)`
+3. **SQLite type affinity:** any value whose `typeof()` does not fit its PostgreSQL column (text in an integer / real column, a blob anywhere, a real in an integer column), every table.
+4. **NUL characters** (U+0000) in any text column: PostgreSQL text cannot hold them (routes refuse them since 5D-2, but older rows may have them).
+5. **Integer range:** every `integer` column value in −2,147,483,648..2,147,483,647 (`sessions.expires` is bigint).
+6. **Constraint re-check:** `PRAGMA foreign_key_check` and `PRAGMA integrity_check` clean; values that PostgreSQL's CHECKs / unique indexes would refuse (e.g. the `lower()` unique indexes on `assets.tag`, `accounts.login_email`, `employees.work_email`; the regex CHECKs that replaced GLOB). Simplest reliable form: 6B's copy is the final judge, the preflight reports the cases it can find statically.
+7. **Row counts** per table, printed for the record.
+
+## 6B — copy rules
+
+- Target must be fresh: baseline applied, no app data. The baseline's own seed rows (tag counter at 0, 13 default catalog roots) are **replaced** by the copied rows (as the baseline header and PROJECT_HISTORY already require).
+- Every table except `sessions` (Q2) and `sqlite_sequence`; `outbox` and `activity` in full (Q3).
+- Tables in FK order, **ids kept** (`GENERATED BY DEFAULT AS IDENTITY` accepts explicit ids), every column copied as stored: TEXT timestamps unchanged (D-46), REAL → double precision, NULLs kept.
+- Afterwards **advance every identity sequence** past the largest copied id (`setval(pg_get_serial_sequence(...), max(id))`), so the next insert never collides.
+- One transaction: any failure leaves the target empty (back to a fresh baseline is not needed: the transaction rolls back).
+- `sqlite_sequence` is not copied (allow-listed; the identity sequences take its place).
+- Photos stay files on disk (`$DATA_DIR/uploads`); only the `photos` rows are copied. Object storage is a separate item, not this slice.
+- **Verification (`pg-verify`):** per copied table (`sessions` must be empty on the target), row count equal and every row equal column by column (values compared after the documented type mapping); identity sequences ≥ max(id); `asset_tag_counter` equal; FK check clean; a few app-level reads through the seam on both drivers give equal answers (asset list, a person's history, the availability month of an asset with reservations).
+
+## 6C — backup/restore
+
+- `pg_dump -Fc` and `pg_restore` with the same major version (18). Scripts or documented commands, plus a test that runs the round trip on a copied fixture database and re-runs `pg-verify`.
+- The written procedure (where the dump goes, how often, how long it is kept, who restores) is a **Slice 7 / owner decision** for Railway; Slice 6 proves the mechanics locally only.
+
+## Fixtures and tests
+
+- A fixture SQLite database built from `npm run seed:dev` (deterministic), plus hand-made "dirty" rows covering each preflight finding (fractional / negative / huge seats, text in integer columns, NUL, out-of-range integers).
+- Tests: preflight finds every dirty row and nothing on the clean seed; copy + verify on the clean seed is exact; copy refuses a dirty database and leaves the target untouched; sequences advanced (insert after copy gets max(id)+1); the full round trip of 6C.
+- No real data in the repository. Only seed / `example.com` data (Workflow rule).
+
+## Owner decisions (2026-10-26, the recommended answers)
+
+- **Q1 Invalid `license_seats` rows: fix at the source.** The preflight lists them; they are corrected in the SQLite data (by IT, or a one-off fix with the owner's sign-off) before the copy. The copy never rounds or changes a value (the 5D-2 rule "never rounded"); a database that still has them is refused.
+- **Q2 Sessions: dropped.** `sessions` is not copied; everyone signs in again after the cutover.
+- **Q3 Outbox and activity: copied in full** (history).
+- **Q4 Seeds on PostgreSQL and SQLite / seam removal: after the cutover**, as their own slice once Slice 7 is done. Not in Slice 6 or 7.
+- **Q5 Source database: the Railway Staging Volume.** Railway access was reconfirmed 2026-10-26 (project "NC IT Scanner", **Staging** environment: the app service with its Volume, Postgres `postgres-volume` Online, the uploads bucket empty). Slice 6 still proves everything on local fixtures only; taking a copy of the Staging `/data/assets.db` and running the preflight on it is the first step of Slice 7. The **production** environment holds an unapplied draft service (branch `main`, no Volume, never deployed): out of scope, do not deploy it.
+
+## Not in this slice
+
+Railway (any change), `stage` / `main`, the cutover itself, object storage, seeds on PostgreSQL, SQLite / seam removal, authentication hardening, any schema change. If a finding needs a schema change or a product decision, STOP and report the options.
+
+## Verification
+
+`npm test` (SQLite, unchanged) · `npm run db:up && npm run test:pg` · the new script tests · `node --check` on new scripts. Update `PROJECT_STATUS.md` (Active Work / Next) when each PR is built.
+
+## 6B as built (2026-10-26)
+
+- `node scripts/pg-copy.js <assets.db>` (target `DATABASE_URL`, local only; default the Docker dev database): runs the 6A preflight (refuses on any finding), applies the PG migrations when the database is empty, refuses a target that is not fresh (any app row beyond the baseline's tag counter (1, 0) and 13 catalog roots, any session, `schema_migrations` other than [1]), then in ONE transaction deletes the baseline seed rows, copies the 14 tables in foreign-key order (`catalog_nodes` parent-first by a recursive walk, so a node moved under a newer parent copies; an unreachable node fails the copy), ids and values as stored (multi-row INSERTs of 500 rows), and sets every identity sequence to max(id) (an empty table restarts at 1). Then it runs the verification and exits 0 only if it is clean.
+- `node scripts/pg-verify.js <assets.db>`: read-only; per table the row counts and every row column by column (matched by primary key, compared with `===` as both drivers return numbers and strings), `sessions` empty, every sequence past max(id). Lists up to 20 differences per table.
+- Proven on the dev seed into the local Docker database (14 tables, 0 differences), and in `test/pg/pg-data-copy.test.js` on the dev seed plus the rows it lacks (photo + cover, token, a held waitlist entry with id 900 and its reservation, a closed entry, a moved catalog node, an employee id 5000, a session, a real and non-ASCII / emoji / newline text): exact copy; baseline rows replaced; next ids 5001 / 902 / 2; settings and a person's assignments read the same through the SQLite modules and their PG twins; a dirty source and a non-fresh target are refused with nothing changed; a forced failure mid-copy rolls everything back (the baseline roots are back); verify reports a changed value, a missing row, a stray session and a lagging sequence.
+- **Narrower than the brief:** the app-level comparison reads only settings and one person's assignments (not the asset list or an availability month); the row-by-row verification is the real check.
+
+## 6C as built (2026-10-26)
+
+- `node scripts/pg-backup.js <out.dump>` (local `DATABASE_URL` only): `pg_dump --format=custom --no-owner --no-privileges` into `<out>.partial`, read back with `pg_restore --list` (must list table data), then renamed; a failure leaves no file, and an existing file name is refused. The tool must be major 18: a local `pg_dump` 18 on PATH or in `$PG_BIN`, otherwise the `postgres:18` Docker image (`docker run --rm -i`, a local server reached as `host.docker.internal`). The password travels in `PGPASSWORD`, never on a command line.
+- `node scripts/pg-restore.js <in.dump>` (local `DATABASE_URL` only): reads the file back first (a damaged file fails before the target is touched), refuses a target that has any table, runs `pg_restore --no-owner --no-privileges --single-transaction --exit-on-error`, then requires the PG migrations to have nothing left to apply.
+- Proven on the dev seed copied into the local Docker database (backup 65 KB, 16 tables with data; restored into a new database; `pg-verify` against the SQLite source: 0 differences) and in `test/pg/pg-backup-restore.test.js` on the Slice 6 fixture (`test-support/slice6-fixture.js`, now shared with the 6B test): the restored database verifies row by row, the next employee id is 5001, the real app (`node src/server.js`, `DB_DRIVER=pg`) boots on it without opening SQLite and signs the seeded admin in and lists the assets; a non-empty target and a truncated file are refused with nothing changed; a failed backup leaves no file.
+
+### Procedure (local; the Railway schedule, location and retention are Slice 7 decisions)
+
+1. Back up: `DATABASE_URL=<url> node scripts/pg-backup.js backups/nc-$(date +%F).dump`
+2. Restore into a NEW, EMPTY database (never over the live one): create it, then `DATABASE_URL=<new url> node scripts/pg-restore.js backups/nc-<date>.dump`
+3. Check it: start the app on the new database (`DB_DRIVER=pg DATABASE_URL=<new url>`), sign in, look at a few assets; only then point the app at it.
+
+Not built here: running the tools against Railway (they refuse a non-local URL), a backup schedule, off-site storage, photo files (object storage is a separate item).

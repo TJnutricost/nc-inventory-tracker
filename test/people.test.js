@@ -6,6 +6,7 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const bcrypt = require('bcryptjs');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 const { runMigrations } = require('../src/migrate');
 const migrations = require('../src/migrations');
 
@@ -194,7 +195,7 @@ function loadDb(dir) {
   return require('../src/db');
 }
 
-test('pre-1D database: every user becomes one employee + one linked account with the same id; everything else survives', async () => {
+test('pre-1D database: every user becomes one employee + one linked account with the same id; everything else survives', { skip: skipOnPg }, async () => {
   const dir = tmpDir();
   const old = preSplitDb(dir);
   const hash = bcrypt.hashSync('legacy-password-1', 4);

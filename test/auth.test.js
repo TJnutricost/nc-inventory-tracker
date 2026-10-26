@@ -118,3 +118,10 @@ test('reset-password rejects an expired token', async () => {
   const r = await c.post('/api/reset', { token, password: 'whatever-1234' });
   assert.equal(r.status, 400);
 });
+
+test('Google sign-in is off without GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET: not offered, and its routes answer 404', async () => {
+  const c = makeClient(server);
+  assert.deepEqual((await c.get('/api/auth-options')).body, { google: false });
+  assert.equal((await c.get('/auth/google')).status, 404);
+  assert.equal((await c.get('/auth/google/callback?state=x&code=y')).status, 404);
+});

@@ -57,7 +57,7 @@ h3 { font-size: 15px; font-weight: 650; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .boot { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; background: var(--brand-ink); }
-.boot-logo { width: 200px; filter: invert(1); opacity: .9; }
+.boot-logo { width: 240px; height: auto; }
 
 /* ---------- layout ---------- */
 .topbar {
@@ -65,7 +65,7 @@ h3 { font-size: 15px; font-weight: 650; }
   padding: calc(env(safe-area-inset-top) + 10px) max(16px, env(safe-area-inset-right)) 10px max(16px, env(safe-area-inset-left)); display: flex; align-items: center; gap: 12px;
 }
 .topbar .nav-toggle { color: #fff; margin-left: -8px; margin-right: -4px; flex: none; }
-.topbar .logo { height: 18px; width: auto; }
+.topbar .logo { height: 36px; width: auto; margin: -8px -4px -8px -6px; } /* logo-white.png has its own padding */
 .topbar a { color: #fff; }
 .topbar .app-name { white-space: nowrap; font-size: 13px; opacity: .7; border-left: 1px solid rgba(255,255,255,.25); padding-left: 10px; }
 .topbar .spacer { flex: 1; }
@@ -246,8 +246,11 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .auth { min-height: 100vh; min-height: 100dvh; display: grid; place-items: center; padding: 24px 16px; background: var(--brand-ink); }
 .auth .panel { width: 100%; max-width: 400px; background: var(--surface); border-radius: 18px; padding: 28px 22px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
 .auth .brand { text-align: center; margin-bottom: 22px; }
-.auth .brand img { height: 26px; width: auto; margin: 0 auto 6px; }
-@media (prefers-color-scheme: dark) { .auth .brand img { filter: invert(1); } }
+.auth .brand img { height: 30px; width: auto; margin: 0 auto 8px; }
+@media (prefers-color-scheme: dark) { .auth .brand img { height: 52px; margin: -10px auto 0; } } /* logo-white.png has its own padding */
+.auth .google-btn { gap: 10px; text-decoration: none; }
+.auth-or { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--muted); font-size: 13px; }
+.auth-or::before, .auth-or::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
 .auth .brand div { color: var(--muted); font-size: 14px; font-weight: 600; }
 
 /* ---------- asset detail ---------- */

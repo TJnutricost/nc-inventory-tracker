@@ -5,6 +5,7 @@ const { runMigrations } = require('../src/migrate');
 const migrations = require('../src/migrations');
 const rules = require('../src/requests');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { skipOnPg } = require('./helpers');
 
 let server, db, admin;
 before(async () => {
@@ -41,41 +42,41 @@ const rawInsert = (cols) => {
 
 // ================================================================ database-level rules
 test('database: an invalid status or type is rejected', () => {
-  assert.throws(() => rawInsert({ status: 'in_review' }), /CHECK/);
-  assert.throws(() => rawInsert({ status: 'OPEN' }), /CHECK/);
-  assert.throws(() => rawInsert({ type: 'purchase' }), /CHECK/);
+  assert.throws(() => rawInsert({ status: 'in_review' }), /CHECK|check constraint/);
+  assert.throws(() => rawInsert({ status: 'OPEN' }), /CHECK|check constraint/);
+  assert.throws(() => rawInsert({ type: 'purchase' }), /CHECK|check constraint/);
   assert.ok(rawInsert({}).lastInsertRowid, 'a plain open equipment request is fine');
 });
 
 test('database: a status that does not belong to the request type is rejected', () => {
   const t = "2026-01-01 00:00:00";
-  assert.throws(() => rawInsert({ type: 'equipment', status: 'dropped_off' }), /CHECK/);
-  assert.throws(() => rawInsert({ type: 'return', status: 'approved', resolved_at: t }), /CHECK/);
-  assert.throws(() => rawInsert({ type: 'return', status: 'denied', resolved_at: t }), /CHECK/);
+  assert.throws(() => rawInsert({ type: 'equipment', status: 'dropped_off' }), /CHECK|check constraint/);
+  assert.throws(() => rawInsert({ type: 'return', status: 'approved', resolved_at: t }), /CHECK|check constraint/);
+  assert.throws(() => rawInsert({ type: 'return', status: 'denied', resolved_at: t }), /CHECK|check constraint/);
 });
 
 test('database: status and resolution timestamps cannot contradict each other', () => {
   const t = '2999-01-01 00:00:00';
-  assert.throws(() => rawInsert({ status: 'open', resolved_at: t, created_at: '2998-01-01 00:00:00' }), /CHECK/, 'open but resolved');
-  assert.throws(() => rawInsert({ type: 'return', status: 'dropped_off', resolved_at: t, created_at: '2998-01-01 00:00:00' }), /CHECK/, 'dropped off but resolved');
+  assert.throws(() => rawInsert({ status: 'open', resolved_at: t, created_at: '2998-01-01 00:00:00' }), /CHECK|check constraint/, 'open but resolved');
+  assert.throws(() => rawInsert({ type: 'return', status: 'dropped_off', resolved_at: t, created_at: '2998-01-01 00:00:00' }), /CHECK|check constraint/, 'dropped off but resolved');
   for (const status of ['approved', 'denied', 'completed', 'cancelled']) {
-    assert.throws(() => rawInsert({ status }), /CHECK/, `${status} needs a resolved_at`);
+    assert.throws(() => rawInsert({ status }), /CHECK|check constraint/, `${status} needs a resolved_at`);
   }
-  assert.throws(() => rawInsert({ status: 'completed', created_at: '2026-05-01 00:00:00', resolved_at: '2026-04-30 23:59:59' }), /CHECK/, 'resolved before created');
+  assert.throws(() => rawInsert({ status: 'completed', created_at: '2026-05-01 00:00:00', resolved_at: '2026-04-30 23:59:59' }), /CHECK|check constraint/, 'resolved before created');
   assert.ok(rawInsert({ status: 'completed', created_at: '2026-05-01 00:00:00', resolved_at: '2026-05-01 00:00:00' }).lastInsertRowid, 'resolved the same second is fine');
 });
 
 test('database: updating a live request into a contradictory state is rejected too', () => {
   const id = rawInsert({}).lastInsertRowid;
-  assert.throws(() => db.prepare("UPDATE requests SET status = 'completed' WHERE id = ?").run(id), /CHECK/, 'completed without resolved_at');
-  assert.throws(() => db.prepare("UPDATE requests SET status = 'bogus' WHERE id = ?").run(id), /CHECK/);
+  assert.throws(() => db.prepare("UPDATE requests SET status = 'completed' WHERE id = ?").run(id), /CHECK|check constraint/, 'completed without resolved_at');
+  assert.throws(() => db.prepare("UPDATE requests SET status = 'bogus' WHERE id = ?").run(id), /CHECK|check constraint/);
   assert.equal(asRow(id).status, 'open');
 });
 
 test('database: requested_assignment_type only on equipment requests, and "permanent" always names an asset', () => {
   const asset = db.prepare("INSERT INTO assets (tag, name) VALUES ('RQ-RAW', 'raw')").run().lastInsertRowid;
-  assert.throws(() => rawInsert({ requested_assignment_type: 'permanent' }), /CHECK/, 'permanent without an asset');
-  assert.throws(() => rawInsert({ type: 'return', asset_id: asset, requested_assignment_type: 'checkout' }), /CHECK/, 'on a return request');
+  assert.throws(() => rawInsert({ requested_assignment_type: 'permanent' }), /CHECK|check constraint/, 'permanent without an asset');
+  assert.throws(() => rawInsert({ type: 'return', asset_id: asset, requested_assignment_type: 'checkout' }), /CHECK|check constraint/, 'on a return request');
   assert.ok(rawInsert({ asset_id: asset, requested_assignment_type: 'permanent' }).lastInsertRowid);
   assert.ok(rawInsert({ requested_assignment_type: 'checkout' }).lastInsertRowid, 'a temporary ask may name no asset');
 });
@@ -83,9 +84,9 @@ test('database: requested_assignment_type only on equipment requests, and "perma
 test('database: at most one live return request per asset and employee; a closed one does not block a new one', () => {
   const asset = db.prepare("INSERT INTO assets (tag, name) VALUES ('RQ-RET', 'ret')").run().lastInsertRowid;
   const first = rawInsert({ type: 'return', asset_id: asset }).lastInsertRowid;
-  assert.throws(() => rawInsert({ type: 'return', asset_id: asset }), /UNIQUE/);
+  assert.throws(() => rawInsert({ type: 'return', asset_id: asset }), /UNIQUE|unique constraint/);
   db.prepare("UPDATE requests SET status = 'dropped_off' WHERE id = ?").run(first);
-  assert.throws(() => rawInsert({ type: 'return', asset_id: asset }), /UNIQUE/, 'dropped off is still live');
+  assert.throws(() => rawInsert({ type: 'return', asset_id: asset }), /UNIQUE|unique constraint/, 'dropped off is still live');
   db.prepare("UPDATE requests SET status = 'completed', resolved_at = datetime('now'), resolved_by = NULL WHERE id = ?").run(first);
   assert.ok(rawInsert({ type: 'return', asset_id: asset }).lastInsertRowid);
 });
@@ -424,16 +425,16 @@ test('deactivating an employee keeps their requests and history readable', async
   assert.equal(row.status, 'open');
 });
 
-test('raw deletes cannot orphan or erase request history: employees, accounts and assets are all RESTRICTed', async () => {
+test('raw deletes cannot orphan or erase request history: employees, accounts and assets are all RESTRICTed', { skip: skipOnPg }, async () => {
   const me = await makeLogin('Referenced');
   const a = await newAsset('Referenced asset');
   const r = await asAdminRequest(me, a);
   await admin.post(`/api/requests/${r.id}/deny`, { note: 'ref' });
   const row = asRow(r.id);
-  assert.throws(() => db.prepare('DELETE FROM employees WHERE id = ?').run(me.id), /FOREIGN KEY/);
-  assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY/);
-  assert.throws(() => db.prepare('DELETE FROM accounts WHERE id = ?').run(row.resolved_by), /FOREIGN KEY/, 'the resolving account');
-  assert.throws(() => db.prepare('DELETE FROM accounts WHERE id = ?').run(row.created_by), /FOREIGN KEY/, 'the creating account');
+  assert.throws(() => db.prepare('DELETE FROM employees WHERE id = ?').run(me.id), /FOREIGN KEY|foreign key constraint|RESTRICT/);
+  assert.throws(() => db.prepare('DELETE FROM assets WHERE id = ?').run(a.id), /FOREIGN KEY|foreign key constraint|RESTRICT/);
+  assert.throws(() => db.prepare('DELETE FROM accounts WHERE id = ?').run(row.resolved_by), /FOREIGN KEY|foreign key constraint|RESTRICT/, 'the resolving account');
+  assert.throws(() => db.prepare('DELETE FROM accounts WHERE id = ?').run(row.created_by), /FOREIGN KEY|foreign key constraint|RESTRICT/, 'the creating account');
   assert.equal(asRow(r.id).status, 'denied');
   const fk = (col) => db.pragma('foreign_key_list(requests)').find((f) => f.from === col);
   for (const col of ['user_id', 'asset_id', 'created_by', 'resolved_by']) assert.equal(fk(col).on_delete, 'RESTRICT', col);
@@ -475,8 +476,8 @@ test('migration 9: valid existing requests survive with ids, ordering, sequence 
   assert.equal(d.pragma('foreign_key_check').length, 0);
   assert.equal(d.pragma('foreign_keys', { simple: true }), 1);
   for (const idx of ['idx_requests_asset', 'idx_requests_employee_status', 'idx_requests_live_return']) assert.ok(d.prepare('SELECT 1 FROM sqlite_master WHERE name = ?').get(idx), idx);
-  assert.throws(() => d.prepare("UPDATE requests SET status = 'completed', resolved_at = NULL WHERE id = 1").run(), /CHECK/);
-  assert.throws(() => d.prepare("DELETE FROM assets WHERE id = 1").run(), /FOREIGN KEY/);
+  assert.throws(() => d.prepare("UPDATE requests SET status = 'completed', resolved_at = NULL WHERE id = 1").run(), /CHECK|check constraint/);
+  assert.throws(() => d.prepare("DELETE FROM assets WHERE id = 1").run(), /FOREIGN KEY|foreign key constraint|RESTRICT/);
 });
 
 test('migration 9: an empty requests table migrates cleanly', () => {

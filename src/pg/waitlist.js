@@ -90,21 +90,23 @@ async function insertPiece(c, e, piece, held, seconds) {
 }
 
 // The lapse-recording step of evaluateAsset (split out in Slice 4C, statements unchanged): lapsed holds and past ranges, then
-// open entries whose whole interval has ended, are closed as `expired` with the same activity rows. Returns the JS clock key
-// the interval check used (evaluateAsset offers with that same key, as SQLite did). Needs the asset lock.
+// open entries whose whole interval has ended, are closed as `expired` with the same activity rows. Returns { nowKey, closed }:
+// the JS clock key the interval check used (evaluateAsset offers with that same key, as SQLite did) and how many entries it
+// closed (Slice 5A: the request paths' gap refinement). Needs the asset lock.
 async function recordLapses(c, assetId, today) {
   assertAssetLock(c, assetId);
   const lapsed = (await c.query(`SELECT * FROM waitlist_entries WHERE asset_id = $1 AND ((status = 'held' AND hold_expires_at <= ${NOW}) OR (status IN ('waiting','held') AND start_date < $2)) ORDER BY id`,
     [assetId, today])).rows;
+  let closed = 0;
   for (const e of lapsed) {
-    if (await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)}${e.status === 'held' ? ' · hold ran out' : ' · dates passed'}`, e.employee_id);
+    if (await close(c, e, 'expired', null)) { closed++; await note(c, assetId, null, 'waitlist_expired', `${when(e)}${e.status === 'held' ? ' · hold ran out' : ' · dates passed'}`, e.employee_id); }
   }
   const nowKey = T.nowKey();
   // an open entry whose whole interval has now ended (a same-day time that has passed) can never be offered again
   for (const e of (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status IN ('waiting','held') ORDER BY id", [assetId])).rows) {
-    if (T.endKey(e.end_date, e.end_time) <= nowKey && await close(c, e, 'expired', null)) await note(c, assetId, null, 'waitlist_expired', `${when(e)} · the time has passed`, e.employee_id);
+    if (T.endKey(e.end_date, e.end_time) <= nowKey && await close(c, e, 'expired', null)) { closed++; await note(c, assetId, null, 'waitlist_expired', `${when(e)} · the time has passed`, e.employee_id); }
   }
-  return nowKey;
+  return { nowKey, closed };
 }
 
 // Record lapsed holds / past ranges, then offer free time to waiting entries oldest-first (see src/waitlist.js). Needs the
@@ -112,7 +114,7 @@ async function recordLapses(c, assetId, today) {
 async function evaluateAsset(c, assetId) {
   assertAssetLock(c, assetId);
   const today = await todayOf(c);
-  const nowKey = await recordLapses(c, assetId, today);
+  const { nowKey } = await recordLapses(c, assetId, today);
   const granted = [];
   const waiting = (await c.query("SELECT * FROM waitlist_entries WHERE asset_id = $1 AND status = 'waiting' ORDER BY queue_seq, id", [assetId])).rows;
   for (const e of waiting) {
@@ -202,10 +204,14 @@ async function rangeCheck(q, args) {
 //      the request: a hold the request itself then confirms or leaves is never emailed, and a refused request still emails.
 //   3. the main transaction: lockAsset first; then the lapse step (recordLapses: the clock moved since step 2, SQLite had no
 //      such gap; a hold that ran out in between is recorded `expired` and answered with SQLite's own message, never confirmed,
-//      decision D4C-1); then the entry is read under the lock and SQLite's checks run in SQLite's order, then the writes. If the
-//      main transaction throws, its lapse record rolls back with it: the hold still counts for nothing (blockers compare
-//      hold_expires_at) and the next due step or sweep records it.
-// Joined to a caller's transaction (given its client; a pool from inside a transaction is refused as nesting): the due step
+//      decision D4C-1); then the entry is read under the lock and SQLite's checks run in SQLite's order, then the writes.
+//      (Slice 5A, D-48 point 7) If that transaction recorded a lapse and is then REFUSED (an HTTP 4xx error), it rolls back as a
+//      whole (none of the request's own writes remain), the due step is run AGAIN in its own committed transaction (same email
+//      gating), and the ORIGINAL error is rethrown: the lapse record and the queue movement SQLite would have made are committed,
+//      and the next person is offered and emailed once. A failure of that re-run is logged and never replaces the original
+//      error. A 503 (ASSET_BUSY / DB_BUSY) or a non-HTTP error does not trigger it (the next due step or sweep records the lapse).
+// Joined to a caller's transaction (given its client; a pool from inside a transaction is refused as nesting; confirmHold never
+// joins, Slice 5A, D-48 point 6: it refuses a transaction client with code CONFIRM_HOLD_NEEDS_POOL): the due step
 // cannot be its own commit, so it runs first on the caller's client, after lockAsset, as the full evaluateAsset (which begins
 // with the lapse step) - what SQLite's processDue + transaction did back to back. Everything then commits or rolls back with
 // the caller, and effects fire at ITS commit. The caller must not have read or written this asset's dependent rows before.
@@ -242,18 +248,28 @@ async function requestPath(q, assetId, main) {
   }
   let ended;
   const requestEnded = new Promise((resolve) => { ended = resolve; });
+  const dueStep = () => withTransaction(async (c) => {
+    await lockOr404(c, assetId);
+    deferUntil(c, requestEnded); // (its holds_owed fires once the request is over, as SQLite dispatched at its end)
+    await evaluateAsset(c, assetId);
+  }, q);
   try {
-    await withTransaction(async (c) => {
-      await lockOr404(c, assetId);
-      deferUntil(c, requestEnded); // (its holds_owed fires once the request is over, as SQLite dispatched at its end)
-      await evaluateAsset(c, assetId);
-    }, q);
+    await dueStep();
     if (gapHook) await gapHook(assetId);
-    return await withTransaction(async (c) => {
-      await lockOr404(c, assetId);
-      await recordLapses(c, assetId, await todayOf(c));
-      return main(c);
-    }, q);
+    let lapses = 0;
+    try {
+      return await withTransaction(async (c) => {
+        await lockOr404(c, assetId);
+        lapses = (await recordLapses(c, assetId, await todayOf(c))).closed;
+        return main(c);
+      }, q);
+    } catch (err) {
+      // a refusal after a lapse recorded in the gap: commit what SQLite's processDue would have, then answer as before
+      if (lapses > 0 && err && err.status >= 400 && err.status < 500) {
+        try { await dueStep(); } catch (rerun) { console.error('[waitlist:gap]', `asset ${assetId}:`, rerun.message); }
+      }
+      throw err;
+    }
   } finally {
     ended();
   }
@@ -311,6 +327,8 @@ async function updateDates(q, id, { employeeId, actorAccountId, start, end, star
 // hold is the holder's priority. When the dates can't be had after all, the hold goes back to waiting (or is closed if the
 // dates are gone), the queue moves, that is COMMITTED, and only then is the 409 thrown (SQLite's `failure` pattern).
 async function confirmHold(q, id, { employeeId, actorAccountId }) {
+  // (D-48 point 6) never joined to a caller's transaction: its 409 after COMMIT needs transactions of its own
+  if (isInTransaction(q)) throw Object.assign(new Error('confirmHold() runs its own transactions: call it with the pool, not a transaction client.'), { code: 'CONFIRM_HOLD_NEEDS_POOL' });
   const assetId = await entryAssetId(q, id);
   const out = await requestPath(q, assetId, async (c) => {
     const e = await loadEntry(c, id);

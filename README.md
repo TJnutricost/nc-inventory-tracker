@@ -152,7 +152,7 @@ The setup above (Docker or plain Node, with local SQLite) is what actually works
 - **Application hosting:** Railway. The team doesn't have Railway account/project access yet — an administrator is setting that up, with no confirmed completion date.
 - **Database:** managed PostgreSQL, described and built provider-neutrally rather than locked to one vendor. **Railway PostgreSQL is the current preferred host.**
 - **File/photo storage:** S3-compatible object storage, also provider-neutral. **Railway object storage (or another S3-compatible provider) is the current preferred direction.**
-- **Authentication:** provider **TBD** — no specific vendor is assumed. Expected requirements regardless of provider: Google sign-in, an email/magic-link fallback, persistent authenticated sessions, separate admin vs. employee authorization enforced by the backend (not by hostname), and pre-provisioned employee linking (an employee can exist and hold equipment without ever having a login).
+- **Authentication:** **Google sign-in is built** (beside the password login; see "Google sign-in" below). Still to come: an email/magic-link fallback, and deciding whether the password login is retired. Other requirements: persistent authenticated sessions, separate admin vs. employee authorization enforced by the backend (not by hostname), and pre-provisioned employee linking (an employee can exist and hold equipment without ever having a login).
 - **Portals:** a separate employee-facing portal is planned alongside this admin app, sharing the same backend, database, and authentication system — there's no separate inventory data per portal. Both are expected to live on separate subdomains of an existing hosted parent domain/site (not a new domain bought for this project); the exact parent domain and both subdomains are still TBD, and no DNS has been configured. Session/cookie behavior across the two hostnames will be decided during the authentication work, not assumed now.
 
 See `PROJECT_STATUS.md` for the full roadmap and current status of each of these.
@@ -189,13 +189,36 @@ To check it, go to **Settings → Send me a test email**. The Outbox shows each 
 
 ---
 
+## Google sign-in
+
+Off until it is configured: with both variables below set, the login screen shows **Sign in with Google** above the password form (which stays).
+
+Who gets in: the Google email must be the **work email of an active person in People who has an active login**. Nobody is ever created by a Google sign-in; anyone else sees "ask IT to give you access". A person IT gave a login can use Google right away, before setting a password. Only `GOOGLE_HOSTED_DOMAIN` accounts are accepted.
+
+Setup (once, in the Google Cloud Console, signed in with a company account):
+1. Create a project inside the company organization.
+2. **Google Auth Platform / OAuth consent screen:** audience **Internal** (only company accounts; no Google review).
+3. **Clients → Create client → Web application.** Authorized JavaScript origin: the `APP_URL` (e.g. `http://localhost:3000`); authorized redirect URI: `APP_URL` + `/auth/google/callback`. Add one pair per address the app runs on (local, staging, production).
+4. Put the client ID and secret in `.env` (locally) or the host's secrets (Railway), never in the database or Settings:
+   ```
+   GOOGLE_CLIENT_ID=<…apps.googleusercontent.com>
+   GOOGLE_CLIENT_SECRET=<GOCSPX-…>
+   # GOOGLE_HOSTED_DOMAIN=nutricost.com   (the default)
+   ```
+5. Restart the app.
+
+`APP_URL` must match the address in the browser exactly, or Google answers `redirect_uri_mismatch`.
+
+---
+
 ## Branding
 
-The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (black) and `--brand-accent` (blue). Change them to match the official brand values. To use the official logo, replace `public/logo.svg` (dark, for light backgrounds) and `public/logo-white.svg` (for the black header) with files of the same names. The app icons are `public/icon.svg`, `icon-192.png` and `icon-512.png`.
+The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (black) and `--brand-accent` (blue). Change them to match the official brand values. The logo is `public/logo.png` (blue, for light backgrounds: the sign-in panel) and `public/logo-white.png` (for dark backgrounds: the black header, the loading screen and the sign-in panel in dark mode); replace them with files of the same names to change it. The app icons are `public/icon.svg`, `icon-192.png` and `icon-512.png`.
 
 ## Security notes
 
 - Passwords are hashed with bcrypt. Sessions last 30 days and are stored in the database. Logins are rate-limited.
+- Google sign-in uses the authorization-code flow with PKCE, a single-use `state` and a `nonce`; the app checks the ID token's issuer, audience, expiry, verified email and Workspace domain, and never sees a Google password. Refused Google sign-ins are rate-limited per IP like password logins.
 - Users only see available items and their own items. Purchase cost, vendor, notes and license keys stay hidden unless the user holds that item.
 - A deactivated person is signed out immediately. Their assignment history is kept.
 - Photos are resized automatically (to at most 1600px, and EXIF data is stripped). Only signed-in users can view them.

@@ -9,7 +9,7 @@ process.env.APP_TIMEZONE = 'UTC';
 const { describe, test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { pgSuite, createTestDatabase } = require('../../test-support/pg-harness');
-const { spyPool, oneLine } = require('../../test-support/pg-write-support');
+const { spyPool, oneLine, isLockTimeoutSql } = require('../../test-support/pg-write-support');
 const { syncSequences } = require('../../test-support/pg-twin');
 const fx = require('../../test-support/pg-fixtures');
 const T = require('../../src/timeRange');
@@ -120,7 +120,7 @@ describe('PostgreSQL asset-lock guard and lock ordering (Slice 4B)', pgSuite(), 
     const log = [];
     const result = await withTransaction(async (c) => {
       const original = c.query;
-      c.query = function spied(text, ...rest) { log.push(oneLine(typeof text === 'string' ? text : text.text)); return original.call(this, text, ...rest); };
+      c.query = function spied(text, ...rest) { const sql = typeof text === 'string' ? text : text.text; if (!isLockTimeoutSql(sql)) log.push(oneLine(sql)); return original.call(this, text, ...rest); }; // (5A: lockAsset's own lock_timeout statements are part of the lock)
       try {
         const r = await reservations.create(c, { assetId: asset.id, employeeId: ana.id, actorAccountId: anaAcct.id, start: d(5), end: d(5) });
         assert.ok(isInTransaction(c));
