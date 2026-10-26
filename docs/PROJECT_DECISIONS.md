@@ -178,7 +178,7 @@ The top-bar subtitle replaces the generic "IT Assets": admin → "IT Admin", any
 ## Database
 
 ### D-46 PostgreSQL everywhere — 2026-10-14 — active (approved; migration in progress, app still on SQLite)
-PostgreSQL is the database for local development, staging and production. There is **no permanent SQLite compatibility layer**; SQLite goes away at cutover. Approved decisions:
+PostgreSQL is the database for local development, staging and production. There is **no permanent SQLite compatibility layer**; SQLite goes away at cutover. *(Timing clarified by the owner 2026-10-26, Q4 of the Slice 6 brief: the removal of SQLite and the driver seam, and seeds on PostgreSQL, happen **after** the Slice 7 staging cutover as their own slice. SQLite stays in the code, and stays the rollback path, until then; "at cutover" above and in D-48 point 1 read as "after the cutover". Slice 6 (data validation, migration, backup/restore) is complete, PR #51, `34cae91`.)* Approved decisions:
 - **Driver:** plain `pg` with a thin helper layer (pool, transaction, per-asset lock). **No ORM.**
 - **Timestamps** stay in their existing TEXT formats initially, so no frontend changes are needed.
 - **Behavior preserved exactly:** ALL reservation, partial-day, overlap-warning, waitlist and handoff behavior (D-27 to D-33, D-45) stays as it is today.
