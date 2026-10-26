@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-19 (pause/handoff checkpoint; PostgreSQL Slice 5 complete through merged PR #49; resume with Slice 6)
+**Last updated:** 2026-10-26 (work resumed: Slice 6 brief approved, Railway access reconfirmed; Slice 6A next)
 
 ---
 
@@ -13,7 +13,7 @@
 **Paused indefinitely:** the owner is stepping away; no return date is set. PostgreSQL **Slice 5 is complete through PR #49**, merged into `integration/postgresql` (`7544703`). This is a development checkpoint; **SQLite remains the live/default driver**. Keep `integration/postgresql` isolated from `stage`, `main` and Railway until the planned cutover; do not merge or deploy it early.
 
 - **Next — Slice 6: SQLite-to-Postgres data validation and migration.** Audit legacy invalid `license_seats` (fractional, negative or outside 0..2,147,483,647; the existing audit query is retained below), verify migration integrity and data preservation, and prove backup/restore procedures before cutover.
-- **Then — Slice 7: Railway staging cutover and QA**, when access is available and the cutover is approved. **Current Railway access is still unconfirmed**; the October 13 access/deployment entries below are historical evidence, not confirmation of access on return.
+- **Then — Slice 7: Railway staging cutover and QA**, when access is available and the cutover is approved. *(2026-10-26: Railway access reconfirmed, see Blockers.)*
 - **Scope on return:** resume Slice 6 only. Keep the existing backlog and status history for reference; do not start unrelated work. The completed Slice 5 implementation/carry-over notes below retain their historical review wording; this checkpoint supersedes that wording.
 
 **Return to work**
@@ -31,8 +31,8 @@
 |---|---|
 | **Project status** | Early MVP / prototype. **Staging is deployed on Railway** (SQLite on a `/data` Volume; `stage` also carries the dormant, unloaded `src/pg/*` code of Slices 2–4C from PRs #34 and #37, historical D-46 exceptions). Railway PostgreSQL and the S3-compatible bucket are provisioned but **UNUSED**. No production environment yet. |
 | **Current phase** | Phase 2 — Employee Portal V1 (built on the existing SQLite app; feature-complete through Slice 8.1 and the role-aware shell label) |
-| **Active slice** | Paused indefinitely as of 2026-10-19. PostgreSQL Slice 5 is complete through PR #49, merged into `integration/postgresql`; SQLite remains live/default. See the pause/handoff checkpoint above. |
-| **Next slice** | Slice 6 — SQLite-to-Postgres data validation and migration, legacy invalid `license_seats` audit, migration integrity and backup/restore verification. Slice 7 follows: Railway staging cutover and QA when access is confirmed and cutover is approved. |
+| **Active slice** | Resumed 2026-10-26: **PostgreSQL Slice 6** (data validation and migration), brief approved: `docs/briefs/postgresql-slice-6-data-migration.md`; 6A, 6B and 6C built, awaiting review. SQLite remains live/default. |
+| **Next slice** | Slice 6 in three PRs: 6A preflight audit (incl. legacy invalid `license_seats`), 6B data copy + verification, 6C backup/restore. Slice 7 follows: Railway staging cutover and QA (access reconfirmed 2026-10-26) when the cutover is approved. |
 | **Canonical branch** | `stage` (shared integration + GitHub default). `main` is the stable/release branch. |
 | **`main` vs `stage`** | Workflow is `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 (`fcbff1d`) and `stage` is well ahead, but that does **not** by itself mean a promotion is due: promoting is a deliberate release/staging decision (an **Open Decision**, below). |
 | **Tests** | **613 tests** (`npm test` without PostgreSQL: the PostgreSQL suites of 37 test files are skipped with a message; the no-SQLite checks, the seam parity test, the pure-export check of the asset-records twin, the SQLite mailer golden master and the driver-seam tests need no database and always run) · **902** with the local database up (`npm run db:up`). `npm run test:pg` runs only the 311 tests under `test/pg/` and **fails** if PostgreSQL is unavailable. The 3 time-dependent hold-expiry tests were fixed in #42 (see PROJECT_HISTORY.md); a possible midnight fragility is listed under Technical Debt. |
@@ -105,13 +105,14 @@ Merged into `stage` (PR numbers from the repository history). Detail: [PROJECT_H
 - [x] **PostgreSQL migration Slice 5C-5 (PG twins of assetRecords + assetCustody; 5C complete)** — merged into `integration/postgresql` (#47, `d72a9ee`; commit `e27194b`). Brief: `docs/briefs/postgresql-slice-5c-5-asset-records-custody.md`; detail: PROJECT_HISTORY.md.
 - [x] **PostgreSQL migration Slice 5D-1 (`DB_DRIVER=pg` runtime wiring: seam binding, async boot, sessions, notifier, sweeps, shutdown)** — merged into `integration/postgresql` (#48, `35dc30e`).
 - [x] **PostgreSQL migration Slice 5D-2 (runtime correctness and driver-aware test harness; Slice 5 complete)** — merged into `integration/postgresql` (#49, `7544703`). See the historical implementation/carry-over notes below.
+- [ ] **PostgreSQL migration Slice 6 (SQLite → PostgreSQL data validation and migration)** — brief APPROVED 2026-10-26: `docs/briefs/postgresql-slice-6-data-migration.md`, three PRs into `integration/postgresql`: **6A** read-only preflight audit (**built 2026-10-26, awaiting review**: `node scripts/pg-preflight.js <assets.db>`; checks schema version 1–17, invalid `license_seats`, storage class vs column type, int4 range, NUL, foreign keys, integrity; exit 1 on any finding; `test/pg-preflight.test.js`, 10 tests), **6B** data copy + verification (**built 2026-10-26, awaiting review**: `node scripts/pg-copy.js <assets.db>` into a fresh local PostgreSQL in one transaction, ids kept, sequences advanced, baseline seed rows replaced, `sessions` skipped, then `scripts/pg-verify.js` row by row; dev seed copied with 0 differences; `test/pg/pg-data-copy.test.js`, 8 tests), **6C** backup/restore (**built 2026-10-26, awaiting review**: `scripts/pg-backup.js` / `scripts/pg-restore.js`, pg_dump/pg_restore 18 locally or through the `postgres:18` Docker image; restore only into an empty database, one transaction; the round trip verifies row by row against SQLite and the real app boots on the restored database and signs in; `test/pg/pg-backup-restore.test.js`, 6 tests; procedure in the brief). **Slice 6 complete pending review.** Owner decisions: invalid `license_seats` fixed at the source (never rounded; a database that still has them is refused); `sessions` not copied (everyone signs in again); `outbox` and `activity` copied in full; seeds on PostgreSQL and SQLite / seam removal come after the cutover, as their own slice; the source database is the Railway Staging Volume (copied and preflighted at the start of Slice 7; Slice 6 uses local fixtures only).
 - [x] **`integration/postgresql` → `stage` merges are frozen until the cutover** (D-46 notes: PR #34 and PR #37 (merged by accident 2026-10-15; Railway deployed it; staging still on SQLite) are historical exceptions, not precedents). Necessary `stage` hotfixes are manually ported to `integration/postgresql` and verified there (D-48).
 
 ---
 
 ## Next
 
-On return, resume **PostgreSQL migration Slice 6 — data validation and migration**, as scoped in the Oct 19 pause/handoff checkpoint above, on a feature branch from `integration/postgresql` (D-46, D-48). Slice 7 follows with Railway staging cutover and QA when access is available and cutover is approved. Other candidates and Slice 8.1 follow-ups remain in Priority Future Work / Technical Debt; do not start them as part of this handoff.
+**Review of PostgreSQL migration Slice 6** (6A preflight, 6B copy + verify, 6C backup/restore; all built 2026-10-26 on `feature/pg-slice-6-data-migration`, brief `docs/briefs/postgresql-slice-6-data-migration.md`), then a PR into `integration/postgresql` (D-46, D-48). After that, **Slice 7** (Railway staging cutover) once the owner approves it: its first step is a copy of the Staging SQLite file run through the 6A preflight. Slice 7 follows with Railway staging cutover and QA when access is available and cutover is approved. Other candidates and Slice 8.1 follow-ups remain in Priority Future Work / Technical Debt; do not start them as part of this handoff.
 
 ---
 
@@ -172,9 +173,9 @@ Kept so the ideas are not lost; none is scheduled and none has a design.
 
 ## Blockers / External Dependencies
 
-**Slice 6 is next on return; Railway access remains unconfirmed for Slice 7.** These external dependencies matter when the matching task starts:
+**Slice 6 is in progress; Railway access was reconfirmed 2026-10-26 for Slice 7.** These external dependencies matter when the matching task starts:
 
-- [ ] **Railway account/project access — reconfirm before Slice 7.** Current access is unconfirmed as of this 2026-10-19 handoff. Historical record: available 2026-10-13 (staging service created, Volume mounted at `/data`); previously recorded 2026-09-28 as no access.
+- [x] **Railway account/project access — reconfirmed 2026-10-26** (dashboard, read-only look): project "NC IT Scanner", **Staging** environment has the app service (Online) with its Volume, Postgres (Online, `postgres-volume`) and the uploads bucket (empty). The **production** environment holds an UNAPPLIED draft service `nc-inventory-tracker` (repo `TJnutricost/nc-inventory-tracker`, branch `main`, no Volume, never deployed): do not deploy it; production is not planned yet. Previously unconfirmed as of the 2026-10-19 handoff. Historical record: available 2026-10-13 (staging service created, Volume mounted at `/data`); previously recorded 2026-09-28 as no access.
 - [ ] **HTTPS-accessible environment** — needed only for real phone-camera scanner QA (camera access requires HTTPS).
 - [ ] **Physical scanner hardware** — USB / Bluetooth scanners exist at the company but were not on hand at the campus used for QA.
 
@@ -194,6 +195,8 @@ Only items that are still true. Resolved debt lives in PROJECT_HISTORY.md.
 - [ ] Google Workspace SMTP with an App Password is the only mail transport (no password-less IP relay); mailbox credentials are changed by editing env vars / secrets until the OAuth connection exists
 - [ ] **Temporary SQLite/PostgreSQL duplication (until cutover):** `src/pg/settings.js`, `catalog.js`, `requests.js`, `assignments.js`, `availability.js`, `reservations.js` and `waitlist.js` mirror the SQLite logic (see the Workflow rule), and since Slice 5C-1 so do the twins of the 5B-extracted modules (`src/pg/activityLog.js`, `outbox.js`, `overdue.js`, `photoRecords.js`, `assetAccess.js`, `reservationViews.js`, `requestAccess.js`, `catalogViews.js`, `catalogAdmin.js`, since 5C-2 `assetViews.js`, `dashboard.js` and the reads of `people.js`, since 5C-3 `accounts.js`, `sessions.js` and the people writes, since 5C-4 `requestRecords.js`, since 5C-5 `assetRecords.js` and `assetCustody.js`; a change to one side needs the other and its differential test); `src/pg/*` imports the pure helpers of `src/catalog.js`, `src/requests.js`, `src/assignments.js`, `src/availability.js`, `src/reservations.js`, `src/waitlist.js` and `src/timeRange.js`, which move into `src/pg/` at cutover
 - [ ] **Temporary database driver seam (until cutover, D-48):** `src/dataSeam/` (`DB_DRIVER`, default sqlite; `pg` runs on PostgreSQL since Slice 5D-1, locally only) and the routes on it (`test/data-seam-ratchet.test.js`; 71 routes after 5B-4, the other 5 have no database access); removed at the cutover, not a dual-database architecture. Do not build features on it
+- [ ] **`npm test` fails to start on Node 22.23** (found 2026-10-26): `node --test test/` treats the directory as a module ("Cannot find module .../test"). `node --test 'test/**/*.test.js'` runs the same files (633/633 pass without PostgreSQL; 943/944 with it, the one being the harness item below). `npm run test:pg` has the same problem. The scripts need a form that works on every supported Node (>= 20.12); not changed yet
+- [ ] **`test/pg/harness.test.js` "drop() works even while a connection is still checked out" is cancelled on Node 22.23** (found 2026-10-26, also without the Slice 6 changes): "Promise resolution is still pending but the event loop has already resolved". Not investigated yet
 - [ ] **Possible midnight fragility in `test/partial-fulfillment.test.js`** (unverified): with the clock faked to 23:50, the test "an offer under 4 hours away..." failed because its slot fixtures cross midnight; this may be an artifact of the fake clock. Not investigated or fixed yet
 
 **Reservations / waitlist / email**
@@ -283,7 +286,7 @@ Short and authoritative. The reasoning is in [PROJECT_DECISIONS.md](docs/PROJECT
 - [ ] Barcode label dimensions/printer; whether QR is needed alongside Code 128
 - [ ] Inventory / cycle-count V1 scope; paired-phone-scanner scope
 - [ ] **When to promote `stage` → `main`** — a deliberate release/staging decision; the workflow stays `feature/*` → `stage` → `main`, and `stage` being many commits ahead is not itself a reason to promote
-- [ ] Railway access status — current access unconfirmed at the 2026-10-19 handoff; reconfirm before Slice 7. Historical confirmation: 2026-10-13.
+- [x] Railway access status — reconfirmed 2026-10-26 (see Blockers). Earlier: unconfirmed at the 2026-10-19 handoff; confirmed 2026-10-13.
 
 ---
 
