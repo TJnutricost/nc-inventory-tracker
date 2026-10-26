@@ -29,6 +29,7 @@ if (DB_DRIVER === 'pg') {
 }
 const { notify, APP_URL, mailConfigured, mailEnvelope, testRecipient } = mailer;
 const { cleanSerial } = require('./serial');
+const googleAuth = require('./googleAuth');
 // The data modules with the database bound (`await data.waitlist.join({...})`). Since PostgreSQL migration Slice 5B-4 every route, the
 // middleware, the session store and the timers reach the database ONLY through this (test/data-seam-ratchet.test.js); the modules' pure
 // exports (constants, validators) are read through it too (`data.assignments.capacity`).
@@ -248,6 +249,47 @@ app.post('/api/reset', wrap(async (req, res) => {
   await data.accounts.completeReset(t.user_id, await bcrypt.hash(password, 10)); // the new password, then every token of the account is gone
   req.session.uid = t.user_id;
   res.json({ ok: true });
+}));
+
+// ---------- Google sign-in (D-10; docs/briefs/google-sign-in.md) ----------
+// Beside the password login, off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set. src/googleAuth.js talks to Google and checks
+// its answer; the account is an active employee's work email with an active login (src/accounts.js googleAccount); nothing is ever
+// created. A success signs in exactly as POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
+// so the CSRF header check does not apply; `state` (single use, kept in the session) and PKCE protect the round trip instead.
+const google = googleAuth.config();
+const GOOGLE_CALLBACK = `${APP_URL}/auth/google/callback`;
+app.get('/api/auth-options', (req, res) => res.json({ google: !!google }));
+app.get('/auth/google', (req, res, next) => {
+  if (!google) return res.status(404).end();
+  const { url, pending } = googleAuth.start(google, GOOGLE_CALLBACK);
+  req.session.google = pending;
+  req.session.save((err) => (err ? next(err) : res.redirect(url)));
+});
+app.get('/auth/google/callback', wrap(async (req, res) => {
+  if (!google) return res.status(404).end();
+  const pending = req.session.google;
+  delete req.session.google; // single use, whatever happens next
+  // Refusals share POST /api/login's limiter (per IP: 10 failures, then 15 minutes), so refused callbacks cannot run unbounded.
+  const key = `${req.ip}|google`;
+  const att = loginAttempts.get(key) || { n: 0, t: Date.now() };
+  if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
+  const refuse = (code) => { att.n++; loginAttempts.set(key, att); res.redirect(`/#/login?error=${code}`); };
+  if (att.n >= 10) return res.redirect('/#/login?error=too_many');
+  let email;
+  try {
+    email = await googleAuth.finish(google, { pending, query: req.query, redirectUri: GOOGLE_CALLBACK });
+  } catch (e) {
+    if (!e.signInCode) throw e;
+    if (e.signInCode === 'google' || e.signInCode === 'token') console.error('[google sign-in]', e.signInCode, e.message);
+    return refuse(e.signInCode);
+  }
+  const u = await data.accounts.googleAccount(email);
+  if (!u) return refuse('not_registered');
+  loginAttempts.delete(key);
+  await data.accounts.recordLogin(u.id);
+  await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+  req.session.uid = u.id; // the session identifies the ACCOUNT, as after a password login
+  res.redirect('/#/home');
 }));
 
 // ---------- people (employees, with their optional login account) ----------

@@ -71,6 +71,8 @@ const MIGRATED = [
   'PUT /api/me',
   'POST /api/forgot',
   'POST /api/reset',
+  // Google sign-in (beside the password login): the callback looks the account up through the seam
+  'GET /auth/google/callback',
   'GET /api/users',
   'POST /api/users',
   'POST /api/users/:id/account',
@@ -107,6 +109,9 @@ const NO_OWN_SQL = {
   'GET /sw.js': [],
   'GET /vendor/html5-qrcode.min.js': [],
   'GET /vendor/JsBarcode.all.min.js': [],
+  // Google sign-in: whether it is offered, and the redirect to Google (src/googleAuth.js; no database; the callback is in MIGRATED)
+  'GET /api/auth-options': [],
+  'GET /auth/google': [],
 };
 
 // Known, listed exceptions inside migrated routes: the exact text is removed before the checks below. Empty since Slice 5B-4 (the last
@@ -297,9 +302,9 @@ test('ratchet (5B-4): server.js has no database access outside the seam (no db u
   assert.deepEqual(dbLines, ['let db = null;', "({ db } = require('./db'));", 'const data = dataSeam.open({ driver: DB_DRIVER, db, pool });'],
     'the SQLite handle is used only to open the seam');
   // the only local modules: the env loader, the seam, src/db.js (above), the mailers (the SQLite mail adapter, or the PostgreSQL one),
-  // the pure serial helpers and, since Slice 5D, the PostgreSQL pool and boot services (checked in the test above)
+  // the pure serial helpers, the Google sign-in client (no database access) and, since Slice 5D, the PostgreSQL pool and boot services (checked in the test above)
   const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).filter((m) => !m.startsWith('./pg/')).sort();
-  assert.deepEqual(locals, ['./dataSeam', './db', './env', './mailer', './serial'], 'no data module is loaded by server.js (only the seam)');
+  assert.deepEqual(locals, ['./dataSeam', './db', './env', './googleAuth', './mailer', './serial'], 'no data module is loaded by server.js (only the seam)');
   assert.doesNotMatch(allCode, /\.prepare\s*\(/, 'no prepared statement');
   assert.doesNotMatch(allCode, /\.transaction\s*\(/, 'no transaction');
   assert.doesNotMatch(allCode, /\b(db|database)\s*\.\s*(exec|pragma|prepare|transaction)\b/, 'no direct database call');

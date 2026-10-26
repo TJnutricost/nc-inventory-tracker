@@ -30,6 +30,11 @@ function createFirstAdmin(db, { name, mail, hash }) {
 // The active account with this (normalized) login email, its employee (if any) active too; undefined otherwise.
 const loginAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(email);
+// Google sign-in (D-10): the active account of the ACTIVE employee whose work email is this verified Google address (trimmed and
+// lower-cased by src/googleAuth.js); undefined otherwise. An account with no employee, or an employee with no work email, cannot sign in
+// this way (they keep the password). The same row as loginAccount.
+const googleAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a JOIN employees e ON e.id = a.employee_id
+    WHERE e.work_email = ? AND a.active = 1 AND e.status = 'active'`).get(email);
 function recordLogin(db, accountId) { db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(accountId); }
 
 // ---- passwords and tokens ----
@@ -54,4 +59,4 @@ function completeReset(db, accountId, hash) {
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(accountId);
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

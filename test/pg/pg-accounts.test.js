@@ -90,6 +90,24 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     for (const e of ['off@nutricost.com', 'gone@nutricost.com']) assert.equal((await same(`inactive ${e}`, 'loginAccount', e)).ok, undefined);
   });
 
+  test('googleAccount: an active employee\'s work email with an active login only, ASCII-only case folding', async () => {
+    const off = await tw.employee({ name: 'Off Work', work_email: 'offwork@nutricost.com' });
+    const left = await tw.employee({ name: 'Left', work_email: 'left@nutricost.com', status: 'inactive' });
+    const unu = await tw.employee({ name: 'Ünï', work_email: 'Ünï@nutricost.com' });
+    await tw.employee({ name: 'Bare', work_email: 'bare@nutricost.com' }); // no login
+    await tw.insert('accounts', { employee_id: off.id, login_email: 'offwork@nutricost.com', active: 0 });
+    await tw.insert('accounts', { employee_id: left.id, login_email: 'left@nutricost.com' });
+    const u = await tw.insert('accounts', { employee_id: unu.id, login_email: 'unu-login@nutricost.com' });
+    const emails = ['ana@nutricost.com', 'ANA@NUTRICOST.COM', 'ana.admin@nutricost.com', 'offwork@nutricost.com', 'left@nutricost.com', 'bare@nutricost.com',
+      'robot@nutricost.com', 'Ünï@nutricost.com', 'ÜNï@NUTRICOST.COM', 'ÜNÏ@nutricost.com', 'ünï@nutricost.com', 'nobody@nutricost.com', '', 'ana@nutricost.com\u0000', '%@nutricost.com', 'ana_nutricost.com'];
+    for (const e of emails) await same(`google ${JSON.stringify(e)}`, 'googleAccount', e);
+    assert.equal((await same('work email, any ASCII case', 'googleAccount', 'ANA@NUTRICOST.COM')).ok.id, w.ana.id);
+    assert.equal((await same('the login email is not the key', 'googleAccount', 'ana.admin@nutricost.com')).ok, undefined);
+    assert.equal((await same('non-ASCII same letters', 'googleAccount', 'ÜNï@NUTRICOST.COM')).ok.id, u.id, 'ASCII letters fold, Ü and ï match themselves');
+    for (const e of ['ünï@nutricost.com', 'ÜNÏ@nutricost.com']) assert.equal((await same(`non-ASCII other case ${e}`, 'googleAccount', e)).ok, undefined, 'non-ASCII letters do not fold');
+    for (const e of ['offwork@nutricost.com', 'left@nutricost.com', 'bare@nutricost.com', 'robot@nutricost.com']) assert.equal((await same(`refused ${e}`, 'googleAccount', e)).ok, undefined);
+  });
+
   test('recordLogin and setPassword write the same rows', async () => {
     await write('recordLogin', (q) => pg.recordLogin(q, w.robot.id), (db) => sq.recordLogin(db, w.robot.id));
     const stamp = (await tw.pg.query('SELECT last_login_at FROM accounts WHERE id = $1', [w.robot.id])).rows[0].last_login_at;

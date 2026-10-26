@@ -247,6 +247,9 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .auth .panel { width: 100%; max-width: 400px; background: var(--surface); border-radius: 18px; padding: 28px 22px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
 .auth .brand { text-align: center; margin-bottom: 22px; }
 .auth .brand img { height: 26px; width: auto; margin: 0 auto 6px; }
+.auth .google-btn { gap: 10px; text-decoration: none; }
+.auth-or { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--muted); font-size: 13px; }
+.auth-or::before, .auth-or::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
 @media (prefers-color-scheme: dark) { .auth .brand img { filter: invert(1); } }
 .auth .brand div { color: var(--muted); font-size: 14px; font-weight: 600; }
 

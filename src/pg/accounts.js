@@ -73,6 +73,9 @@ const createFirstAdmin = async (q, { name, mail, hash }) => inTransaction(q, asy
 // ---- login ----
 // The active account with this (normalized) login email, its employee (if any) active too; undefined otherwise.
 const loginAccount = async (q, email) => (hasNul(email) ? undefined : one(q, `SELECT a.* ${ACTIVE_LOGIN}`, [email]));
+// Google sign-in (D-10): the active account of the ACTIVE employee with this work email (SQLite NOCASE, as loginAccount); undefined if none.
+const googleAccount = async (q, email) => (hasNul(email) ? undefined : one(q, `SELECT a.* FROM accounts a JOIN employees e ON e.id = a.employee_id
+    WHERE lower(e.work_email) = lower($1 COLLATE "C") AND a.active = 1 AND e.status = 'active'`, [email]));
 async function recordLogin(q, accountId) { await q.query(`UPDATE accounts SET last_login_at = ${NOW} WHERE id = $1`, [toId(accountId)]); }
 
 // ---- passwords and tokens ----
@@ -105,4 +108,4 @@ async function completeReset(q, accountId, hash) {
   });
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
