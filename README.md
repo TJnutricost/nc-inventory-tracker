@@ -213,7 +213,7 @@ Setup (once, in the Google Cloud Console, signed in with a company account):
 
 ## Branding
 
-The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (black) and `--brand-accent` (blue). Change them to match the official brand values. To use the official logo, replace `public/logo.svg` (dark, for light backgrounds) and `public/logo-white.svg` (for the black header) with files of the same names. The app icons are `public/icon.svg`, `icon-192.png` and `icon-512.png`.
+The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (black) and `--brand-accent` (blue). Change them to match the official brand values. The logo is `public/logo.png` (blue, for light backgrounds: the sign-in panel) and `public/logo-white.png` (for dark backgrounds: the black header, the loading screen and the sign-in panel in dark mode); replace them with files of the same names to change it. The app icons are `public/icon.svg`, `icon-192.png` and `icon-512.png`.
 
 ## Security notes
 
