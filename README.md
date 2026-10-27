@@ -193,7 +193,7 @@ To check it, go to **Settings → Send me a test email**. The Outbox shows each 
 
 Off until it is configured: with both variables below set, the login screen shows **Sign in with Google** above the password form (which stays).
 
-Who gets in: anyone with a verified `GOOGLE_HOSTED_DOMAIN` Google account. On their **first** sign-in the app gives them a login with the **Employee** role: linked to their People record if IT already added them (matched by work email), otherwise as a new person named from their Google profile. **Admin is only given by IT** (People → edit → Access). Refused: a person IT deactivated, a login IT turned off, or an address that is already someone else's login.
+Who gets in: anyone with a verified `GOOGLE_HOSTED_DOMAIN` Google account. On their **first** sign-in the app gives them a login with the **Employee** role: linked to their People record if IT already added them (matched by work email), otherwise as a new person named from their Google profile. **Admin is given by IT** (People → edit → Access), or, for the first admin of a new environment, by listing the address in `GOOGLE_ADMIN_EMAILS` (comma-separated; that person becomes an admin when they sign in with Google; never removed by the app). Refused: a person IT deactivated, a login IT turned off, or an address that is already someone else's login.
 
 Setup (once, in the Google Cloud Console, signed in with a company account):
 1. Create a project inside the company organization.
@@ -204,6 +204,7 @@ Setup (once, in the Google Cloud Console, signed in with a company account):
    GOOGLE_CLIENT_ID=<…apps.googleusercontent.com>
    GOOGLE_CLIENT_SECRET=<GOCSPX-…>
    # GOOGLE_HOSTED_DOMAIN=nutricost.com   (the default)
+   # GOOGLE_ADMIN_EMAILS=you@nutricost.com   (optional: made admins at Google sign-in)
    ```
 5. Restart the app.
 

@@ -98,6 +98,8 @@ async function provisionGoogleAccount(q, { email, name }) {
     throw err;
   }
 }
+// GOOGLE_ADMIN_EMAILS (as SQLite): that login becomes an admin; never demotes; true when it changed the role.
+const makeAdmin = async (q, accountId) => (await q.query("UPDATE accounts SET role = 'admin' WHERE id = $1 AND role <> 'admin'", [toId(accountId)])).rowCount === 1;
 async function recordLogin(q, accountId) { await q.query(`UPDATE accounts SET last_login_at = ${NOW} WHERE id = $1`, [toId(accountId)]); }
 
 // ---- passwords and tokens ----
@@ -130,4 +132,4 @@ async function completeReset(q, accountId, hash) {
   });
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

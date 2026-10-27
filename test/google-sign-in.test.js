@@ -76,6 +76,7 @@ before(async () => {
   process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
   process.env.GOOGLE_CLIENT_SECRET = 'test-secret';
   delete process.env.GOOGLE_HOSTED_DOMAIN;
+  process.env.GOOGLE_ADMIN_EMAILS = ' Boss@nutricost.com , lead@nutricost.com,off@nutricost.com,boss@gmail.com';
   const booted = bootApp();
   db = booted.db;
   require('../src/googleAuth').endpoints.token = `http://127.0.0.1:${fake.address().port}/token`;
@@ -90,6 +91,7 @@ before(async () => {
   assert.equal((await admin.put(`/api/users/${left.id}`, { active: false })).status, 200);
   await person({ name: 'Left No Login', email: 'gone@nutricost.com', login: false });
   db.prepare("UPDATE employees SET status = 'inactive' WHERE work_email = 'gone@nutricost.com'").run();
+  await person({ name: 'Team Lead', email: 'lead@nutricost.com' }); // an employee login, listed in GOOGLE_ADMIN_EMAILS
   await person({ name: 'Dual', email: 'dual@nutricost.com' }); // then its login moved to another address: that address is taken
   db.prepare("UPDATE accounts SET login_email = 'taken@nutricost.com' WHERE login_email = 'dual@nutricost.com'").run();
 });
@@ -253,6 +255,24 @@ test('refusals are rate-limited per IP (10, then 15 minutes); a success resets t
   await refused(c, 'no_access', 'counting starts again after a success');
 });
 
+test('GOOGLE_ADMIN_EMAILS: a listed address is an admin from its first sign-in, a listed employee login is promoted; refused stays refused', async () => {
+  const b = browser();
+  b.last = await signIn(b, 'boss@nutricost.com', { claims: { name: 'The Boss' } });
+  assert.deepEqual([(await b.me()).name, (await b.me()).role], ['The Boss', 'admin']);
+  const c = browser();
+  c.last = await signIn(c, 'lead@nutricost.com');
+  assert.deepEqual([(await c.me()).name, (await c.me()).role], ['Team Lead', 'admin']);
+  const d = browser();
+  d.last = await signIn(d, 'off@nutricost.com');
+  await refused(d, 'no_access', 'a listed address IT turned off');
+  assert.equal(db.prepare("SELECT role FROM accounts WHERE login_email = 'off@nutricost.com'").get().role, 'employee');
+  const e = browser();
+  e.last = await signIn(e, 'boss@gmail.com', { claims: { hd: undefined } });
+  await refused(e, 'domain', 'a listed address outside the company domain');
+  // admin rights given this way stay when the address is later removed from the list (never demoted by the app)
+  assert.equal((await admin.get('/api/users')).body.find((u) => u.email === 'lead@nutricost.com').role, 'admin');
+});
+
 test('the password login still works beside Google', async () => {
   const b = browser();
   const r = await b('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch' },
@@ -269,4 +289,6 @@ test('a sign-in that took longer than 10 minutes at Google is refused (unit: src
   assert.equal(g.config({ GOOGLE_CLIENT_ID: CLIENT_ID }), null, 'off without the secret');
   assert.equal(g.config({ GOOGLE_CLIENT_ID: ' ', GOOGLE_CLIENT_SECRET: 's' }), null, 'off with a blank id');
   assert.equal(g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', GOOGLE_HOSTED_DOMAIN: ' Example.COM ' }).domain, 'example.com');
+  assert.deepEqual([...g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', GOOGLE_ADMIN_EMAILS: ' A@x.com,, b@x.com ' }).admins], ['a@x.com', 'b@x.com']);
+  assert.equal(g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b' }).admins.size, 0);
 });

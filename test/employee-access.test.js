@@ -422,7 +422,7 @@ test('self-checkout of available equipment still works', async () => {
 });
 
 // ---------------------------------------------------------------- profile + building
-test('/api/me carries Building (null when unset) and the profile is read-only for employees', async () => {
+test('/api/me carries Building (null when unset); an employee edits their own name, department, title and phone, not the building or email', async () => {
   const withB = await makeLogin('Profile Bldg', { building: 'Building 4', department: 'Sales', title: 'Rep', phone: '555-0100' });
   const without = await makeLogin('Profile No Bldg');
   const me = (await withB.client.get('/api/me')).body.user;
@@ -431,21 +431,28 @@ test('/api/me carries Building (null when unset) and the profile is read-only fo
   const adminMe = (await admin.get('/api/me')).body.user;
   assert.ok('building' in adminMe);
 
-  const edit = await withB.client.put('/api/me', { name: 'Renamed Self', department: 'IT', title: 'Boss', phone: '1' });
-  assert.equal(edit.status, 403);
-  assert.deepEqual(db.prepare('SELECT name, department, title, phone, building FROM employees WHERE id = ?').get(withB.id), { name: 'Profile Bldg', department: 'Sales', title: 'Rep', phone: '555-0100', building: 'Building 4' });
+  const before_ = db.prepare('SELECT work_email FROM employees WHERE id = ?').get(withB.id);
+  const edit = await withB.client.put('/api/me', { name: ' Renamed Self ', department: 'IT', title: 'Boss', phone: '1', building: 'Building 9', email: 'other@nutricost.com', role: 'admin' });
+  assert.equal(edit.status, 200);
+  assert.deepEqual(db.prepare('SELECT name, department, title, phone, building, work_email FROM employees WHERE id = ?').get(withB.id),
+    { name: 'Renamed Self', department: 'IT', title: 'Boss', phone: '1', building: 'Building 4', work_email: before_.work_email }, 'building and email are IT\'s');
+  assert.equal((await withB.client.get('/api/me')).body.user.role, 'employee', 'the role cannot be changed here');
+  assert.equal((await withB.client.put('/api/me', { name: '', phone: '' })).status, 200);
+  assert.equal(db.prepare('SELECT name FROM employees WHERE id = ?').get(withB.id).name, 'Renamed Self', 'a blank name keeps the stored one');
   assert.equal((await admin.put('/api/me', { name: 'Ada Admin', department: 'IT' })).status, 200, 'an admin can still edit their own');
   // an employee can still change their own password
   assert.equal((await withB.client.post('/api/me/password', { current: 'employee-password-1', password: 'another-password-2' })).status, 200);
   assert.equal((await withB.client.get('/api/me')).status, 200);
 });
 
-test('front end: the employee profile renders Building read-only and the admin keeps the edit form', () => {
+test('front end: everyone gets the profile edit form; Building is shown read-only; a login without a password sets one', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const view = src.slice(src.indexOf('function viewProfile()'), src.indexOf('// ============================================================ boot'));
-  assert.match(view, /\['Building', u\.building\]/);
-  assert.match(view, /const editable = isAdmin\(\)/);
-  assert.match(view, /if \(editable\) \$\('#p'\)\.onsubmit/, 'only the admin form submits to PUT /api/me');
+  assert.doesNotMatch(view, /isAdmin\(\)/, 'the same edit form for everyone');
+  assert.match(view, /\$\('#p'\)\.onsubmit = /, 'the form submits to PUT /api/me');
+  assert.match(view, /Building: \$\{esc\(u\.building\)\}/, 'the building is shown, not editable');
+  assert.doesNotMatch(view, /name="building"|name="email"/);
+  assert.match(view, /u\.has_password \? 'Change password' : 'Set a password'/);
   assert.match(view, /id="out"/, 'sign out is kept');
   assert.match(src, /id="signout"/, 'avatar menu sign out is kept');
 });

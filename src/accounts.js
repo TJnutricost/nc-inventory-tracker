@@ -49,6 +49,9 @@ function provisionGoogleAccount(db, { email, name }) {
     return db.prepare("INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, 'employee')").run(emp, email).lastInsertRowid;
   })();
 }
+// Google sign-in by an address listed in GOOGLE_ADMIN_EMAILS (the server operator's way to name the first admins): that login becomes an
+// admin. Never demotes. Returns true when it changed the role.
+const makeAdmin = (db, accountId) => db.prepare("UPDATE accounts SET role = 'admin' WHERE id = ? AND role <> 'admin'").run(accountId).changes === 1;
 function recordLogin(db, accountId) { db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(accountId); }
 
 // ---- passwords and tokens ----
@@ -73,4 +76,4 @@ function completeReset(db, accountId, hash) {
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(accountId);
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

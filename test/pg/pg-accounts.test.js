@@ -131,6 +131,13 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     assert.equal(await pg.provisionGoogleAccount(tw.pg, { email: 'nul@nutricost.com', name: 'a\u0000b' }), null, 'NUL: refused, nothing stored');
   });
 
+  test('makeAdmin: an employee login becomes admin (true), an admin stays (false), unknown ids change nothing', async () => {
+    const id = (await tw.pg.query("SELECT id FROM accounts WHERE login_email = 'newbie@nutricost.com'")).rows[0].id;
+    assert.deepEqual(await write('promote', (q) => pg.makeAdmin(q, id), (db) => sq.makeAdmin(db, id)), { ok: true });
+    assert.deepEqual(await write('already admin', (q) => pg.makeAdmin(q, id), (db) => sq.makeAdmin(db, id)), { ok: false });
+    assert.deepEqual(await write('unknown', (q) => pg.makeAdmin(q, 999999), (db) => sq.makeAdmin(db, 999999)), { ok: false });
+  });
+
   test('recordLogin and setPassword write the same rows', async () => {
     await write('recordLogin', (q) => pg.recordLogin(q, w.robot.id), (db) => sq.recordLogin(db, w.robot.id));
     const stamp = (await tw.pg.query('SELECT last_login_at FROM accounts WHERE id = $1', [w.robot.id])).rows[0].last_login_at;
