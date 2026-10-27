@@ -398,7 +398,7 @@ function mountShell() {
           <a href="#/profile" role="menuitem">${icon('user')} My profile</a>${isAdmin() ? `<a href="#/settings" role="menuitem">${icon('settings')} Settings</a>` : ''}<button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
-      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
+      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.key === 'assets' && isAdmin() ? icon('chev', 'nav-caret') : ''}${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
       <main id="main"></main>
     </div>
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
@@ -517,6 +517,46 @@ const ROUTES = [
   [/^#\/account$/, viewAccount, { key: 'account' }],
   [/^#\/more$/, () => go('#/account'), { key: 'account' }], // the old bottom-nav "More" page: bookmarks land on the Profile tab, which replaced its personal half
 ];
+// ---- "‹ Back" on every page (owner, 2026-10-27) ----
+// The trail of in-app pages: each entry is a page left for another one, with the title it showed (its h1), so "‹ Back" can say where it
+// goes ("‹ Monitor", "‹ Dell Latitude 5440"). Following it (or browser Back) to the page on top of the trail pops it. Pages with their own
+// contextual back link (an asset, a form, a catalog level) keep theirs; every other page gets this one (ensureBack, after its view).
+S.trail = [];
+// Top-level pages are named as in the menu (Home's h1 is a greeting); a page inside them (an asset, a person, a catalog level) by its title.
+const PAGE_NAMES = () => ({ '#/home': 'Home', '#/assets': isAdmin() ? 'All assets' : 'Browse equipment', '#/scan': 'Scan', '#/requests': 'Requests', '#/people': 'People', '#/calendar': 'Calendar',
+  '#/labels': 'Print labels', '#/labels/new': 'Create labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile',
+  '#/equipment': 'My equipment', '#/history': 'History', '#/account': 'Profile', '#/new': 'Add an asset' });
+function noteNavigation(next) {
+  const cur = S.cur;
+  S.cur = { hash: next };
+  if (!cur || cur.hash === next) return;
+  const top = S.trail.at(-1);
+  if (top && top.hash === next) { S.trail.pop(); return; }
+  const [base, query = ''] = cur.hash.split('?');
+  const title = (!/(^|&)node=/.test(query) && PAGE_NAMES()[base]) || ($('#main h1') && $('#main h1').textContent.trim()) || 'Back';
+  S.trail.push({ hash: cur.hash, label: title.length > 40 ? title.slice(0, 39) + '…' : title });
+  if (S.trail.length > 30) S.trail.shift();
+}
+// The back link for a page without its own: the previous page, else Home (nothing on Home itself).
+function autoBack() {
+  const t = S.trail.at(-1);
+  if (t) return backLink(t.hash, t.label, true);
+  return (location.hash || '#/home').split('?')[0] === '#/home' ? '' : backLink('#/home', 'Home', true);
+}
+function ensureBack() {
+  const m = main();
+  if (!m || m.querySelector('.back')) return;
+  const html = autoBack(); if (!html) return;
+  const slot = m.querySelector('#backslot');
+  if (slot) slot.innerHTML = html; else m.insertAdjacentHTML('afterbegin', `<div class="auto-back">${html}</div>`);
+}
+// A page that is opened fades in (a level / filter change on the same page: the lighter `soft` fade); nothing when the OS asks for
+// reduced motion (CSS). The class is removed and re-added so the animation runs again each time.
+function animateIn(el, kind = 'page') {
+  if (!el) return;
+  el.classList.remove('page-in', 'soft-in'); void el.offsetWidth; el.classList.add(kind === 'soft' ? 'soft-in' : 'page-in');
+}
+
 async function route(silent) {
   S.soft = null; // a route-backed screen registers itself again below
   const hash = (location.hash || '#/home').split('?')[0];
@@ -531,12 +571,14 @@ async function route(silent) {
     if (opt.admin && !isAdmin()) return go('#/home');
     if (opt.employee && isAdmin()) return go('#/home'); // the admin's own equipment stays on their Home
     if (!S.shell) { mountShell(); refreshBadge(); }
+    noteNavigation(location.hash || '#/home'); // (before the spinner replaces the page being left: its title names the way back)
     setActive(opt.key);
     if (!silent) { window.scrollTo(0, 0); loading(); }
-  } else S.shell = false;
+  } else { S.shell = false; S.trail = []; S.cur = null; } // signed out / sign-in screens: a fresh trail
   S.silent = !!silent;
   $('#sheet-root').innerHTML = ''; document.body.style.overflow = '';
   try { await view(...params); } catch (e) { if (main()) main().innerHTML = `<div class="empty">${icon('alert')}<p>${esc(e.message)}</p></div>`; else fail(e); }
+  if (!opt.pub) { ensureBack(); if (!silent) animateIn(main()); }
 }
 async function loadMe() {
   const r = await api('GET', '/api/me');
@@ -548,7 +590,11 @@ async function loadMe() {
 // button, browser Back/Forward and a refresh all land on the same state, and nothing stale can survive.
 window.addEventListener('hashchange', () => {
   const base = (location.hash || '').split('?')[0];
-  if (S.soft && S.soft.base === base && $('#main')) { $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; return S.soft.fn(); }
+  if (S.soft && S.soft.base === base && $('#main')) {
+    $('#sheet-root').innerHTML = ''; document.body.style.overflow = '';
+    noteNavigation(location.hash); // a level of the same page is a page of its own for "‹ Back"
+    const r = S.soft.fn(); animateIn($('#ct') || main(), 'soft'); return r;
+  }
   route();
 });
 
@@ -766,7 +812,7 @@ async function viewBrowse() {
   const renderNav = () => {
     const bn = $('#bn');
     const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
-    $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
+    $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : autoBack();
     $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
     // Availability for exactly what is on screen, but only once the catalog is narrowed: no calendar at the Browse root (or while searching,
     // which is global). A company-wide calendar is not useful to employees.
@@ -2725,7 +2771,7 @@ async function viewAdminAssets() {
   // person, brand… within the status chip) and the matching catalog entries, each with its full path; empty = the grid, unchanged.
   const renderFound = () => {
     const f = st.found;
-    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = ''; $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>`;
+    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>`;
     if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
     const assets = f.assets.length
       ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
@@ -2781,7 +2827,7 @@ async function viewAdminAssets() {
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
     $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n ? byId(n.parent_id) : null;
-    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : '';
+    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : autoBack();
     $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}

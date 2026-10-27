@@ -99,8 +99,12 @@ main { flex: 1; min-width: 0; padding: 16px max(16px, env(safe-area-inset-right)
   .sidebar a:hover { background: var(--surface-2); }
   .sidebar a.active { background: var(--brand-accent-soft); color: var(--brand-accent); }
   .sidebar a.active svg { color: var(--brand-accent); }
+  .sidebar a { transition: background-color .15s ease, color .15s ease; }
   .sidebar a.sub { display: none; padding: 7px 12px 7px 44px; font-size: 14px; font-weight: 500; }
-  .sidebar.assets-open a.sub { display: flex; }
+  .sidebar.assets-open a.sub { display: flex; animation: sub-in .2s ease-out both; }
+  .sidebar.assets-open a.sub + a.sub { animation-delay: .04s; }
+  .sidebar .nav-caret { margin-left: auto; width: 16px !important; height: 16px !important; transition: transform .2s ease; }
+  .sidebar.assets-open .nav-caret { transform: rotate(90deg); }
   .sidebar a.sub svg { width: 16px; height: 16px; }
   .sidebar .count { margin-left: auto; background: var(--bad); color: #fff; font-size: 11px; border-radius: 9px; padding: 1px 7px; }
   .sidebar .sep { height: 1px; background: var(--line); margin: 10px 4px; }
@@ -288,6 +292,18 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .sheet .sheet-actions .btn { flex: 1; }
 @media (min-width: 700px) { .sheet-backdrop { align-items: center; } .sheet { border-radius: 20px; padding: 18px 22px 22px; } .sheet .grab { display: none; } }
 @keyframes fade { from { opacity: 0; } }
+/* page changes: the new page fades in and settles; a level / filter change on the same page just fades (the FAB keeps its place) */
+@keyframes page-in { from { opacity: 0; transform: translateY(8px); } }
+@keyframes soft-in { from { opacity: .35; } }
+@keyframes sub-in { from { opacity: 0; transform: translateY(-4px); } }
+#main.page-in > :not(.fab) { animation: page-in .24s ease-out both; }
+.soft-in { animation: soft-in .18s ease-out; }
+.tabbar a, .chip, .btn, .cg-card { transition: background-color .15s ease, color .15s ease, border-color .15s ease, box-shadow .15s ease; }
+.auto-back { margin-bottom: 2px; }
+@media (prefers-reduced-motion: reduce) {
+  #main.page-in > *, .soft-in, .sidebar.assets-open a.sub { animation: none !important; }
+  .sidebar .nav-caret { transition: none; }
+}
 @keyframes up { from { transform: translateY(40px); opacity: .5; } }
 .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.92); z-index: 60; display: grid; place-items: center; padding: 16px; }
 .lightbox img { max-height: 86vh; max-height: 86dvh; border-radius: 10px; }

@@ -118,4 +118,10 @@ test('front end: label pages under All assets, the catalog folded into All asset
   const create = src.slice(src.indexOf('function viewCreateLabels()'), src.indexOf('// ============================================================ import / export'));
   assert.match(create, /window\.addEventListener\('afterprint', ask\)/);
   assert.match(create, /await api\('POST', '\/api\/tags\/release', \{ tags \}\)/);
+  // every page gets a Back (the previous page, else Home); All assets has a caret for its sub-items; pages animate in
+  assert.match(src, /if \(!opt\.pub\) \{ ensureBack\(\); if \(!silent\) animateIn\(main\(\)\); \}/);
+  assert.match(src, /i\.key === 'assets' && isAdmin\(\) \? icon\('chev', 'nav-caret'\) : ''/);
+  const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.css'), 'utf8');
+  assert.match(css, /\.sidebar\.assets-open \.nav-caret \{ transform: rotate\(90deg\); \}/);
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\) \{\n  #main\.page-in > \*/, 'no animation when the OS asks for less motion');
 });

@@ -82,3 +82,7 @@ the nav and the routes. Full suite on both drivers.
   does not report whether the print dialog printed or was cancelled, so Create labels asks after it closes ("Did the labels print?") and
   keeps a "Give the numbers back" button on the page. Tested: reuse after give-back, refusal after a newer claim / blank-tag create / an
   asset using a label, bad input, admin-only, differential, and a give-back racing a claim never frees a held number.
+- Follow-ups (owner, 2026-10-27): a caret on All assets in the sidebar (rotates when its sub-items open; they slide in); pages fade in
+  and settle on navigation, a level / filter change on the same page fades lightly, menus and buttons ease their colors (none of it when
+  the OS asks for reduced motion); every signed-in page has a "‹ Back": pages with a contextual one keep it, the others get the previous
+  page from an in-app trail (top-level pages named as in the menu, others by their title), else "‹ Home".

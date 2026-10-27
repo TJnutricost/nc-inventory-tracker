@@ -931,7 +931,7 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
   // the catalog keeps it on every URL it builds, and shows Back only when it is there
   assert.match(catalog, /const fromSettings = \(\) => qs\(\)\.get\('from'\) === '#\/settings'/);
   assert.match(catalog, /if \(fromSettings\(\)\) q\.push\(`from=\$\{encodeURIComponent\('#\/settings'\)\}`\)/);
-  assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : ''/);
+  assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : autoBack\(\)/, 'from Settings: back to Settings; otherwise the previous page (every page has a Back)');
   assert.doesNotMatch(catalog, /history\.replaceState\(null, '', '#\/(catalog|assets)'\)/, 'even the stale-node fallback keeps the source');
   // Settings layout: a header row (title + description, then the action), Locations kept
   assert.match(src, /<div class="set-head"><div class="field"><span>Categories &amp; equipment types<\/span>/);
