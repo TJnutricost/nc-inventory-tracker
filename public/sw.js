@@ -1,5 +1,5 @@
 // Minimal service worker: makes the app installable and keeps the shell available on flaky connections.
-const CACHE = 'nc-assets-v4';
+const CACHE = 'nc-assets-v5';
 const SHELL = ['/', '/app.css', '/app.js', '/logo.png', '/logo-white.png', '/icon.svg', '/vendor/html5-qrcode.min.js', '/vendor/JsBarcode.all.min.js'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });

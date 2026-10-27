@@ -610,8 +610,8 @@ test('front end: the calendar has one route for both roles, keeps month/day/sour
   // entry points: Browse (employee), All assets = the catalog drill-down (admin), asset detail (both), admin sidebar + hamburger
   assert.match(src, /\$\('#headact'\)\.innerHTML = !st\.q && cur\(\) \? calendarLink\(\{ node: cur\(\)\.id \}\) : ''/, 'employee Browse: calendar only inside a catalog entry');
   assert.match(src, /\$\{calendarLink\(\{ asset: a\.id \}\)\}/);
-  // All assets header order: Add asset, Add category (top level only), then the calendar icon (scoped to the entry being viewed)
-  assert.match(src, /<a href="#\/new" class="btn primary desk-only">\$\{icon\('plus'\)\} Add asset<\/a>\$\{n \? '' : `<button class="btn" id="addroot">\$\{icon\('plus'\)\} Add category<\/button>`\}\$\{calendarLink\(\{ node: n \? n\.id : null \}\)\}/, 'admin All assets header');
+  // All assets header order: Add asset (desktop), Add category (top level only), Add (phones: it replaces the floating button), then the calendar icon (scoped to the entry being viewed)
+  assert.match(src, /<a href="#\/new" class="btn primary desk-only">\$\{icon\('plus'\)\} Add asset<\/a>\$\{n \? '' : `<button class="btn" id="addroot">\$\{icon\('plus'\)\} Add category<\/button>`\}<a href="#\/new" class="btn primary mob-only">\$\{icon\('plus'\)\} Add<\/a>\$\{calendarLink\(\{ node: n \? n\.id : null \}\)\}/, 'admin All assets header');
   assert.equal((src.match(/key: 'calendar', href: '#\/calendar', label: 'Calendar', icon: 'calendar'/g) || []).length, 2, 'sidebar + hamburger');
   assert.match(src, /data-key="\$\{i\.key\}"\$\{i\.key === 'calendar' \? ' data-cal' : ''\}/, 'sidebar and hamburger links are stamped too');
   const tabs = src.slice(src.indexOf('const common = ['), src.indexOf('const side = ['));
