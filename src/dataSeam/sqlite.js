@@ -32,7 +32,7 @@ const MODULES = {
     'listPeople', 'workEmailTaken', 'workEmailTakenByOther', 'loginEmailTaken', 'loginEmailTakenByOther', 'createPerson', 'addAccount',
     'personAssignments', 'updatePerson', 'setSelfCheckout', 'updateOwnProfile', 'employeeStatus']],
   assetViews: [require('../assetViews'), ['openAssignments', 'withCatalog', 'sanitizeAsset', 'listAssets', 'lookupCode', 'assetDetail', 'exportRows']], // (exportRows: 5B-4)
-  assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'claimTags', 'issuedTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset',
+  assetRecords: [require('../assetRecords'), ['tagExists', 'allocateTag', 'claimTags', 'releaseTags', 'issuedTag', 'assertSerialFree', 'resolveAssetNode', 'createAsset', 'updateAsset', 'archiveAsset',
     'peekTag', 'importAssets']], // (peekTag, importAssets: 5B-4)
   assetCustody: [require('../assetCustody'), ['checkin', 'requestReturnFrom', 'requestMyReturn', 'reportIssue', 'returnNotice']],
   photoRecords: [require('../photoRecords'), ['addPhoto', 'touchAsset', 'getPhoto', 'deletePhoto', 'photoAsset', 'setCover', 'photoByFile']],

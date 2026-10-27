@@ -75,6 +75,7 @@ const MIGRATED = [
   'GET /auth/google/callback',
   // Labels before assets (docs/briefs/labels-and-assets.md)
   'POST /api/tags/claim',
+  'POST /api/tags/release',
   'GET /api/users',
   'POST /api/users',
   'POST /api/users/:id/account',

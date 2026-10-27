@@ -95,6 +95,19 @@ async function claimTags(q, { prefix, count }) {
     return tags;
   });
 }
+// Give back a Create labels sheet (see src/assetRecords.js releaseTags): ONE transaction with the counter row locked first, so a claim or
+// a blank-tag create running at the same moment either finishes first (then these are no longer the newest: refused) or waits.
+async function releaseTags(q, { prefix, tags }) {
+  return inTransaction(q, async (c) => {
+    const nums = tags.map((t) => issuedNumber(prefix, t));
+    if (!nums.length || nums.includes(null)) return { released: false, reason: 'not_ours' };
+    const last = (await c.query('SELECT last_number AS n FROM asset_tag_counter WHERE id = 1 FOR UPDATE')).rows[0].n;
+    if (Math.max(...nums) !== last) return { released: false, reason: 'newer' };
+    for (const n of nums) if (await tagExists(c, formatTag(prefix, n))) return { released: false, reason: 'used' };
+    await c.query('UPDATE asset_tag_counter SET last_number = $1 WHERE id = 1', [Math.min(...nums) - 1]);
+    return { released: true };
+  });
+}
 // One of our claimed, still unused labels (see src/assetRecords.js): the tag as issued, else null. A plain read.
 async function issuedTag(q, code) {
   const prefix = (await getSettings(q)).tag_prefix;
@@ -299,4 +312,4 @@ async function importAssets(q, { rows, actorAccountId }) {
   });
 }
 
-module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
+module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, releaseTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };

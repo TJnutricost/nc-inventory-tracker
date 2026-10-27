@@ -76,3 +76,9 @@ the nav and the routes. Full suite on both drivers.
 - Follow-ups (owner, 2026-10-27): every asset list on All assets (top level, a category, search results) shows 10 per page with a pager
   (page resets on a new entry, status or search); a category with entries below it lists its whole branch right under its cards (the
   "All in" card is the marked default, a subcategory card narrows it; this closes the PROJECT_STATUS UX correction).
+- Give back (owner, 2026-10-27: "cancelled Create labels should not use up the numbers"): `assetRecords.releaseTags` (both drivers, ONE
+  transaction, the counter row locked on PostgreSQL) lowers the counter back to just below a sheet when it is still the newest claim and
+  none of its tags is on an asset; `POST /api/tags/release { tags }` (409 with a readable reason otherwise, nothing changed). A browser
+  does not report whether the print dialog printed or was cancelled, so Create labels asks after it closes ("Did the labels print?") and
+  keeps a "Give the numbers back" button on the page. Tested: reuse after give-back, refusal after a newer claim / blank-tag create / an
+  asset using a label, bad input, admin-only, differential, and a give-back racing a claim never frees a held number.

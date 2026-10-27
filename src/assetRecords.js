@@ -41,6 +41,21 @@ function allocateTag(db, prefix) { // call only inside a transaction
 function claimTags(db, { prefix, count }) {
   return db.transaction(() => Array.from({ length: count }, () => allocateTag(db, prefix)))();
 }
+// Create labels changed its mind (the sheet did not print, or is not wanted): give the numbers back so the next claim issues them again.
+// Only safe while they are the newest numbers and still unused, so ONE transaction checks that the counter still ends at the highest of
+// `tags`, that every tag parses as `<prefix><number>` and that no asset uses one, then lowers the counter to just below the lowest.
+// Returns { released: true } or { released: false, reason }; nothing changes when refused.
+function releaseTags(db, { prefix, tags }) {
+  return db.transaction(() => {
+    const nums = tags.map((t) => issuedNumber(prefix, t));
+    if (!nums.length || nums.includes(null)) return { released: false, reason: 'not_ours' };
+    const last = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n;
+    if (Math.max(...nums) !== last) return { released: false, reason: 'newer' };
+    if (tags.some((t) => tagExists(db, formatTag(prefix, issuedNumber(prefix, t))))) return { released: false, reason: 'used' };
+    db.prepare('UPDATE asset_tag_counter SET last_number = ? WHERE id = 1').run(Math.min(...nums) - 1);
+    return { released: true };
+  })();
+}
 // `code` as one of our claimed, still unused labels: `<tag_prefix><the 5-digit number>` (any letter case), the number already issued by
 // the counter and no asset using it. Returns the tag as issued, else null. (A label printed under an earlier prefix is not recognised.)
 function issuedTag(db, code) {
@@ -188,4 +203,4 @@ function importAssets(db, { rows, actorAccountId }) {
   return { created, updated, errors };
 }
 
-module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
+module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, releaseTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };

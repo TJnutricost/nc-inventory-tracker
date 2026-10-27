@@ -58,6 +58,37 @@ test('claim: a count from 1 to 300, admins only', async () => {
   assert.equal(counter(), c0 + 300);
 });
 
+test('give back: the newest unused sheet returns and the next claim reuses its numbers; refused once newer numbers or an asset exist', async () => {
+  const c0 = counter();
+  const { tags } = (await admin.post('/api/tags/claim', { count: 4 })).body;
+  assert.deepEqual((await admin.post('/api/tags/release', { tags })).body, { released: 4 });
+  assert.equal(counter(), c0);
+  assert.deepEqual((await admin.post('/api/tags/claim', { count: 4 })).body.tags, tags, 'the same numbers again');
+  // a newer claim after them: refused, nothing changes
+  const newer = (await admin.post('/api/tags/claim', { count: 1 })).body.tags;
+  const c1 = counter();
+  const r = await admin.post('/api/tags/release', { tags });
+  assert.equal(r.status, 409);
+  assert.match(r.body.error, /Newer numbers were reserved after these/);
+  assert.equal(counter(), c1);
+  // the newest sheet, but one of its labels is on an asset: refused
+  assert.equal((await admin.post('/api/assets', { tag: newer[0], name: 'Uses the label', category: 'Other' })).status, 200);
+  const used = await admin.post('/api/tags/release', { tags: newer });
+  assert.equal(used.status, 409);
+  assert.match(used.body.error, /already on an asset/);
+  assert.equal(counter(), c1);
+  // a blank-tag create after a claim makes it no longer the newest
+  const sheet = (await admin.post('/api/tags/claim', { count: 2 })).body.tags;
+  assert.equal((await admin.post('/api/assets', { name: 'Blank tag after the sheet', category: 'Other' })).status, 200);
+  assert.equal((await admin.post('/api/tags/release', { tags: sheet })).status, 409);
+});
+
+test('give back: bad input is a 400, tags that are not ours a 409, employees a 403', async () => {
+  for (const tags of [undefined, [], 'NC-00001', [1, 2], Array.from({ length: 301 }, () => 'NC-00001')]) assert.equal((await admin.post('/api/tags/release', { tags })).status, 400, JSON.stringify(tags)?.slice(0, 40));
+  assert.equal((await admin.post('/api/tags/release', { tags: ['XX-00001'] })).status, 409);
+  assert.equal((await employee.post('/api/tags/release', { tags: ['NC-00001'] })).status, 403);
+});
+
 // Front-end wiring (a string-level guard like the other front-end tests; the screens are checked in a real browser).
 test('front end: label pages under All assets, the catalog folded into All assets, the form label, and scans of our labels', () => {
   const fs = require('fs');
@@ -83,4 +114,8 @@ test('front end: label pages under All assets, the catalog folded into All asset
   const scan = src.slice(src.indexOf('async function handleScannedCode('), src.indexOf('// ============================================================ shell'));
   assert.match(scan, /if \(r\.issued\) return go\('#\/new\?tag=' \+ encodeURIComponent\(r\.issued\)\);/);
   assert.ok(scan.indexOf("'#/new?serial='") > 0 && scan.indexOf('id="mks"') < scan.indexOf('id="mk"'), 'serial first, tag second');
+  // Create labels asks after the print dialog closes and can give the numbers back
+  const create = src.slice(src.indexOf('function viewCreateLabels()'), src.indexOf('// ============================================================ import / export'));
+  assert.match(create, /window\.addEventListener\('afterprint', ask\)/);
+  assert.match(create, /await api\('POST', '\/api\/tags\/release', \{ tags \}\)/);
 });

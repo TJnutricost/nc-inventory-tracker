@@ -447,6 +447,21 @@ app.post('/api/tags/claim', admin, async (req, res) => {
   const { tag_prefix } = await data.settings.getSettings();
   res.json({ tags: await data.assetRecords.claimTags({ prefix: tag_prefix, count }) });
 });
+// Create labels, when the sheet did not print or is not wanted: the claimed tags go back, so the next claim issues them again. Refused
+// (409, nothing changed) once newer numbers were issued after them or one of them is on an asset: then the printed labels stay usable.
+const RELEASE_REFUSED = {
+  newer: 'Newer numbers were reserved after these, so they can no longer be given back. The printed labels still work: scan one to add its asset.',
+  used: 'One of these labels is already on an asset, so the numbers can no longer be given back.',
+  not_ours: 'These are not labels created here.',
+};
+app.post('/api/tags/release', admin, async (req, res) => {
+  const tags = req.body.tags;
+  if (!Array.isArray(tags) || !tags.length || tags.length > 300 || tags.some((t) => typeof t !== 'string')) throw httpError(400, 'Send the list of tags to give back');
+  const { tag_prefix } = await data.settings.getSettings();
+  const r = await data.assetRecords.releaseTags({ prefix: tag_prefix, tags });
+  if (!r.released) throw httpError(409, RELEASE_REFUSED[r.reason]);
+  res.json({ released: tags.length });
+});
 
 // Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.
 // (The `tag_prefix` setting, the counter and the taken-tag check: src/assetRecords.js peekTag, moved there verbatim in Slice 5B-4.)

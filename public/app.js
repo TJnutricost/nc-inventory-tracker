@@ -2537,11 +2537,13 @@ async function viewLabels() {
 
 // Create labels (docs/briefs/labels-and-assets.md): numbered labels printed BEFORE the assets exist. The numbers are claimed from the tag
 // counter at once (POST /api/tags/claim), so none is ever given to another asset; stick one on each device and scan it: Add asset opens
-// with that tag. The claimed sheet stays on screen to print again (a jammed printer) until the page is left.
+// with that tag. The claimed sheet stays on screen to print again (a jammed printer) until the page is left. A browser does not say whether
+// the print dialog printed or was cancelled, so after it closes the page asks; "Give the numbers back" (then or later on this page) returns
+// them (POST /api/tags/release) so the next Create labels issues the same numbers, as long as nothing newer was issued and none is in use.
 function viewCreateLabels() {
   main().innerHTML = `<div class="no-print">${backLink('#/assets', 'All assets')}
     <div class="page-head"><h1>Create labels</h1></div>
-    <p class="muted small" style="margin-top:-6px">Print numbered labels before the devices are in the system. Stick one on each device, then scan it: <strong>Add asset</strong> opens with that tag filled in. Each number is reserved as soon as the labels are created, so it is never given to another asset.</p>
+    <p class="muted small" style="margin-top:-6px">Print numbered labels before the devices are in the system. Stick one on each device, then scan it: <strong>Add asset</strong> opens with that tag filled in. Each number is reserved as soon as the labels are created, so it is never given to another asset. If they don't print, give the numbers back and the next labels reuse them.</p>
     <form class="card pad form-grid" id="f"><label class="field"><span>How many labels</span><input name="count" type="number" min="1" max="300" value="30" inputmode="numeric" required style="max-width:160px"></label>
       <div class="small muted">30 fill one Avery 5160 / 8160 sheet (2⅝" × 1"). Up to 300 at a time.</div>
       <button class="btn primary" id="go">${icon('printer')} Create &amp; print</button></form>
@@ -2552,10 +2554,27 @@ function viewCreateLabels() {
     const count = Number(new FormData(e.target).get('count'));
     busy($('#go'), async () => {
       const { tags } = await api('POST', '/api/tags/claim', { count });
+      const range = `<span class="mono">${esc(tags[0])}</span>${tags.length > 1 ? ` – <span class="mono">${esc(tags.at(-1))}</span>` : ''}`;
       $('#sheet').innerHTML = tags.map((tag) => labelHtml({ tag })).join('');
-      $('#done').innerHTML = `<div class="banner info">${icon('check')}<div class="grow"><strong>${tags.length} label${tags.length === 1 ? '' : 's'} reserved: <span class="mono">${esc(tags[0])}</span>${tags.length > 1 ? ` – <span class="mono">${esc(tags.at(-1))}</span>` : ''}</strong><div class="small">Print them now. They stay below until you leave this page, if you need to print them again.</div></div>
-        <button type="button" class="btn" id="again">${icon('printer')} Print again</button></div>`;
+      $('#done').innerHTML = `<div class="banner info">${icon('check')}<div class="grow"><strong>${tags.length} label${tags.length === 1 ? '' : 's'} reserved: ${range}</strong><div class="small">They stay below until you leave this page, if you need to print them again. Not printed or not needed? Give the numbers back and the next labels reuse them.</div></div>
+        <div class="row wrap" style="gap:8px"><button type="button" class="btn" id="again">${icon('printer')} Print again</button><button type="button" class="btn" id="giveback">Give the numbers back</button></div></div>`;
+      const reset = () => { $('#sheet').innerHTML = ''; $('#done').innerHTML = ''; window.removeEventListener('afterprint', ask); };
+      const giveBack = async () => {
+        await api('POST', '/api/tags/release', { tags });
+        reset();
+        toast(`Gave back ${tags.length === 1 ? tags[0] : `${tags[0]} – ${tags.at(-1)}`}. The next labels will use these numbers again.`, false, 'ok');
+      };
+      // after the print dialog closes (printed or cancelled: the browser does not say which), ask once
+      const ask = () => {
+        window.removeEventListener('afterprint', ask);
+        const { el, close } = sheet(`<h2>Did the labels print?</h2><p class="muted">${tags.length} label${tags.length === 1 ? '' : 's'}: ${range}. If they did not print, or you don't need them, give the numbers back so the next labels reuse them.</p>
+          <div class="sheet-actions"><button type="button" class="btn" id="no">Give the numbers back</button><button type="button" class="btn primary" data-close>Yes, keep them</button></div>`);
+        $('#no', el).onclick = () => busy($('#no', el), async () => { await giveBack(); close(); });
+      };
       $('#again').onclick = () => window.print();
+      $('#giveback').onclick = () => busy($('#giveback'), giveBack);
+      window.addEventListener('afterprint', ask);
+      window.addEventListener('hashchange', () => window.removeEventListener('afterprint', ask), { once: true }); // left the page: never ask elsewhere
       const ready = () => (window.JsBarcode ? (drawBarcodes($('#sheet')), window.print()) : setTimeout(ready, 100));
       ready();
     });

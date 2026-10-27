@@ -30,7 +30,7 @@ It runs on phones, tablets and desktops. On a phone, users can add it to the hom
 
 You can put the app's own labels on devices, or reuse barcodes that are already on the device. Own labels (Avery 5160/8160 sheets or a label printer), all under **All assets**:
 - **Add asset → Print label:** the form shows the next free tag and its label; printing reserves that number for the asset. Cancelling without printing reserves nothing.
-- **Create labels:** print a batch of numbered labels first (the numbers are reserved at once and never given to another asset), stick them on the devices, then scan each one: Add asset opens with that tag.
+- **Create labels:** print a batch of numbered labels first (the numbers are reserved at once and never given to another asset), stick them on the devices, then scan each one: Add asset opens with that tag. If the sheet did not print or is not needed, **Give the numbers back** (the app asks after the print dialog closes) and the next labels reuse them, as long as no newer numbers were issued meanwhile.
 - **Print labels:** labels for assets already added.
 
 To reuse a maker's barcode, scan it: the app offers a new asset with it as the serial number (scanning the serial finds the asset later), or as the tag.
