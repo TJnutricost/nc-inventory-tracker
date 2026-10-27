@@ -118,6 +118,7 @@ async function listAssets(q, user, query) {
     where.push(`a.catalog_node_id = ANY(${p(ids)}::int[])`);
   }
   if (status === 'overdue') where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < ${TODAY})`);
+  else if (status === 'checked_out') where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.assignment_type = 'checkout')`); // the Home card's definition: a temporary checkout (see src/dashboard.js)
   else if (status === 'active') where.push(`a.status NOT IN ('retired','lost','disposed')`);
   else if (status) where.push(`a.status = ${p(status)}`);
   if (!(user.role === 'admin' && query.include_archived === '1')) where.push('a.archived_at IS NULL');

@@ -115,6 +115,7 @@ const P = {
   tag: '<path d="M3 12V4a1 1 0 0 1 1-1h8l9 9-9 9z"/><circle cx="8" cy="8" r="1.5"/>',
   send: '<path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/>',
   wrench: '<path d="M14.7 6.3a4 4 0 0 0 5 5L22 14l-8 8-2.3-2.3a4 4 0 0 0-5-5L2 10l8-8z"/>',
+  pin: '<path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/>',
   calendar: '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/>',
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
 };
@@ -449,7 +450,8 @@ function navItems() {
     ...(isAdmin() ? [] : [{ key: 'equipment', href: '#/equipment', label: 'My equipment', icon: 'laptop' }]),
     { key: 'assets', href: '#/assets', label: isAdmin() ? 'All assets' : 'Browse equipment', icon: 'box' },
     // IT's labels live under All assets (docs/briefs/labels-and-assets.md): reprint for saved assets, or numbered blanks before them
-    ...(isAdmin() ? [{ key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer', sub: true }, { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus', sub: true }] : []),
+    ...(isAdmin() ? [{ key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer', sub: true }, { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus', sub: true },
+      { key: 'locations', href: '#/locations', label: 'Locations', icon: 'pin', sub: true }] : []),
     { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan' },
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
     ...(isAdmin() ? [] : [{ key: 'history', href: '#/history', label: 'History', icon: 'history' }]),
@@ -466,6 +468,7 @@ function navItems() {
 // Mobile hamburger (admins only) = administering the system. The signed-in person's own destinations live under the Profile tab.
 const adminMenuItems = () => [
   { key: 'people', href: '#/people', label: 'People', icon: 'users' },
+  { key: 'locations', href: '#/locations', label: 'Locations', icon: 'pin' },
   { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
   { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
   { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus' },
@@ -534,10 +537,10 @@ function mountShell() {
 const ACCOUNT_KEYS = ['account', 'profile', 'equipment', 'history'];
 function setActive(key) {
   S.activeKey = key;
-  const tabKey = ACCOUNT_KEYS.includes(key) || key === 'settings' ? 'account' : key.startsWith('labels') ? 'assets' : key; // the Profile tab covers the person's own pages; the label pages sit under Assets
+  const tabKey = ACCOUNT_KEYS.includes(key) || key === 'settings' ? 'account' : key.startsWith('labels') || key === 'locations' ? 'assets' : key; // the Profile tab covers the person's own pages; the label pages sit under Assets
   $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.key === tabKey));
   $$('.sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key));
-  $('.sidebar')?.classList.toggle('assets-open', ['assets', 'labels', 'labels-new'].includes(key)); // All assets' sub-items show while you are in it
+  $('.sidebar')?.classList.toggle('assets-open', ['assets', 'labels', 'labels-new', 'locations'].includes(key)); // All assets' sub-items show while you are in it
 }
 async function refreshBadge() {
   try {
@@ -579,7 +582,7 @@ function assetCtx() {
   if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
   const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
   // `from=#/settings` rides along only when the catalog itself was opened from Settings: the asset's Back then returns to the catalog WITH it.
-  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', status: src === 'catalog' && ADMIN_STATUSES.some(([v]) => v && v === p.get('status')) ? p.get('status') : null, tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', status: src === 'catalog' && STATUS_CHIPS.some(([v]) => v && v === p.get('status')) ? p.get('status') : null, tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
 }
 const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, status: c.status, tab: c.tab, from: c.fromSettings ? '#/settings' : null }) : ''; }; // carried on to the edit form and back
 async function assetBackTarget() {
@@ -628,6 +631,7 @@ const ROUTES = [
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
   [/^#\/labels\/new$/, viewCreateLabels, { key: 'labels-new', admin: true }],
+  [/^#\/locations$/, viewLocations, { key: 'locations', admin: true }],
   // The equipment catalog is All assets since docs/briefs/labels-and-assets.md: old links (bookmarks, Settings) land there, same entry
   [/^#\/catalog$/, () => { history.replaceState(null, '', '#/assets' + (location.hash.split('?')[1] ? '?' + location.hash.split('?')[1] : '')); return route(true); }, { key: 'assets', admin: true }],
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
@@ -646,7 +650,7 @@ const ROUTES = [
 S.trail = [];
 // Top-level pages are named as in the menu (Home's h1 is a greeting); a page inside them (an asset, a person, a catalog level) by its title.
 const PAGE_NAMES = () => ({ '#/home': 'Home', '#/assets': isAdmin() ? 'All assets' : 'Browse equipment', '#/scan': 'Scan', '#/requests': 'Requests', '#/people': 'People', '#/calendar': 'Calendar',
-  '#/labels': 'Print labels', '#/labels/new': 'Create labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile',
+  '#/labels': 'Print labels', '#/labels/new': 'Create labels', '#/locations': 'Locations', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile',
   '#/equipment': 'My equipment', '#/history': 'History', '#/account': 'Profile', '#/new': 'Add an asset' });
 function noteNavigation(next) {
   const cur = S.cur;
@@ -2459,7 +2463,7 @@ document.addEventListener('click', (e) => {
 // or person's name), never from the URL text. Unknown routes still get a plain, working "Back".
 async function calBackTarget(from, sc) {
   const admin = isAdmin();
-  const fixed = { '#/home': 'Home', '#/assets': admin ? 'All assets' : 'Browse equipment', '#/catalog': 'All assets', '#/labels/new': 'Create labels', '#/requests': 'Requests', '#/people': 'People', '#/labels': 'Print labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile', '#/equipment': 'My equipment', '#/history': 'History', '#/scan': 'Scan', '#/account': 'Profile', '#/new': 'Add an asset' };
+  const fixed = { '#/home': 'Home', '#/assets': admin ? 'All assets' : 'Browse equipment', '#/catalog': 'All assets', '#/labels/new': 'Create labels', '#/locations': 'Locations', '#/requests': 'Requests', '#/people': 'People', '#/labels': 'Print labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile', '#/equipment': 'My equipment', '#/history': 'History', '#/scan': 'Scan', '#/account': 'Profile', '#/new': 'Add an asset' };
   if (!from) return { href: '#/assets', label: admin ? 'All assets' : 'Browse equipment' }; // a typed / shared link: the role's list
   const [path, query = ''] = from.split('?'); const q = new URLSearchParams(query);
   const node = Number(q.get('node'));
@@ -3010,6 +3014,51 @@ async function viewCreateLabels() {
   };
 }
 
+// ============================================================ locations
+// Locations (under All assets, IT only): the managed list behind every asset's Location field. A rename rewrites the assets that carry the old
+// name (server, one transaction); a location some asset uses cannot be removed, and names are unique ignoring letter case. Locations an asset
+// carries that are not in the list (older free-text values) are listed apart and can be added to it; nothing is changed on the assets.
+async function viewLocations() {
+  const st = { data: await api('GET', '/api/locations') };
+  const nAssets = (n) => `${n} asset${n === 1 ? '' : 's'}`;
+  const apply = (d) => { st.data = d; S.settings.locations = d.locations.map((l) => l.name); paint(); }; // the asset forms read the list from S.settings
+  const row = (l, i) => `<li class="item loc-row" data-i="${i}"><div class="grow"><div class="title">${esc(l.name)}</div>
+      <div class="sub">${l.count ? `Used by ${nAssets(l.count)}` : 'Not used by any asset'}</div></div>
+      <button type="button" class="btn sm" data-act="rename" aria-label="Rename ${esc(l.name)}">${icon('edit')} Rename</button>
+      <button type="button" class="btn sm danger" data-act="remove" aria-label="Remove ${esc(l.name)}"${l.count ? ` disabled title="Reassign ${l.count === 1 ? 'that asset' : 'those assets'} first"` : ''}>${icon('trash')} Remove</button></li>`;
+  const paint = () => {
+    const { locations, unlisted } = st.data;
+    $('#loclist').innerHTML = locations.length ? `<ul class="list">${locations.map(row).join('')}</ul>` : `<div class="empty">${icon('pin')}<p>No locations yet. Add the first one above.</p></div>`;
+    $('#locunl').innerHTML = unlisted.length ? `<div class="section-title">Used by assets, not in the list</div><div class="card"><p class="small muted" style="margin:12px 16px 0">These locations were typed on assets before the list was managed. They are kept as they are; add one to the list to manage it.</p>
+      <ul class="list">${unlisted.map((l, i) => `<li class="item" data-u="${i}"><div class="grow"><div class="title">${esc(l.name)}</div><div class="sub">Used by ${nAssets(l.count)}</div></div><button type="button" class="btn sm" data-act="adopt">${icon('plus')} Add to list</button></li>`).join('')}</ul></div>` : '';
+    $('#loclist').insertAdjacentHTML('beforeend', locations.some((l) => l.count) ? '<p class="small muted" style="margin:0;padding:10px 16px">A location that assets use can\'t be removed: reassign those assets first (edit an asset and change its Location).</p>' : '');
+  };
+  main().innerHTML = `<div id="locpage"><div id="backslot">${backLink('#/assets', 'All assets', true)}</div><div class="page-head"><h1>Locations</h1></div>
+    <p class="muted small" style="margin-top:-6px">The places an asset can be kept. Every asset's Location field suggests these. Renaming a location updates the assets that use it; a location with assets can't be removed.</p>
+    <form class="card pad" id="locadd" style="margin-bottom:12px"><label class="field"><span>Add a location</span><div class="input-group"><input name="name" maxlength="80" required autocomplete="off" placeholder="e.g. Warehouse - Dock 2"><button class="btn primary">${icon('plus')} Add</button></div></label></form>
+    <div class="card" id="loclist"></div><div id="locunl"></div></div>`;
+  paint();
+  $('#locadd').onsubmit = (e) => {
+    e.preventDefault();
+    const input = e.target.elements.name;
+    busy(e.target.querySelector('button'), async () => { apply(await api('POST', '/api/locations', { name: input.value })); input.value = ''; toast('Location added', false, 'ok'); });
+  };
+  $('#locpage').onclick = async (e) => {
+    const b = e.target.closest('[data-act]'); if (!b || b.disabled) return;
+    const li = b.closest('li');
+    if (b.dataset.act === 'adopt') { const l = st.data.unlisted[Number(li.dataset.u)]; return busy(b, async () => { apply(await api('POST', '/api/locations', { name: l.name })); toast('Added to the list', false, 'ok'); }); }
+    const l = st.data.locations[Number(li.dataset.i)];
+    if (b.dataset.act === 'remove') {
+      if (!(await confirmSheet(`Remove ${l.name}?`, 'No asset uses it. It will no longer be suggested on asset forms.', 'Remove', true))) return;
+      return busy(b, async () => { apply(await api('DELETE', '/api/locations', { name: l.name })); toast('Location removed', false, 'ok'); });
+    }
+    const { el, close } = sheet(`<h2>Rename location</h2><form id="rn" class="form-grid"><label class="field"><span>Name</span><input name="to" maxlength="80" required autocomplete="off" value="${esc(l.name)}"></label>
+      <p class="small muted" style="margin:0">${l.count ? `The ${nAssets(l.count)} using it will show the new name.` : 'No asset uses it yet.'}</p>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="rnok">Rename</button></div></form>`);
+    $('#rn', el).onsubmit = (ev) => { ev.preventDefault(); busy($('#rnok', el), async () => { apply(await api('PUT', '/api/locations', { from: l.name, to: new FormData(ev.target).get('to') })); close(); toast('Location renamed', false, 'ok'); }); };
+  };
+}
+
 // ============================================================ import / export
 function viewImport() {
   main().innerHTML = `<div class="page-head"><h1>Import &amp; export</h1></div><div class="stack">
@@ -3057,7 +3106,8 @@ async function viewSettings() {
       <div class="card pad stack">
         <div class="set-head"><div class="field"><span>Categories &amp; equipment types</span><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
           <a class="btn" href="#/assets?from=${encodeURIComponent('#/settings')}">${icon('tag')} Manage the equipment catalog</a></div>
-        <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="6">${esc(s.locations.join('\n'))}</textarea></label></div>
+        <div class="set-head"><div class="field"><span>Locations</span><span class="small muted">${s.locations.length} location${s.locations.length === 1 ? '' : 's'}, managed under All assets.</span></div>
+          <a class="btn" href="#/locations">${icon('pin')} Manage locations</a></div></div>
       <div class="card pad"><h2 style="margin-bottom:4px">IT email</h2>
         <p class="small muted" style="margin:0 0 12px">How emails from this app identify IT (for example waitlist notices). Passwords, app passwords and API keys are never entered here; they stay in the server's environment.</p>
         <div class="form-grid cols"><label class="field"><span>Display name</span><input name="it_email_name" maxlength="80" required value="${esc(s.it_email_name)}"></label>
@@ -3081,7 +3131,7 @@ async function viewSettings() {
     e.preventDefault();
     const fd = new FormData(e.target);
     const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'),
-      locations: fd.get('locations').split('\n'), it_email_name: fd.get('it_email_name'), it_contact_email: fd.get('it_contact_email') };
+      it_email_name: fd.get('it_email_name'), it_contact_email: fd.get('it_contact_email') };
     busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); route(true); });
   };
   $('#test').onclick = (e) => busy(e.currentTarget, async () => {
@@ -3100,6 +3150,9 @@ async function viewSettings() {
 // with the old All assets tools on top: one search box (assets by name, tag, serial, person, brand… and the catalog entries that match),
 // the status chips, Add asset, the label pages and the scanner. Every level lists its assets under the cards, filtered by the status.
 const ADMIN_STATUSES = [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']];
+// The Home 'Active assets' card links to ?status=active: a status the page filters by (everything not retired / lost / disposed) but the Filter menu
+// does not offer, so it is recognised here and by the source-trail parser (line ~574) from one list.
+const STATUS_CHIPS = [...ADMIN_STATUSES, ['active', 'Active']];
 async function viewAdminAssets() {
   const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1, listOpen: false };
   // The URL is the state: #/assets (all categories), #/assets?node=<id>, #/assets?node=<id>&all=1 ("All in <name>", a browsing view of
@@ -3126,7 +3179,7 @@ async function viewAdminAssets() {
       <div id="ct"><div class="spinner"></div></div>
     </div>
 `;
-  const statusLabel = () => (ADMIN_STATUSES.find(([v]) => v === st.status) || ['', ''])[1];
+  const statusLabel = () => (STATUS_CHIPS.find(([v]) => v === st.status) || ['', ''])[1];
   wireDropdowns($('.atools')); // Labels (static markup); Add and Filter are painted, and wired, as the page renders
   // The heading over a status-filtered list: "Overdue assets", "Checked out assets", "Assets in repair"…
   const filteredTitle = () => (st.status === 'maintenance' ? 'Assets in repair' : `${statusLabel()} assets`);
@@ -3269,7 +3322,7 @@ async function viewAdminAssets() {
     const p = qs(); const id = Number(p.get('node')); const prev = st.sel; const prevStatus = st.status;
     st.sel = byId(id) ? id : null;
     st.all = !!st.sel && p.get('all') === '1';
-    st.status = ADMIN_STATUSES.some(([v]) => v && v === p.get('status')) ? p.get('status') : '';
+    st.status = STATUS_CHIPS.some(([v]) => v && v === p.get('status')) ? p.get('status') : '';
     paintFilter();
     if ((p.get('node') && !st.sel) || (p.get('status') && !st.status)) history.replaceState(null, '', hashFor(st.sel, st.all)); // unknown/stale node or status: tidy the URL
     if (st.search && st.status !== prevStatus) runSearch();
