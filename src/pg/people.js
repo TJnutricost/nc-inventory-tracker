@@ -145,8 +145,8 @@ async function updatePerson(q, { id, name, workEmail, department, title, phone, 
 // PUT /api/users/:id/self-checkout: the per-employee self-checkout permission; never touches the employee's other fields.
 async function setSelfCheckout(q, id, enabled) { await q.query('UPDATE employees SET can_self_checkout = $1 WHERE id = $2', [enabled ? 1 : 0, toId(id)]); }
 
-// PUT /api/me (admins only; the route checks): an admin's own person details. A blank name keeps the stored one; the fields are cleaned
-// by the route.
+// PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the
+// fields are cleaned by the route.
 async function updateOwnProfile(q, employeeId, { name, phone, department, title }) {
   await q.query('UPDATE employees SET name = COALESCE($1, name), phone = $2, department = $3, title = $4 WHERE id = $5', [name, phone, department, title, toId(employeeId)]);
 }

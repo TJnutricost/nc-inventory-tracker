@@ -93,3 +93,11 @@ The owner chose self-registration for the company domain after the first staging
   person, so both end in the same login; a concurrent admin create with the same address is caught by the unique indexes (23505: refused,
   a retry signs in). Tested on both engines (differential) and under overlap.
 - Unchanged: the domain check, the limiter (refusals only), the session, the password login.
+
+### Additions 2026-10-27 (owner)
+- `GOOGLE_ADMIN_EMAILS` (comma-separated, trimmed, lower-cased): a listed company address is made an admin when it signs in with Google
+  (`accounts.makeAdmin`, both drivers; never demotes; logged `[google sign-in] made an admin by GOOGLE_ADMIN_EMAILS`). A refused sign-in
+  (no_access, wrong domain) is not promoted. This is how the first admin of an environment gets in without a password.
+- My profile: everyone edits their own name, department, job title and phone (`PUT /api/me` no longer admin-only; D-21 revised); email,
+  building, role and status stay IT's. A login without a password (Google, an unused invite) sees "Set a password" with no current-password
+  field (the route already skipped the check when there is no hash).

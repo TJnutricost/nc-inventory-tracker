@@ -8,7 +8,7 @@
 //
 // Off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are both set (the routes answer 404, the login screen shows no button).
 // GOOGLE_HOSTED_DOMAIN (default nutricost.com) is the only Workspace domain let in; the Internal consent screen already limits sign-in to
-// the organization, this is the app's own backstop.
+// the organization, this is the app's own backstop. GOOGLE_ADMIN_EMAILS (optional) names addresses that are made admins at sign-in.
 const crypto = require('crypto');
 
 // Google's endpoints. Tests point `token` at a local fake (test/google-sign-in.test.js); nothing else changes them.
@@ -30,7 +30,10 @@ function config(env = process.env) {
   const clientSecret = (env.GOOGLE_CLIENT_SECRET || '').trim();
   if (!clientId || !clientSecret) return null;
   const domain = (env.GOOGLE_HOSTED_DOMAIN || 'nutricost.com').trim().toLowerCase();
-  return { clientId, clientSecret, domain };
+  // GOOGLE_ADMIN_EMAILS: comma-separated addresses that become admins when they sign in with Google (how the first admin of a new
+  // environment gets in; IT gives admin to everyone else in People). Only the company domain counts, as for any sign-in.
+  const admins = new Set((env.GOOGLE_ADMIN_EMAILS || '').split(',').map((a) => a.trim().toLowerCase()).filter(Boolean));
+  return { clientId, clientSecret, domain, admins };
 }
 
 const random = () => crypto.randomBytes(32).toString('base64url');

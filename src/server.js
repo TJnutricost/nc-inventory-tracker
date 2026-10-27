@@ -222,9 +222,9 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   await data.accounts.setPassword(req.user.account_id, await bcrypt.hash(password, 10));
   res.json({ ok: true });
 }));
-// Employee profile details are read-only (IT maintains them in People); only admins can edit their own. Passwords are separate.
+// Everyone edits their own name, phone, department and job title (owner decision 2026-10-27; employees could not before). The email
+// (the login) and the building stay IT's, in People. Passwords are separate.
 app.put('/api/me', auth, async (req, res) => {
-  if (req.user.role !== 'admin') throw httpError(403, 'Your profile details are managed by IT. Ask IT to change them.');
   const { name, phone, department, title } = req.body;
   if (req.user.employee_id) {
     await data.people.updateOwnProfile(req.user.employee_id, { name: clean(name), phone: clean(phone), department: clean(department), title: clean(title) });
@@ -255,7 +255,8 @@ app.post('/api/reset', wrap(async (req, res) => {
 // Beside the password login, off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set. src/googleAuth.js talks to Google and checks
 // its answer (a verified address of the company domain). The account: an active employee's work email with an active login
 // (src/accounts.js googleAccount); on a first sign-in one is made, role 'employee' (provisionGoogleAccount; owner decision 2026-10-27),
-// unless IT turned that person or login off. A success signs in exactly as POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
+// unless IT turned that person or login off. An address in GOOGLE_ADMIN_EMAILS is made an admin. A success signs in exactly as
+// POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
 // so the CSRF header check does not apply; `state` (single use, kept in the session) and PKCE protect the round trip instead.
 const google = googleAuth.config();
 const GOOGLE_CALLBACK = `${APP_URL}/auth/google/callback`;
@@ -287,6 +288,7 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   const found = await data.accounts.googleAccount(who.email);
   const accountId = found ? found.id : await data.accounts.provisionGoogleAccount(who);
   if (!accountId) return refuse('no_access');
+  if (google.admins.has(who.email) && await data.accounts.makeAdmin(accountId)) console.log('[google sign-in] made an admin by GOOGLE_ADMIN_EMAILS:', who.email);
   loginAttempts.delete(key);
   await data.accounts.recordLogin(accountId);
   await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));

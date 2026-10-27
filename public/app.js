@@ -2849,27 +2849,25 @@ async function viewHistory() {
 
 function viewProfile() {
   const u = S.me;
-  const editable = isAdmin(); // employee profile details are read-only (IT maintains them); admins can edit their own
   const who = `<div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px;background:var(--brand-accent)">${esc(initials(u.name))}</div><div><strong>${esc(u.email)}</strong><div class="small muted">${u.role === 'admin' ? 'Administrator' : 'Employee'}</div></div></div>`;
-  const kv = (rows) => `<div class="kv">${rows.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v ? esc(v) : '<span class="muted">—</span>'}</div>`).join('')}</div>`;
-  const details = editable
-    ? `<form class="card pad form-grid" id="p">${who}
+  // Everyone edits their own name, department, job title and phone (PUT /api/me); the email and the building are IT's (People).
+  const details = `<form class="card pad form-grid" id="p">${who}
       <label class="field"><span>Name</span><input name="name" value="${esc(u.name)}" required></label>
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}"></label><label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
       ${u.building ? `<div class="small muted">Building: ${esc(u.building)}</div>` : ''}
-      <button class="btn primary" id="ps">Save</button></form>`
-    : `<div class="card"><div class="card-body">${who}</div>${kv([['Name', u.name], ['Email', u.email], ['Department', u.department], ['Job title', u.title], ['Phone', u.phone], ['Building', u.building]])}
-      <div class="card-body small muted" style="border-top:1px solid var(--line)">These details are managed by IT. Ask IT if anything needs changing.</div></div>`;
+      <div class="small muted">Your email${u.building ? ' and building' : ''} can only be changed by IT.</div>
+      <button class="btn primary" id="ps">Save</button></form>`;
   main().innerHTML = `<div class="page-head"><h1>My profile</h1></div><div class="stack">
     ${details}
-    <form class="card pad form-grid" id="pw"><h2>Change password</h2>
-      <label class="field"><span>Current password</span><input name="current" type="password" autocomplete="current-password" required></label>
+    <form class="card pad form-grid" id="pw"><h2>${u.has_password ? 'Change password' : 'Set a password'}</h2>
+      ${u.has_password ? '' : '<div class="small muted">Optional: you sign in with Google. A password also lets you sign in with your email.</div>'}
+      ${u.has_password ? '<label class="field"><span>Current password</span><input name="current" type="password" autocomplete="current-password" required></label>' : ''}
       <label class="field"><span>New password (8+ characters)</span><input name="password" type="password" minlength="8" autocomplete="new-password" required></label>
       <button class="btn" id="pws">Update password</button></form>
     <button class="btn block lg" id="out">${icon('logout')} Sign out</button></div>`;
-  if (editable) $('#p').onsubmit = (e) => { e.preventDefault(); busy($('#ps'), async () => { await api('PUT', '/api/me', Object.fromEntries(new FormData(e.target))); await loadMe(); mountShell(); setActive('profile'); toast('Saved'); route(true); }); };
-  $('#pw').onsubmit = (e) => { e.preventDefault(); busy($('#pws'), async () => { await api('POST', '/api/me/password', Object.fromEntries(new FormData(e.target))); e.target.reset(); toast('Password updated'); }); };
+  $('#p').onsubmit = (e) => { e.preventDefault(); busy($('#ps'), async () => { await api('PUT', '/api/me', Object.fromEntries(new FormData(e.target))); await loadMe(); mountShell(); setActive('profile'); toast('Saved'); route(true); }); };
+  $('#pw').onsubmit = (e) => { e.preventDefault(); busy($('#pws'), async () => { await api('POST', '/api/me/password', Object.fromEntries(new FormData(e.target))); e.target.reset(); toast(u.has_password ? 'Password updated' : 'Password set'); await loadMe(); route(true); }); };
   $('#out').onclick = logout;
 }
 

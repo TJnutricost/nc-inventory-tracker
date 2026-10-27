@@ -68,7 +68,7 @@ function updatePerson(db, { id, name, workEmail, department, title, phone, build
 // PUT /api/users/:id/self-checkout: the per-employee self-checkout permission; never touches the employee's other fields.
 function setSelfCheckout(db, id, enabled) { db.prepare('UPDATE employees SET can_self_checkout = ? WHERE id = ?').run(enabled ? 1 : 0, id); }
 
-// PUT /api/me (admins only; the route checks): an admin's own person details. A blank name keeps the stored one; the fields are cleaned
+// PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the fields are cleaned
 // by the route.
 function updateOwnProfile(db, employeeId, { name, phone, department, title }) {
   db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
