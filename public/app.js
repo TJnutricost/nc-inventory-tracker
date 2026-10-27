@@ -1029,7 +1029,7 @@ async function viewAsset(id) {
   const reload = () => route(true);
   const phIn = $('#ph-in');
   if (phIn) phIn.onchange = () => { const files = Array.from(phIn.files); phIn.value = ''; uploadPhotos(a.id, files).then(reload); };
-  $$('[data-ph]').forEach((el) => el.onclick = () => lightbox(d.photos.find((p) => p.id === Number(el.dataset.ph)), a, reload));
+  $$('[data-ph]').forEach((el) => el.onclick = () => lightbox(photos, Math.max(0, photos.findIndex((p) => p.id === Number(el.dataset.ph))), a, reload)); // (photos: the gallery's order, cover first)
   const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
   on('#ph-cam', () => openPhotoCapture({ onDone: (files) => uploadPhotos(a.id, files).then(reload) }));
   on('#act-out', () => checkoutSheet(a, reload));
@@ -1150,17 +1150,114 @@ function openPhotoCapture({ title = 'Take photos', max = 10, onDone }) {
   return handle;
 }
 
-function lightbox(p, asset, reload) {
+// Fullscreen photo viewer: a gallery over the asset's photos in the order the asset page shows them (cover first), opened on the photo
+// that was tapped. Mobile: swipe left for the next photo and right for the previous one (the picture follows the finger). Desktop: Previous / Next
+// arrows and the arrow keys; Esc closes. No wrap-around: the unavailable direction is hidden. Only the photo on screen is loaded at full
+// size (plus its two neighbours once it has shown); every other slide waits empty, so opening the viewer downloads one full photo.
+function lightbox(allPhotos, startIndex, asset, reload) {
+  let photos = allPhotos.slice();
+  let i = Math.min(Math.max(startIndex, 0), photos.length - 1);
   const el = document.createElement('div');
   el.className = 'lightbox';
-  el.innerHTML = `<img src="/uploads/${esc(p.filename)}" alt=""><div class="lb-bar">
-    ${isAdmin() ? `<button class="iconbtn" id="lb-cover" title="Make cover photo">${icon('star')}</button><button class="iconbtn" id="lb-del" title="Delete photo">${icon('trash')}</button>` : ''}
-    <button class="iconbtn" id="lb-x" title="Close">${icon('x')}</button></div>`;
+  el.setAttribute('role', 'dialog'); el.setAttribute('aria-label', 'Photo viewer');
+  el.innerHTML = `<div class="lb-stage"><div class="lb-track"></div></div>
+    <div class="lb-count" aria-live="polite"></div>
+    <button class="lb-nav lb-prev" id="lb-prev" aria-label="Previous photo">${icon('chev')}</button><button class="lb-nav lb-next" id="lb-next" aria-label="Next photo">${icon('chev')}</button>
+    <div class="lb-bar">
+    ${isAdmin() ? `<button class="iconbtn" id="lb-cover" title="Make cover photo" aria-label="Make cover photo">${icon('star')}</button><button class="iconbtn" id="lb-del" title="Delete photo" aria-label="Delete photo">${icon('trash')}</button>` : ''}
+    <button class="iconbtn" id="lb-x" title="Close" aria-label="Close">${icon('x')}</button></div>`;
   document.body.appendChild(el);
-  const close = () => el.remove();
-  el.onclick = (e) => { if (e.target === el || e.target.closest('#lb-x')) close(); };
-  const c = $('#lb-cover', el); if (c) c.onclick = async () => { await api('PUT', `/api/assets/${asset.id}/cover`, { photo_id: p.id }).catch(fail); close(); toast('Cover photo set'); reload(); };
-  const d = $('#lb-del', el); if (d) d.onclick = async () => { close(); if (await confirmSheet('Delete photo?', 'This cannot be undone.', 'Delete', true)) { await api('DELETE', `/api/photos/${p.id}`).catch(fail); reload(); } };
+  document.body.style.overflow = 'hidden';
+  const stage = $('.lb-stage', el); const track = $('.lb-track', el);
+  let width = stage.clientWidth || window.innerWidth; let drag = null; let dragged = false; let closed = false;
+
+  const build = () => {
+    track.innerHTML = photos.map((p, n) => `<div class="lb-slide" data-n="${n}"><div class="lb-load"><div class="spinner"></div></div></div>`).join('');
+  };
+  // A slide gets its full-size image only when it is the current photo or next to it.
+  const fill = (n) => {
+    const slide = track.children[n]; if (!slide || slide.dataset.loaded) return;
+    slide.dataset.loaded = '1';
+    const img = new Image(); img.alt = `Photo ${n + 1} of ${photos.length}`; img.draggable = false;
+    img.onload = () => { slide.replaceChildren(img); if (n === i) { fill(n - 1); fill(n + 1); } };
+    img.onerror = () => { slide.innerHTML = '<div class="lb-load small">This photo could not be loaded.</div>'; };
+    img.src = '/uploads/' + photos[n].filename;
+  };
+  const place = (offset = 0, animate = false) => {
+    track.style.transition = animate ? 'transform .28s cubic-bezier(.2,.8,.2,1)' : 'none';
+    track.style.transform = `translate3d(${-i * width + offset}px,0,0)`;
+  };
+  const render = (animate = true) => {
+    place(0, animate);
+    $('.lb-count', el).textContent = photos.length > 1 ? `${i + 1} of ${photos.length}` : '';
+    $('#lb-prev', el).hidden = i === 0 || photos.length < 2; $('#lb-next', el).hidden = i === photos.length - 1 || photos.length < 2;
+    fill(i); if (track.children[i] && track.children[i].querySelector('img')) { fill(i - 1); fill(i + 1); }
+  };
+  const go = (to) => { if (to < 0 || to > photos.length - 1 || to === i) return; i = to; render(true); };
+
+  const close = () => {
+    if (closed) return; closed = true;
+    document.removeEventListener('keydown', onKey); window.removeEventListener('hashchange', onRoute); window.removeEventListener('resize', onResize);
+    el.remove(); if (!$('.scanner') && !$('.pcap') && !$('#sheet-root').children.length) document.body.style.overflow = '';
+  };
+  const route0 = location.hash.split('?')[0];
+  const onRoute = () => { if (location.hash.split('?')[0] !== route0) close(); };
+  const onKey = (e) => {
+    if (el.style.display === 'none') return;
+    if (e.key === 'Escape') close(); else if (e.key === 'ArrowLeft') go(i - 1); else if (e.key === 'ArrowRight') go(i + 1);
+  };
+  const onResize = () => { width = stage.clientWidth || window.innerWidth; place(0, false); };
+
+  // Swipe: horizontal drags move the track with the finger (resisting past the first / last photo); release decides. Vertical drags and pinch
+  // are left to the browser (touch-action), and a swipe never counts as a tap on the backdrop.
+  stage.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse' && e.button !== 0) return; drag = { x: e.clientX, y: e.clientY, t: Date.now(), id: e.pointerId, on: false }; dragged = false; });
+  stage.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.x; const dy = e.clientY - drag.y;
+    if (!drag.on) {
+      if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy)) return;
+      drag.on = true; dragged = true; try { stage.setPointerCapture(e.pointerId); } catch { /* */ }
+    }
+    const atEdge = (dx > 0 && i === 0) || (dx < 0 && i === photos.length - 1);
+    place(atEdge ? dx / 4 : dx, false);
+  });
+  const endDrag = (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const d = drag; drag = null;
+    if (!d.on) return;
+    const dx = e.clientX - d.x; const dt = Math.max(1, Date.now() - d.t);
+    const far = Math.abs(dx) > width * 0.2; const quick = Math.abs(dx) > 30 && Math.abs(dx) / dt > 0.45;
+    if ((far || quick) && e.type === 'pointerup') go(dx < 0 ? i + 1 : i - 1); else place(0, true);
+    setTimeout(() => { dragged = false; }, 0);
+  };
+  stage.addEventListener('pointerup', endDrag); stage.addEventListener('pointercancel', endDrag);
+
+  el.onclick = (e) => {
+    if (dragged) return;
+    if (e.target.closest('#lb-x') || e.target === el || e.target === stage || e.target.classList.contains('lb-slide')) close();
+  };
+  $('#lb-prev', el).onclick = (e) => { e.stopPropagation(); go(i - 1); };
+  $('#lb-next', el).onclick = (e) => { e.stopPropagation(); go(i + 1); };
+  const c = $('#lb-cover', el);
+  if (c) c.onclick = async () => { const p = photos[i]; await api('PUT', `/api/assets/${asset.id}/cover`, { photo_id: p.id }).catch(fail); close(); toast('Cover photo set'); reload(); };
+  const d = $('#lb-del', el);
+  if (d) d.onclick = async () => {
+    const p = photos[i];
+    el.style.display = 'none'; // the confirmation sheet sits below the viewer: step aside while it is open
+    const yes = await confirmSheet('Delete photo?', 'This cannot be undone.', 'Delete', true);
+    if (closed) return;
+    document.body.style.overflow = 'hidden'; el.style.display = '';
+    if (!yes) return;
+    try { await api('DELETE', `/api/photos/${p.id}`); } catch (e) { return fail(e); }
+    photos = photos.filter((x) => x.id !== p.id);
+    if (!photos.length) { close(); reload(); return; }
+    i = Math.min(i, photos.length - 1); // the next photo takes its place (the previous one when the last was deleted)
+    build(); render(false); reload(); // the page behind is refreshed; the viewer stays on the photos that are left
+  };
+
+  document.addEventListener('keydown', onKey); window.addEventListener('hashchange', onRoute); window.addEventListener('resize', onResize);
+  build(); render(false);
+  $('#lb-x', el).focus({ preventScroll: true });
 }
 
 // ============================================================ action sheets
@@ -2888,7 +2985,7 @@ async function viewAdminAssets() {
       <label class="check"><input type="checkbox" id="showarch"><span>Show archived catalog entries</span></label>
       <div id="ct"><div class="spinner"></div></div>
     </div>
-    <a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>`;
+`;
   const statusLabel = () => (ADMIN_STATUSES.find(([v]) => v === st.status) || ['', ''])[1];
   const markChips = () => $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c.dataset.v === st.status));
   // Lists show PAGE assets at a time (owner, 2026-10-27); the page resets whenever the entry, the status chip or the search changes.
@@ -2919,7 +3016,7 @@ async function viewAdminAssets() {
   // person, brand… within the status chip) and the matching catalog entries, each with its full path; empty = the grid, unchanged.
   const renderFound = () => {
     const f = st.found;
-    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>`;
+    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a><a href="#/new" class="btn primary mob-only">${icon('plus')} Add</a>`;
     if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
     const assets = f.assets.length
       ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
@@ -2976,7 +3073,7 @@ async function viewAdminAssets() {
     $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n ? byId(n.parent_id) : null;
     $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : autoBack();
-    $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
+    $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}<a href="#/new" class="btn primary mob-only">${icon('plus')} Add</a>${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
     $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
       ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
