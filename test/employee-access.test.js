@@ -422,7 +422,7 @@ test('self-checkout of available equipment still works', async () => {
 });
 
 // ---------------------------------------------------------------- profile + building
-test('/api/me carries Building (null when unset); an employee edits their own name, department, title and phone, not the building or email', async () => {
+test('/api/me carries Building (null when unset); an employee edits their own name, department, title, phone and building, not the email or role', async () => {
   const withB = await makeLogin('Profile Bldg', { building: 'Building 4', department: 'Sales', title: 'Rep', phone: '555-0100' });
   const without = await makeLogin('Profile No Bldg');
   const me = (await withB.client.get('/api/me')).body.user;
@@ -435,23 +435,26 @@ test('/api/me carries Building (null when unset); an employee edits their own na
   const edit = await withB.client.put('/api/me', { name: ' Renamed Self ', department: 'IT', title: 'Boss', phone: '1', building: 'Building 9', email: 'other@nutricost.com', role: 'admin' });
   assert.equal(edit.status, 200);
   assert.deepEqual(db.prepare('SELECT name, department, title, phone, building, work_email FROM employees WHERE id = ?').get(withB.id),
-    { name: 'Renamed Self', department: 'IT', title: 'Boss', phone: '1', building: 'Building 4', work_email: before_.work_email }, 'building and email are IT\'s');
+    { name: 'Renamed Self', department: 'IT', title: 'Boss', phone: '1', building: 'Building 9', work_email: before_.work_email }, 'the email is IT\'s');
   assert.equal((await withB.client.get('/api/me')).body.user.role, 'employee', 'the role cannot be changed here');
   assert.equal((await withB.client.put('/api/me', { name: '', phone: '' })).status, 200);
-  assert.equal(db.prepare('SELECT name FROM employees WHERE id = ?').get(withB.id).name, 'Renamed Self', 'a blank name keeps the stored one');
+  assert.deepEqual(db.prepare('SELECT name, building FROM employees WHERE id = ?').get(withB.id), { name: 'Renamed Self', building: 'Building 9' },
+    'a blank name keeps the stored one; a building not sent is kept');
+  assert.equal((await withB.client.put('/api/me', { name: 'Renamed Self', building: ' ' })).status, 200);
+  assert.equal(db.prepare('SELECT building FROM employees WHERE id = ?').get(withB.id).building, null, 'a blank building clears it');
   assert.equal((await admin.put('/api/me', { name: 'Ada Admin', department: 'IT' })).status, 200, 'an admin can still edit their own');
   // an employee can still change their own password
   assert.equal((await withB.client.post('/api/me/password', { current: 'employee-password-1', password: 'another-password-2' })).status, 200);
   assert.equal((await withB.client.get('/api/me')).status, 200);
 });
 
-test('front end: everyone gets the profile edit form; Building is shown read-only; a login without a password sets one', () => {
+test('front end: everyone gets the profile edit form (building included, not the email); a login without a password sets one', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const view = src.slice(src.indexOf('function viewProfile()'), src.indexOf('// ============================================================ boot'));
   assert.doesNotMatch(view, /isAdmin\(\)/, 'the same edit form for everyone');
   assert.match(view, /\$\('#p'\)\.onsubmit = /, 'the form submits to PUT /api/me');
-  assert.match(view, /Building: \$\{esc\(u\.building\)\}/, 'the building is shown, not editable');
-  assert.doesNotMatch(view, /name="building"|name="email"/);
+  assert.match(view, /name="building" value="\$\{esc\(u\.building \|\| ''\)\}"/, 'the building is editable');
+  assert.doesNotMatch(view, /name="email"/, 'the email is not');
   assert.match(view, /u\.has_password \? 'Change password' : 'Set a password'/);
   assert.match(view, /id="out"/, 'sign out is kept');
   assert.match(src, /id="signout"/, 'avatar menu sign out is kept');

@@ -2850,13 +2850,13 @@ async function viewHistory() {
 function viewProfile() {
   const u = S.me;
   const who = `<div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px;background:var(--brand-accent)">${esc(initials(u.name))}</div><div><strong>${esc(u.email)}</strong><div class="small muted">${u.role === 'admin' ? 'Administrator' : 'Employee'}</div></div></div>`;
-  // Everyone edits their own name, department, job title and phone (PUT /api/me); the email and the building are IT's (People).
+  // Everyone edits their own name, department, job title, phone and building (PUT /api/me); the email is IT's (People).
   const details = `<form class="card pad form-grid" id="p">${who}
       <label class="field"><span>Name</span><input name="name" value="${esc(u.name)}" required></label>
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}"></label><label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
-      ${u.building ? `<div class="small muted">Building: ${esc(u.building)}</div>` : ''}
-      <div class="small muted">Your email${u.building ? ' and building' : ''} can only be changed by IT.</div>
+      <label class="field"><span>Building <span class="muted">(optional)</span></span><input name="building" value="${esc(u.building || '')}" autocomplete="off"></label>
+      <div class="small muted">Your email can only be changed by IT.</div>
       <button class="btn primary" id="ps">Save</button></form>`;
   main().innerHTML = `<div class="page-head"><h1>My profile</h1></div><div class="stack">
     ${details}
