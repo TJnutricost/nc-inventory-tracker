@@ -1,14 +1,20 @@
 // PostgreSQL Slice 6C: restores a scripts/pg-backup.js file into an EMPTY PostgreSQL database
 // (docs/briefs/postgresql-slice-6-data-migration.md).
 //   DATABASE_URL=<local url> node scripts/pg-restore.js <in.dump>
-// Local PostgreSQL only for now (src/pg/local-url.js). Exit code 0 = restored, 1 = refused or failed, 2 = usage error.
+//   DATABASE_URL=<tunnel url> node scripts/pg-restore.js <in.dump> --staging-tunnel --confirm-target <host:port/db> [--execute]
+// Local dev database by default; the Railway staging tunnel needs --staging-tunnel and the exact target (src/pg/target.js).
+// A staging restore is a DRY RUN (the dump is read back, the target is looked at read-only) unless --execute is given, and
+// --execute makes the operator type a confirmation phrase in an interactive terminal.
+// Exit code 0 = restored (or a clean dry run), 1 = refused or failed, 2 = usage error.
 //   - Refuses a target that already has any table: a restore never merges into or overwrites data.
 //   - pg_restore --single-transaction --exit-on-error: any error leaves the target as empty as it was.
 //   - Afterwards the PostgreSQL migrations must have nothing left to apply (the backup carries schema_migrations).
 const fs = require('fs');
 const { createPool } = require('../src/pg/pool');
 const { runMigrations } = require('../src/pg/migrate');
-const { pgTool, run, listDump, targetUrl } = require('./pg-backup');
+const { pgTool, run, listDump } = require('./pg-backup');
+const { parseToolArgs, resolveTarget, assertStagingServer, confirmWrite, redact } = require('../src/pg/target');
+const { resolveDatabaseUrl } = require('../src/pg/pool');
 
 async function assertEmptyTarget(pool) {
   const { rows } = await pool.query(`SELECT table_name FROM information_schema.tables
@@ -41,27 +47,86 @@ async function restore(file, databaseUrl) {
   }
 }
 
-async function main(argv, env = process.env) {
-  if (argv.length !== 1) {
-    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-restore.js <in.dump>');
-    return 2;
+// Staging dry run: the dump must be readable and the target must hold no table; reads only, nothing is restored.
+async function dryRun(file, databaseUrl) {
+  const entries = await listDump(file, databaseUrl);
+  const pool = createPool(databaseUrl);
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN READ ONLY');
+      const { rows } = await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema() ORDER BY table_name`);
+      return { entries: entries.length, existing: rows.map((r) => r.table_name) };
+    } finally {
+      await client.query('ROLLBACK').catch(() => {});
+      client.release();
+    }
+  } finally {
+    await pool.end();
   }
-  if (!fs.existsSync(argv[0])) {
-    console.error(`pg-restore: no such file: ${argv[0]}`);
-    return 1;
-  }
-  const { tables } = await restore(argv[0], targetUrl(env, 'pg-restore'));
-  console.log(`Restore OK: ${tables.length} tables (${tables.join(', ')}).`);
-  return 0;
 }
 
-module.exports = { restore, main };
+async function main(argv, env = process.env, io = {}) {
+  let opts;
+  try {
+    opts = parseToolArgs(argv);
+  } catch (err) {
+    console.error(`pg-restore: ${err.message}`);
+    return 2;
+  }
+  if (opts.positional.length !== 1) {
+    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-restore.js <in.dump> [--staging-tunnel --confirm-target <host:port/db> [--execute]]');
+    return 2;
+  }
+  const file = opts.positional[0];
+  if (!fs.existsSync(file)) {
+    console.error(`pg-restore: no such file: ${file}`);
+    return 1;
+  }
+  const url = env.DATABASE_URL || resolveDatabaseUrl(env);
+  let target;
+  try {
+    target = resolveTarget(url, opts, { write: true, who: 'pg-restore' });
+  } catch (err) {
+    console.error(redact(err.message, url));
+    return 1;
+  }
+  try {
+    if (target.mode === 'staging') {
+      const pool = createPool(url);
+      try {
+        const server = await assertStagingServer(pool, target);
+        console.log(`Connected to ${target.label} as ${server.role} (PostgreSQL ${server.major}).`);
+      } finally {
+        await pool.end();
+      }
+      const look = await dryRun(file, url);
+      if (look.existing.length) {
+        console.error(`pg-restore refuses: the target database is not empty (tables: ${look.existing.join(', ')}). Nothing was changed.`);
+        return 1;
+      }
+      if (target.dryRun) {
+        console.log(`DRY RUN against ${target.label}: nothing was written.\nThe dump is readable (${look.entries} entries) and the target is empty.\nTo restore, repeat the command with --execute (an interactive confirmation follows).`);
+        return 0;
+      }
+      await confirmWrite(target, `About to RESTORE ${file} into the EMPTY Railway staging database.`, io);
+    }
+    const { tables } = await restore(file, url);
+    console.log(`Restore OK: ${tables.length} tables (${tables.join(', ')}).`);
+    return 0;
+  } catch (err) {
+    console.error(`pg-restore failed: ${redact(err.message, url)}`);
+    return 1;
+  }
+}
+
+module.exports = { restore, main, dryRun };
 
 if (require.main === module) {
   main(process.argv.slice(2))
     .then((code) => { process.exitCode = code; })
     .catch((err) => {
-      console.error(`pg-restore failed: ${err.message}`);
+      console.error(`pg-restore failed: ${redact(err.message, process.env.DATABASE_URL)}`);
       process.exitCode = 1;
     });
 }

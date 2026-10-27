@@ -1,7 +1,9 @@
 // PostgreSQL Slice 6C: backs up a PostgreSQL database to one file with pg_dump (custom format, compressed), proven to
 // restore by scripts/pg-restore.js (docs/briefs/postgresql-slice-6-data-migration.md).
 //   DATABASE_URL=<local url> node scripts/pg-backup.js <out.dump>
-// Local PostgreSQL only for now (src/pg/local-url.js): backing up Railway is a Slice 7 decision.
+//   DATABASE_URL=<tunnel url> node scripts/pg-backup.js <out.dump> --staging-tunnel --confirm-target <host:port/db>
+// Local dev database by default; the Railway staging tunnel needs --staging-tunnel and the exact target (src/pg/target.js).
+// A backup only reads the database (pg_dump); the dump is written to a NEW local file.
 // Exit code 0 = written and readable, 1 = failed (no file is left behind), 2 = usage error.
 //   - pg_dump must be major version 18 (the server's). A local `pg_dump` 18 on PATH (or in $PG_BIN) is used; otherwise
 //     the `postgres:18` Docker image runs it, reaching a local server through host.docker.internal.
@@ -11,8 +13,8 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, spawnSync } = require('child_process');
-const { resolveDatabaseUrl } = require('../src/pg/pool');
-const { isLocalDatabaseUrl } = require('../src/pg/local-url');
+const { createPool, resolveDatabaseUrl } = require('../src/pg/pool');
+const { parseToolArgs, resolveTarget, assertStagingServer, redact } = require('../src/pg/target');
 
 const PG_MAJOR = 18;
 const DOCKER_IMAGE = `postgres:${PG_MAJOR}`;
@@ -94,33 +96,62 @@ async function backup(databaseUrl, file) {
   }
 }
 
+// The URL a tool may use (local dev database only: no staging flags). Kept for callers that never touch staging.
 function targetUrl(env, who) {
-  const url = env.DATABASE_URL || resolveDatabaseUrl(env);
-  if (!isLocalDatabaseUrl(url)) throw new Error(`${who} refuses to connect: DATABASE_URL host is not localhost, 127.0.0.1 or ::1 (Railway is Slice 7).`);
-  return url;
+  return resolveTarget(env.DATABASE_URL || resolveDatabaseUrl(env), {}, { write: false, who }).url;
 }
 
 async function main(argv, env = process.env) {
-  if (argv.length !== 1) {
-    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-backup.js <out.dump>');
+  let opts;
+  try {
+    opts = parseToolArgs(argv);
+  } catch (err) {
+    console.error(`pg-backup: ${err.message}`);
     return 2;
   }
-  if (fs.existsSync(argv[0])) {
-    console.error(`pg-backup: ${argv[0]} already exists; choose a new file name.`);
+  if (opts.positional.length !== 1) {
+    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-backup.js <out.dump> [--staging-tunnel --confirm-target <host:port/db>]');
+    return 2;
+  }
+  const out = opts.positional[0];
+  if (fs.existsSync(out)) {
+    console.error(`pg-backup: ${out} already exists; choose a new file name.`);
     return 1;
   }
-  const { file, bytes, tables } = await backup(targetUrl(env, 'pg-backup'), argv[0]);
-  console.log(`Backup OK: ${file} (${bytes} bytes, ${tables} tables with data).`);
-  return 0;
+  const url = env.DATABASE_URL || resolveDatabaseUrl(env);
+  let target;
+  try {
+    target = resolveTarget(url, opts, { write: false, who: 'pg-backup' });
+  } catch (err) {
+    console.error(redact(err.message, url));
+    return 1;
+  }
+  try {
+    if (target.mode === 'staging') {
+      const pool = createPool(url);
+      try {
+        const server = await assertStagingServer(pool, target);
+        console.log(`Connected to ${target.label} as ${server.role} (PostgreSQL ${server.major}), read-only (pg_dump).`);
+      } finally {
+        await pool.end();
+      }
+    }
+    const { file, bytes, tables } = await backup(url, out);
+    console.log(`Backup OK: ${file} (${bytes} bytes, ${tables} tables with data).`);
+    return 0;
+  } catch (err) {
+    console.error(`pg-backup failed: ${redact(err.message, url)}`);
+    return 1;
+  }
 }
 
-module.exports = { backup, listDump, pgTool, run, targetUrl, PG_MAJOR };
+module.exports = { backup, listDump, pgTool, run, targetUrl, main, PG_MAJOR };
 
 if (require.main === module) {
   main(process.argv.slice(2))
     .then((code) => { process.exitCode = code; })
     .catch((err) => {
-      console.error(`pg-backup failed: ${err.message}`);
+      console.error(`pg-backup failed: ${redact(err.message, process.env.DATABASE_URL)}`);
       process.exitCode = 1;
     });
 }

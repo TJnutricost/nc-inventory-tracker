@@ -46,7 +46,7 @@ The Volume is the only copy of staging's data and photos. The default is **no wr
 ### 0. Preconditions (all must be true; record each)
 
 1. `integration/postgresql` HEAD is verified on GitHub and the working tree it is built from is clean; teammate work is preserved.
-2. The suite is green on that HEAD with the Node-22.23-safe command (`node --test 'test/**/*.test.js'`; `npm test` does not start on Node 22.23, see PROJECT_STATUS Technical Debt), SQLite and with local PostgreSQL (`npm run db:up`): the PR #51 result was 949 passed, 0 failed, 1 cancelled on Node 22.23 with local PostgreSQL running, using `node --test 'test/**/*.test.js'` (the cancelled one is the known `harness.test.js` item).
+2. The suite is green on that HEAD (`npm test`, `npm run test:pg`, `npm run test:pg-suite`; since Slice 7B they work on Node 22 and 20.12+ through `test-support/run-tests.js`; the older `node --test test/` form did not start on Node 22.23), SQLite and with local PostgreSQL (`npm run db:up`): the PR #51 result was 949 passed, 0 failed, 1 cancelled on Node 22.23 with local PostgreSQL running, using `node --test 'test/**/*.test.js'` (the cancelled one is the known `harness.test.js` item).
 3. `stage` is compared with `integration/postgresql` for hotfixes since the branch point; any hotfix is ported and verified first (D-48 point 9).
 4. Staging mail is fail-closed (`NC_NO_EXTERNAL_MAIL` or `MAIL_TEST_RECIPIENT`) for the rehearsal, the cutover and QA; confirmed from variable names and, with the owner, values.
 5. The owner has said whether staging data may be lost on rollback (decision D3).
@@ -84,8 +84,8 @@ SQLite runs in WAL mode: a plain copy of `assets.db` can miss committed data tha
 ### 5. Target validation and data migration (after G5)
 
 1. Freeze staging writes (step 2) and take the **final** snapshot; preflight it (clean or stop).
-2. Validate the target: Postgres 18, empty, reachable by the chosen connection strategy (decision D1). Confirm the app's pool settings and SSL handling for the Railway connection **before** this step; this has not been checked and is a decision input (D1).
-3. Run the copy with the tooling approved at G1. The Slice 6 tools refuse a non-local target, so this needs the tooling PR (7B) first. Require the copy's built-in verify to report 0 differences, `sessions` empty and every sequence past max(id).
+2. Validate the target: Postgres 18, empty, reachable through the approved tunnel (D1, below). The tools check the server's database, role and major version themselves. Whether the app's own pool needs SSL for the Railway URL has **not** been checked (the tools' tunnel connection uses no query parameters) and is verified at G5 before the driver switch.
+3. Run the copy with the 7B tooling (see "Tunnel procedure"): first the DRY RUN, then, only with a fresh owner "go" at execution time, `--execute`. Require the copy's built-in verify to report 0 differences, `sessions` empty and every sequence past max(id).
 4. Take `pg-backup` of the migrated Railway database, restore it into a **new, empty scratch database** (never over the live one), `pg-verify` the restored copy against the final snapshot and boot the app on it. This is the tested restore D-46 requires; if it fails, stop.
 
 ### 6. Deployment and environment controls (after G5)
@@ -122,6 +122,18 @@ Record pass or fail with the time. Use only staging accounts; no real email leav
 - **Cost:** anything written to PostgreSQL after the cutover is **not carried back** to the SQLite service (no reverse copy is planned). Whether that loss is acceptable is the open owner decision D3, answered before G5. The PostgreSQL database and the dumps are left in place for diagnosis.
 - **Rollback of a bad restore test:** drop the scratch database only; never the live one.
 
+## Tunnel procedure (D1, tooling built in Slice 7B)
+
+The Railway CLI's SSH tunnel makes the staging database answer on a **loopback** port of the owner's Mac. A host check alone would call it "local", so the tools do not rely on the host:
+
+- **Default (no flag): local Docker only.** Loopback host AND the dev-only role `nc_dev`. A tunnelled URL (a different role) is refused with a message naming the flag.
+- **`--staging-tunnel --confirm-target <host:port/database>`** (the exact target the tunnel exposes, read from the URL, never credentials). Refused before any connection when: the host is not loopback (a direct remote host is never allowed), the URL has query parameters, the role is `nc_dev`, the database is `nc_assets_dev` or `nc_test_*`, or the confirmation is missing or differs. After connecting it checks the server's `current_database()`, that the role is not the dev role and that the server is PostgreSQL 18.
+- **Writes (`pg-copy`, `pg-restore`) are a dry run by default:** preflight, row counts, the target's state, the dump's readability; **nothing is written, not even the baseline migration.** Writing needs `--execute` AND an interactive terminal where the operator types `WRITE STAGING <host:port/database>`. A script, a pipe or an agent cannot supply it, which is the separate approval at execution time.
+- **Reads (`pg-verify`, `pg-backup`)** need the flag and the confirmation, not `--execute`; `pg-backup` writes only a new local file.
+- **Credentials** stay in `DATABASE_URL` in the operator's shell (not in files, not on a command line, not in chat). Output and errors show `host:port/database` only; the password is redacted from error text.
+
+Order at execution (each step after its gate): start the tunnel (G2 read access, G5 for the write window) → `pg-copy <snapshot> --staging-tunnel --confirm-target …` (dry run, review) → `pg-copy … --execute` (type the phrase) → `pg-verify` → `pg-backup` → `pg-restore` into a **new empty** database to prove the restore → stop the tunnel. Nothing here changes Railway settings, deployments or the public network.
+
 ## Stop conditions
 
 Stop, change nothing further and report if any of these happens. Resume only through the gate named.
@@ -145,13 +157,13 @@ Stop, change nothing further and report if any of these happens. Resume only thr
 
 | # | Decision | Options / recommendation |
 |---|---|---|
-| **D1** | **PostgreSQL connection strategy** for running the copy, backup, restore and verify against Railway, and for the app's own connection. **Unresolved.** | (a) A small tooling PR (7B) adding an explicit, loud opt-in for a non-local host, with SSL handling, run from a workstation over a short-lived Railway TCP proxy (a Railway change that opens a public endpoint; needs G5 and removal after). (b) Run inside Railway: needs `scripts/` and `pg_dump` 18 in the image (a Dockerfile change) and a Railway shell. (c) Rehearse locally and restore a dump into Railway, which still needs a remote-capable restore. Also decide the app's private-network URL and SSL option. |
+| **D1** | **PostgreSQL connection strategy.** **APPROVED 2026-10-27: the Railway CLI's SSH tunnel** (`railway connect --tunnel-only`) from the owner's Mac. No public TCP proxy, no Dockerfile change. Built in Slice 7B (see "Tunnel procedure"). | Still open inside it: the app's own connection (the private-network URL, and SSL if the app's pool needs it), and what the tunnel prints (port, credentials source), both known only when Railway is accessed after G2. |
 | **D2** | Deployment branch strategy. **Undecided.** | Repoint the staging service's branch, a second service (photo copy needed), or another approach; no recommendation recorded. |
 | **D3** | May data written to PostgreSQL after the cutover be lost on rollback? **Open owner decision.** | No recommendation recorded. The owner decides, and records the answer in writing before G5; no cutover without it. |
 | **D4** | Who runs each step and with what Railway permissions | Needed at G2 and G3. |
 | **D5** | Where the snapshot and dumps are kept, and for how long | Owner's choice of off-Railway location. |
 | **D6** | The cutover window and whether staging users are told | Owner's choice. |
 | **D7** | How the snapshot script runs against the Volume (the image has no `scripts/`) | A Railway shell with the script piped in, or a tooling change. Needs G2/G3. |
-| **D8** | Fix `npm test` on Node 22.23 and the cancelled harness test before Slice 7B+ relies on them | Recommended: a small separate PR before the cutover. |
+| **D8** | Fix `npm test` on Node 22.23 and the cancelled harness test before the cutover relies on them | **Done in Slice 7B** (built, awaiting review): 950 passed, 0 cancelled on Node 22.14 with local PostgreSQL. |
 
 Outside Slice 7: SQLite and seam removal and seeds on PostgreSQL (own slice, after Slice 7, G7); production; object storage; authentication hardening.

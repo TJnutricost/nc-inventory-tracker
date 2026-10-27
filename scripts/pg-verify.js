@@ -1,12 +1,15 @@
 // PostgreSQL Slice 6B: compares a SQLite database with the PostgreSQL database it was copied into
 // (scripts/pg-copy.js; docs/briefs/postgresql-slice-6-data-migration.md). Read-only on both sides.
 //   DATABASE_URL=<local url> node scripts/pg-verify.js <path/to/assets.db>
+//   DATABASE_URL=<tunnel url> node scripts/pg-verify.js <assets.db> --staging-tunnel --confirm-target <host:port/db>
+// Local dev database by default; the Railway staging tunnel needs the flag and the exact target (src/pg/target.js). It only
+// reads, so no --execute is involved.
 // Exit code 0 = identical, 1 = differences (or it cannot verify), 2 = usage error.
 // Per copied table: the same row count and every row equal column by column, matched by primary key; every identity
 // sequence past the largest id; `sessions` empty on the target (not copied).
 const fs = require('fs');
 const { createPool, resolveDatabaseUrl } = require('../src/pg/pool');
-const { isLocalDatabaseUrl } = require('../src/pg/local-url');
+const { parseToolArgs, resolveTarget, assertStagingServer, redact } = require('../src/pg/target');
 const { openReadOnly } = require('./pg-preflight');
 const { COPY_TABLES, NOT_COPIED, identitySequences } = require('./pg-copy');
 
@@ -68,25 +71,43 @@ function report({ ok, tables, differences }) {
 }
 
 async function main(argv, env = process.env) {
-  if (argv.length !== 1) {
-    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-verify.js <path/to/assets.db>');
+  let opts;
+  try {
+    opts = parseToolArgs(argv);
+  } catch (err) {
+    console.error(`pg-verify: ${err.message}`);
     return 2;
   }
-  if (!fs.existsSync(argv[0])) {
-    console.error(`pg-verify: no such file: ${argv[0]}`);
+  if (opts.positional.length !== 1) {
+    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-verify.js <path/to/assets.db> [--staging-tunnel --confirm-target <host:port/db>]');
+    return 2;
+  }
+  const file = opts.positional[0];
+  if (!fs.existsSync(file)) {
+    console.error(`pg-verify: no such file: ${file}`);
     return 1;
   }
   const url = env.DATABASE_URL || resolveDatabaseUrl(env);
-  if (!isLocalDatabaseUrl(url)) {
-    console.error('pg-verify refuses to connect: DATABASE_URL host is not localhost, 127.0.0.1 or ::1.');
+  let target;
+  try {
+    target = resolveTarget(url, opts, { write: false, who: 'pg-verify' });
+  } catch (err) {
+    console.error(redact(err.message, url));
     return 1;
   }
-  const sqlite = openReadOnly(argv[0]);
+  const sqlite = openReadOnly(file);
   const pool = createPool(url);
   try {
+    if (target.mode === 'staging') {
+      const server = await assertStagingServer(pool, target);
+      console.log(`Connected to ${target.label} as ${server.role} (PostgreSQL ${server.major}), read-only.`);
+    }
     const result = await verify(sqlite, pool);
     console.log(report(result));
     return result.ok ? 0 : 1;
+  } catch (err) {
+    console.error(`pg-verify failed: ${redact(err.message, url)}`);
+    return 1;
   } finally {
     sqlite.close();
     await pool.end();
@@ -97,7 +118,7 @@ if (require.main === module) {
   main(process.argv.slice(2))
     .then((code) => { process.exitCode = code; })
     .catch((err) => {
-      console.error(`pg-verify failed: ${err.message}`);
+      console.error(`pg-verify failed: ${redact(err.message, process.env.DATABASE_URL)}`);
       process.exitCode = 1;
     });
 }

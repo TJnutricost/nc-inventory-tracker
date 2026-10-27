@@ -1,8 +1,13 @@
 // PostgreSQL Slice 6B: copies a SQLite database (schema at migration 17) into a fresh PostgreSQL database (baseline
 // migration 1), keeping every id and every value as stored (docs/briefs/postgresql-slice-6-data-migration.md).
 //   DATABASE_URL=<local url> node scripts/pg-copy.js <path/to/assets.db>
-// Local PostgreSQL only for now (src/pg/local-url.js): the Railway target is a Slice 7 decision.
-// Exit code 0 = copied and verified, 1 = refused or failed (the target is left as it was), 2 = usage error.
+//   DATABASE_URL=<tunnel url> node scripts/pg-copy.js <assets.db> --staging-tunnel --confirm-target <host:port/db> [--execute]
+// Default: the local Docker dev database only (src/pg/target.js). The Railway staging database is reachable only through
+// the Railway CLI's SSH tunnel (`railway connect --tunnel-only`, D1) with --staging-tunnel and the exact target in
+// --confirm-target. A staging run is a DRY RUN (preflight, row counts, a read-only look at the target; nothing is written,
+// not even the baseline) unless --execute is given, and --execute makes the operator type a confirmation phrase in an
+// interactive terminal. See docs/briefs/postgresql-slice-7-staging-cutover-runbook.md.
+// Exit code 0 = copied and verified (or a clean dry run), 1 = refused or failed (the target is left as it was), 2 = usage error.
 //   - The 6A preflight must pass first; the source is opened read-only.
 //   - The target must be fresh: the baseline applied (it is applied here when the database is empty) and no app data
 //     beyond the baseline's own seed rows (tag counter at 0, the 13 default catalog roots), which the copy replaces.
@@ -12,7 +17,7 @@
 //   - Every identity sequence is advanced past the largest copied id, so the next insert gets max(id) + 1.
 const fs = require('fs');
 const { createPool, resolveDatabaseUrl } = require('../src/pg/pool');
-const { isLocalDatabaseUrl } = require('../src/pg/local-url');
+const { parseToolArgs, resolveTarget, assertStagingServer, confirmWrite, redact } = require('../src/pg/target');
 const { runMigrations } = require('../src/pg/migrate');
 const { preflight, openReadOnly } = require('./pg-preflight');
 
@@ -143,29 +148,97 @@ async function copy(sqlite, pool) {
   }
 }
 
-async function main(argv, env = process.env) {
-  if (argv.length !== 1) {
-    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-copy.js <path/to/assets.db>');
+// What a staging dry run reports without writing anything: the source's preflight and row counts, and the target's state
+// from a READ ONLY transaction: 'empty' (no table: the baseline would be applied first), 'fresh' (baseline only) or
+// 'not-fresh' (the copy would refuse).
+async function dryRun(sqlite, pool) {
+  const check = preflight(sqlite);
+  const counts = COPY_TABLES.map(({ table }) => ({ table, rows: sqlite.prepare(`SELECT COUNT(*) AS n FROM ${q(table)}`).get().n }));
+  const client = await pool.connect();
+  let target;
+  try {
+    await client.query('BEGIN READ ONLY');
+    const tables = (await client.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = current_schema()`)).rows;
+    if (tables.length === 0) target = { state: 'empty' };
+    else {
+      try {
+        await assertFreshTarget(client);
+        target = { state: 'fresh' };
+      } catch (err) {
+        target = { state: 'not-fresh', reason: err.message };
+      }
+    }
+  } finally {
+    await client.query('ROLLBACK').catch(() => {});
+    client.release();
+  }
+  return { preflight: check, counts, target, ok: check.ok && target.state !== 'not-fresh' };
+}
+
+function dryRunReport(result, label) {
+  const lines = [`DRY RUN against ${label}: nothing was written.`, ''];
+  lines.push(result.preflight.ok ? 'Preflight: clean.' : `Preflight: ${result.preflight.findings.length} problem(s), the copy would refuse:`);
+  if (!result.preflight.ok) for (const f of result.preflight.findings.slice(0, 20)) lines.push(`  ${f.message}`);
+  lines.push('', 'Rows that would be copied:');
+  for (const { table, rows } of result.counts) lines.push(`  ${table.padEnd(20)} ${rows}`);
+  const state = { empty: 'empty: the baseline migration would be applied first, then the copy.', fresh: 'fresh: baseline applied, ready for the copy.' }[result.target.state] || `NOT fresh, the copy would refuse: ${result.target.reason}`;
+  lines.push('', `Target: ${state}`, '');
+  lines.push(result.ok ? 'Dry run OK. To write, repeat the command with --execute (an interactive confirmation follows).' : 'Dry run FAILED: nothing would be copied.');
+  return lines.join('\n');
+}
+
+async function main(argv, env = process.env, io = {}) {
+  let opts;
+  try {
+    opts = parseToolArgs(argv);
+  } catch (err) {
+    console.error(`pg-copy: ${err.message}`);
     return 2;
   }
-  if (!fs.existsSync(argv[0])) {
-    console.error(`pg-copy: no such file: ${argv[0]}`);
+  if (opts.positional.length !== 1) {
+    console.error('Usage: DATABASE_URL=<local url> node scripts/pg-copy.js <path/to/assets.db> [--staging-tunnel --confirm-target <host:port/db> [--execute]]');
+    return 2;
+  }
+  const file = opts.positional[0];
+  if (!fs.existsSync(file)) {
+    console.error(`pg-copy: no such file: ${file}`);
     return 1;
   }
   const url = env.DATABASE_URL || resolveDatabaseUrl(env);
-  if (!isLocalDatabaseUrl(url)) {
-    console.error('pg-copy refuses to connect: DATABASE_URL host is not localhost, 127.0.0.1 or ::1 (the Railway copy is Slice 7).');
+  let target;
+  try {
+    target = resolveTarget(url, opts, { write: true, who: 'pg-copy' });
+  } catch (err) {
+    console.error(redact(err.message, url));
     return 1;
   }
   const { verify, report } = require('./pg-verify');
-  const sqlite = openReadOnly(argv[0]);
+  const sqlite = openReadOnly(file);
   const pool = createPool(url);
   try {
+    if (target.mode === 'staging') {
+      const server = await assertStagingServer(pool, target);
+      console.log(`Connected to ${target.label} as ${server.role} (PostgreSQL ${server.major}).`);
+      if (target.dryRun) {
+        const result = await dryRun(sqlite, pool);
+        console.log(dryRunReport(result, target.label));
+        return result.ok ? 0 : 1;
+      }
+      const check = await dryRun(sqlite, pool); // the same read-only look first: refuse before asking the operator
+      if (!check.ok) {
+        console.log(dryRunReport(check, target.label));
+        return 1;
+      }
+      await confirmWrite(target, `About to WRITE ${check.counts.reduce((n, c) => n + c.rows, 0)} rows (${check.counts.length} tables) from ${file} into the Railway staging database, applying the baseline first when it is empty.`, io);
+    }
     const { copied } = await copy(sqlite, pool);
     for (const [table, n] of Object.entries(copied)) console.log(`  copied ${table.padEnd(20)} ${n}`);
     const result = await verify(sqlite, pool);
     console.log(report(result));
     return result.ok ? 0 : 1;
+  } catch (err) {
+    console.error(`pg-copy failed: ${redact(err.message, url)}`);
+    return 1;
   } finally {
     sqlite.close();
     await pool.end();
@@ -173,13 +246,13 @@ async function main(argv, env = process.env) {
 }
 
 // Exported before main runs: scripts/pg-verify.js requires this module back (it shares the table list).
-module.exports = { copy, main, identitySequences, COPY_TABLES, NOT_COPIED };
+module.exports = { copy, main, dryRun, identitySequences, COPY_TABLES, NOT_COPIED };
 
 if (require.main === module) {
   main(process.argv.slice(2))
     .then((code) => { process.exitCode = code; })
     .catch((err) => {
-      console.error(`pg-copy failed: ${err.message}`);
+      console.error(`pg-copy failed: ${redact(err.message, process.env.DATABASE_URL)}`);
       process.exitCode = 1;
     });
 }
