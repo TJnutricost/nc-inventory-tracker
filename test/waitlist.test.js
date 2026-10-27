@@ -951,13 +951,13 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
 test('front end: an asset opened from a catalog that came from Settings carries `from=#/settings` out and back; no `from` means nothing is added', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   // out: the catalog's asset links stamp it (only when the catalog has it)
-  assert.match(src, /srcQ\('catalog', \{ node: node \? node\.id : null, all: st\.all, from: fromSettings\(\) \? '#\/settings' : null \}\)/);
+  assert.match(src, /srcQ\('catalog', \{ node: node \? node\.id : null, all: st\.all, status: st\.status, from: fromSettings\(\) \? '#\/settings' : null \}\)/);
   // context: read only for src=catalog and only the one whitelisted value; carried to the edit form and its Cancel/Save return
   assert.match(src, /fromSettings: src === 'catalog' && p\.get\('from'\) === '#\/settings'/);
-  assert.match(src, /from: c\.fromSettings \? '#\/settings' : null \}\) : ''; \}?;?/);
+  assert.match(src, /status: c\.status, tab: c\.tab, from: c\.fromSettings \? '#\/settings' : null \}\) : ''; \}?;?/);
   // back: the catalog root AND the exact node both get it appended, via one helper; employee Browse is untouched
   const back = src.slice(src.indexOf('async function assetBackTarget()'), src.indexOf('// ============================================================ router'));
-  assert.match(back, /const catFrom = \(href\) => \(c\.fromSettings \? `\$\{href\}\$\{href\.includes\('\?'\) \? '&' : '\?'\}from=\$\{encodeURIComponent\('#\/settings'\)\}` : href\)/);
+  assert.match(back, /const catFrom = \(href\) => \{ const x = \[\.\.\.\(c\.status \? \[`status=\$\{c\.status\}`\] : \[\]\), \.\.\.\(c\.fromSettings \? \[`from=\$\{encodeURIComponent\('#\/settings'\)\}`\] : \[\]\)\]; return x\.length \? `\$\{href\}\$\{href\.includes\('\?'\) \? '&' : '\?'\}\$\{x\.join\('&'\)\}` : href; \}/);
   assert.match(back, /const root = c\.src === 'catalog' \? \{ href: catFrom\('#\/assets'\), label: 'All assets' \}/);
   assert.match(back, /c\.src === 'catalog' \? catFrom\(`#\/assets\?node=\$\{n\.id\}\$\{c\.all \? '&all=1' : ''\}`\) : `#\/assets\?node=\$\{n\.id\}`/);
   // srcQ drops null extras, so a catalog without `from` produces exactly the old URL

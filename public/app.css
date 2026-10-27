@@ -23,8 +23,10 @@
   font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   color-scheme: light;
 }
+/* Appearance: System (no data-theme; the OS decides), or an explicit Light / Dark set by the Appearance control (data-theme on <html>).
+   The dark palette is written twice because a media query and an attribute cannot share one rule. Keep the two in step. */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0d0f12; --surface: #16191e; --surface-2: #1c2026; --line: #2a2f37;
     --text: #eef0f3; --muted: #98a2b3;
     --brand-accent: #4c8dff; --brand-accent-soft: #16233a;
@@ -34,6 +36,16 @@
     --shadow: 0 1px 2px rgba(0,0,0,.4);
     color-scheme: dark;
   }
+}
+:root[data-theme="dark"] {
+    --bg: #0d0f12; --surface: #16191e; --surface-2: #1c2026; --line: #2a2f37;
+    --text: #eef0f3; --muted: #98a2b3;
+    --brand-accent: #4c8dff; --brand-accent-soft: #16233a;
+    --ok: #3ccf91; --ok-soft: #0f2a20; --warn: #f0a44b; --warn-soft: #2e2211; --bad: #ff7b70; --bad-soft: #3a1714;
+    --resv: #a58bff; --resv-soft: #231b3d;
+    --resv-range: #3b2f6e; --resv-range-ink: #dcd2ff; --resv-edge-ink: #150f2b;
+    --shadow: 0 1px 2px rgba(0,0,0,.4);
+    color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -244,7 +256,8 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .chips::-webkit-scrollbar { display: none; }
 .chip { flex: none; border: 1px solid var(--line); background: var(--surface); border-radius: 999px; padding: 7px 13px; font-size: 13px; font-weight: 600; color: var(--text); cursor: pointer; white-space: nowrap; }
 .chip.on { background: var(--brand-ink); border-color: var(--brand-ink); color: #fff; }
-@media (prefers-color-scheme: dark) { .chip.on { background: #fff; color: #111; border-color: #fff; } }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .chip.on { background: #fff; color: #111; border-color: #fff; } }
+:root[data-theme="dark"] .chip.on { background: #fff; color: #111; border-color: #fff; }
 .seg { display: inline-flex; background: var(--surface-2); border: 1px solid var(--line); border-radius: 11px; padding: 3px; }
 .seg button { border: 0; background: transparent; font: inherit; font-weight: 600; font-size: 14px; padding: 7px 14px; border-radius: 8px; color: var(--muted); cursor: pointer; }
 .seg button.on { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
@@ -254,7 +267,11 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .auth .panel { width: 100%; max-width: 400px; background: var(--surface); border-radius: 18px; padding: 28px 22px; box-shadow: 0 20px 50px rgba(0,0,0,.35); }
 .auth .brand { text-align: center; margin-bottom: 22px; }
 .auth .brand img { height: 30px; width: auto; margin: 0 auto 8px; }
-@media (prefers-color-scheme: dark) { .auth .brand img { height: 52px; margin: -10px auto 0; } } /* logo-white.png has its own padding */
+.auth .brand .logo-dark { display: none; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) .auth .brand img { height: 52px; margin: -10px auto 0; } :root:not([data-theme="light"]) .auth .brand .logo-light { display: none; } :root:not([data-theme="light"]) .auth .brand .logo-dark { display: block; } } /* logo-white.png has its own padding */
+:root[data-theme="dark"] .auth .brand img { height: 52px; margin: -10px auto 0; }
+:root[data-theme="dark"] .auth .brand .logo-light { display: none; }
+:root[data-theme="dark"] .auth .brand .logo-dark { display: block; }
 .auth .google-btn { gap: 10px; text-decoration: none; }
 .auth-or { display: flex; align-items: center; gap: 10px; margin: 16px 0; color: var(--muted); font-size: 13px; }
 .auth-or::before, .auth-or::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
@@ -644,3 +661,98 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
 /* what the signed-in employee already has on this asset (asset page) */
 .my-activity { display: grid; gap: 8px; }
 .my-activity .rs-sched { margin: 0; }
+
+/* ---------- dropdown menus (All assets: Add / Labels / Filter) ---------- */
+.dd { position: relative; display: inline-flex; min-width: 0; }
+.dd > .btn { max-width: 100%; }
+.dd-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dd-caret { width: 16px; height: 16px; transform: rotate(90deg); opacity: .7; }
+.dd.open .dd-caret { transform: rotate(-90deg); }
+.dd-menu { left: 0; right: auto; max-width: calc(100vw - 32px); }
+.dd-right > .dd-menu { left: auto; right: 0; }
+.dd-menu { top: calc(100% + 6px); }
+.dd-menu a, .dd-menu button { color: var(--text); }
+.dd-menu a span, .dd-menu button span { flex: 1; }
+.dd-menu [aria-checked="true"] { background: var(--brand-accent-soft); color: var(--brand-accent); }
+.dd-tick { color: var(--brand-accent); }
+.btn.active { border-color: var(--brand-accent); background: var(--brand-accent-soft); color: var(--brand-accent); }
+.dd-btn:focus-visible, .dd-menu a:focus-visible, .dd-menu button:focus-visible, .fchip:focus-visible, .fopt:focus-visible, .ph-hero:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+.dd-menu a:focus-visible, .dd-menu button:focus-visible { outline-offset: -2px; background: var(--surface-2); }
+
+/* All assets toolbar: phones = Labels + Filter, then search + scan; desktop = one horizontal row */
+.atools { display: flex; flex-direction: column; gap: 10px; }
+.atools-row { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.atools-row > .dd, .atools-row > #ddfilter-slot { flex: 1 1 0; min-width: 0; display: flex; }
+.atools-row .dd { flex: 1 1 0; }
+.atools-row .dd > .btn { width: 100%; justify-content: space-between; }
+.atools-find .search { min-width: 0; }
+.fchips { display: flex; gap: 8px; flex-wrap: wrap; }
+.fchips:empty { display: none; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--brand-accent-soft); border-color: var(--brand-accent); color: var(--brand-accent); }
+.fchip svg { width: 14px; height: 14px; }
+@media (min-width: 900px) {
+  .atools { flex-direction: row; align-items: center; }
+  .atools-row { display: contents; }
+  .atools-find .search { order: 1; flex: 1 1 auto; }
+  #scanbtn { order: 2; }
+  #ddlabels { order: 3; flex: none; }
+  #ddfilter-slot { order: 4; flex: none; }
+  .atools-row .dd { flex: none; }
+  .atools-row .dd > .btn { width: auto; justify-content: center; }
+}
+.fsheet { display: grid; gap: 6px; margin-top: 10px; }
+.fopt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; text-align: left; }
+.fopt.on { border-color: var(--brand-accent); background: var(--brand-accent-soft); color: var(--brand-accent); }
+.fopt svg { width: 18px; height: 18px; }
+
+/* Add asset: the Photos drop area */
+.ph-drop { border: 2px dashed var(--line); border-radius: var(--radius); background: var(--surface-2); padding: 16px; text-align: center; transition: border-color .15s ease, background-color .15s ease; }
+.ph-drop.drag { border-color: var(--brand-accent); background: var(--brand-accent-soft); }
+.ph-hero { display: grid; justify-items: center; gap: 4px; padding: 14px 8px 6px; cursor: pointer; color: var(--text); }
+.ph-hero svg { width: 44px; height: 44px; color: var(--brand-accent); }
+.ph-hero strong { font-size: 17px; }
+.ph-dd { display: none; }
+@media (min-width: 900px) { .ph-dd { display: inline; } }
+.ph-drop.has .ph-hero { display: none; }
+.ph-drop .ph-pending { flex-wrap: wrap; overflow: visible; justify-content: center; gap: 10px; }
+.ph-drop .ph-pending:not(:empty) { margin: 2px 0 6px; }
+.ph-drop .pc-th { width: 96px; height: 96px; }
+.ph-drop .pc-th button { width: 32px; height: 32px; top: 4px; right: 4px; }
+.ph-drop .pc-th button svg { width: 16px; height: 16px; }
+.ph-drop .ph-actions { justify-content: center; }
+.ph-drop .ph-actions .btn { flex: 1 1 140px; max-width: 220px; }
+.ph-count { margin-top: 8px; }
+
+/* Stacking: #main.page-in > * animates with fill-mode "both", so every direct child of main (the header, the .stack) is its own stacking
+   context and the LATER one paints over the earlier. A menu's z-index only counts inside its own context, so the header's Add menu
+   sat behind the page. Raise the header and the toolbar above the content that follows them. */
+#main .page-head { position: relative; z-index: 6; }
+.atools { position: relative; z-index: 5; }
+
+/* All assets (top level): the collapsible full list under the category cards */
+.acc-btn { appearance: none; display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 4px; margin-left: -4px; background: none; border: 0; border-radius: 8px; font: inherit; color: var(--text); cursor: pointer; text-align: left; }
+.acc-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.acc-title .muted { font-weight: 500; }
+.acc-caret { width: 18px; height: 18px; color: var(--muted); transform: rotate(90deg); transition: transform .15s ease; }
+.acc-btn[aria-expanded="true"] .acc-caret { transform: rotate(-90deg); }
+.acc-btn:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+
+/* ---------- Appearance control ---------- */
+@media (min-width: 900px) {
+  /* The sidebar is a column: the navigation scrolls, Settings and Appearance stay pinned at the bottom however long the page is. */
+  .sidebar { display: flex; flex-direction: column; overflow: hidden; }
+  .side-main { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  .side-foot { flex: none; border-top: 1px solid var(--line); margin-top: 8px; padding-top: 8px; display: grid; gap: 2px; }
+  .side-foot .dd { display: flex; }
+  .side-foot .dd-menu { left: 0; right: 0; min-width: 0; top: auto; bottom: calc(100% + 6px); }
+}
+.side-link { appearance: none; width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px; border: 0; border-radius: 10px; background: none; color: var(--text); font: inherit; font-weight: 550; cursor: pointer; text-align: left; }
+.side-link:hover { background: var(--surface-2); }
+.side-link svg { width: 20px; height: 20px; color: var(--muted); flex: none; }
+.side-link .dd-label { flex: 1; }
+.side-link .dd-caret { width: 16px; height: 16px; transform: rotate(-90deg); }
+.dd.open .side-link .dd-caret { transform: rotate(90deg); }
+.side-link:focus-visible, .seg button:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+.dd-sub { font-size: 13px; font-weight: 500; color: var(--muted); }
+.seg-full { display: flex; width: 100%; }
+.seg-full button { flex: 1; min-height: 44px; }

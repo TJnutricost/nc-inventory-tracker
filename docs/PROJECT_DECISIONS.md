@@ -220,3 +220,11 @@ Recorded while consolidating the tracker; none changes a product decision.
 1. **Production email provider — settled by the owner.** The old open-decision list read "Resend / Postmark / existing SMTP". Current direction: Google Workspace SMTP works today; the Google Workspace OAuth connection is priority future work (D-35, D-37). Resend/Postmark are historical / alternative-provider research only, not planned.
 2. **Railway access — not re-confirmed.** "No Railway access, no completion date" was last recorded 2026-09-28 and nothing since confirms or clears it. It is not treated as an active blocker until a deployment/staging task actually needs access.
 3. **`stage` → `main` promotion — open decision.** The workflow stays `feature/*` → `stage` → `main`. `main` was last updated 2026-09-28 and `stage` is many merged PRs ahead, but that alone does not mean a promotion is due; it is a deliberate release/staging decision (D-02).
+
+---
+
+## All assets list and pagination (2026-10-27, UI Cleanup V1)
+
+1. A status filter (Filter menu / `?status=`) shows the matching assets straight under the toolbar: no category cards, no catalog controls, heading "<Status> assets". Clearing it restores the category cards. Search results are never hidden behind a collapsed section.
+2. At the unfiltered top level the cards come first and the full list sits below them in a collapsed "All assets (N)" section (expanding it does not reload anything).
+3. The list is paginated **client-side**, 10 assets per page, over the full array the page already fetched. **Future scalability work:** move to server-side pagination (`limit`/`offset` or cursor on `GET /api/assets`, with a total count) before production inventories grow large; the page currently downloads every matching asset and the collapsed "(N)" count comes from that same array. Not done in this slice by decision.

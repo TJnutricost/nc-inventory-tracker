@@ -341,7 +341,7 @@ test('front end: mobile nav — five tabs incl. Profile for everyone; hamburger 
   assert.doesNotMatch(account, /#\/(people|catalog|labels|import|activity)/, 'no other administration in Profile');
   assert.doesNotMatch(employeeItems, /settings/, 'employees have no Settings');
   // the desktop sidebar and the avatar menu list Settings beside My profile, for admins only
-  assert.match(src, /\{ key: 'profile', href: '#\/profile', label: 'My profile', icon: 'user' \},\n    \.\.\.\(isAdmin\(\) \? \[\{ key: 'settings', href: '#\/settings', label: 'Settings', icon: 'settings' \}\] : \[\]\)\)/);
+  assert.match(src, /\{ key: 'profile', href: '#\/profile', label: 'My profile', icon: 'user' \},\n    \.\.\.\(isAdmin\(\) \? \[\{ key: 'settings', href: '#\/settings', label: 'Settings', icon: 'settings', foot: true \}\] : \[\]\)\)/); // (foot: the desktop sidebar pins it to the bottom, above Appearance)
   assert.match(src, /My profile<\/a>\$\{isAdmin\(\) \? `<a href="#\/settings" role="menuitem">/);
   // routing: Profile route, old More bookmarks redirect there, and the role guards on admin/employee routes are unchanged
   assert.match(src, /\[\/\^#\\\/account\$\/, viewAccount, \{ key: 'account' \}\]/);
