@@ -531,7 +531,8 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cal-btn:hover { background: var(--surface-2); color: var(--text); }
 .asset-bar-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .asset-bar-top .cal-btn { width: 36px; height: 36px; margin: -6px 0 -4px; }
-.cal-wrap { max-width: 760px; }
+.cal-wrap #calpanel > * + * { margin-top: 12px; }
+.cal-wrap .cal-day { min-height: 64px; padding: 6px 2px 5px; }
 .cal-card { padding-bottom: 4px; }
 .cal-nav { display: flex; align-items: center; justify-content: space-between; padding: 8px 8px 4px; }
 .cal-nav h2 { font-size: 17px; }
@@ -590,7 +591,7 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cal-asset-day { padding: 12px 16px 16px; }
 .cal-asset-day h2 { font-size: 15px; color: var(--muted); font-weight: 650; margin: 0 0 8px; }
 .cal-state { display: flex; align-items: center; gap: 10px; font-size: 18px; }
-@media (min-width: 700px) { .cal-day { min-height: 68px; } .cal-day .d { font-size: 15px; } }
+@media (min-width: 700px) { .cal-day { min-height: 68px; } .cal-day .d { font-size: 15px; } .cal-wrap .cal-day { min-height: 96px; padding: 10px 4px 8px; } .cal-wrap .cal-day .c { font-size: 12px; } }
 .cal-reserve h3 { font-size: 16px; }
 .cal-range { font-size: 17px; }
 .seg-count { background: var(--bad); color: #fff; font-size: 11px; border-radius: 9px; padding: 1px 6px; margin-left: 4px; }
