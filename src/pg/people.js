@@ -147,8 +147,8 @@ async function setSelfCheckout(q, id, enabled) { await q.query('UPDATE employees
 
 // PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the
 // fields are cleaned by the route.
-async function updateOwnProfile(q, employeeId, { name, phone, department, title }) {
-  await q.query('UPDATE employees SET name = COALESCE($1, name), phone = $2, department = $3, title = $4 WHERE id = $5', [name, phone, department, title, toId(employeeId)]);
+async function updateOwnProfile(q, employeeId, { name, phone, department, title, building }) {
+  await q.query('UPDATE employees SET name = COALESCE($1, name), phone = $2, department = $3, title = $4, building = $5 WHERE id = $6', [name, phone, department, title, building, toId(employeeId)]);
 }
 
 module.exports = {

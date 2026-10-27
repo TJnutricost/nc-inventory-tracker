@@ -70,9 +70,9 @@ function setSelfCheckout(db, id, enabled) { db.prepare('UPDATE employees SET can
 
 // PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the fields are cleaned
 // by the route.
-function updateOwnProfile(db, employeeId, { name, phone, department, title }) {
-  db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ? WHERE id = ?')
-    .run(name, phone, department, title, employeeId);
+function updateOwnProfile(db, employeeId, { name, phone, department, title, building }) {
+  db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ?, building = ? WHERE id = ?')
+    .run(name, phone, department, title, building, employeeId);
 }
 
 // POST /api/requests: the status of the person a request is for ({ status }, or undefined when there is no such employee).

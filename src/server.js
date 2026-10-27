@@ -222,12 +222,14 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   await data.accounts.setPassword(req.user.account_id, await bcrypt.hash(password, 10));
   res.json({ ok: true });
 }));
-// Everyone edits their own name, phone, department and job title (owner decision 2026-10-27; employees could not before). The email
-// (the login) and the building stay IT's, in People. Passwords are separate.
+// Everyone edits their own name, phone, department, job title and building (owner decision 2026-10-27; employees could not before). The
+// email (the login) stays IT's, in People. Passwords are separate.
 app.put('/api/me', auth, async (req, res) => {
-  const { name, phone, department, title } = req.body;
+  const { name, phone, department, title, building } = req.body;
   if (req.user.employee_id) {
-    await data.people.updateOwnProfile(req.user.employee_id, { name: clean(name), phone: clean(phone), department: clean(department), title: clean(title) });
+    // as in People: the building keeps its value when the client doesn't send the field; an empty string clears it
+    await data.people.updateOwnProfile(req.user.employee_id, { name: clean(name), phone: clean(phone), department: clean(department), title: clean(title),
+      building: building === undefined ? req.user.building : clean(building) });
   }
   res.json({ ok: true });
 });

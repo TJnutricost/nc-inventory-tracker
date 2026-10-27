@@ -126,8 +126,8 @@ describe('PostgreSQL people write twins (differential against the routes on src/
     await write('self-checkout on', 'setSelfCheckout', w.ana.id, true);
     await write('self-checkout off again', 'setSelfCheckout', w.bare.id, false);
     await write('unknown id', 'setSelfCheckout', 'abc', true);
-    await write('profile', 'updateOwnProfile', w.ana.id, { name: 'Ana C', phone: '9', department: null, title: 'T' });
-    await write('blank name keeps the name', 'updateOwnProfile', w.ana.id, { name: null, phone: null, department: 'D', title: null });
+    await write('profile', 'updateOwnProfile', w.ana.id, { name: 'Ana C', phone: '9', department: null, title: 'T', building: 'B7' });
+    await write('blank name keeps the name, a null building clears it', 'updateOwnProfile', w.ana.id, { name: null, phone: null, department: 'D', title: null, building: null });
     assert.equal(person(w.ana.id).name, 'Ana C');
   });
 });
