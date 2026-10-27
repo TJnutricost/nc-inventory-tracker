@@ -148,6 +148,20 @@ npm run db:reset   # stop it and delete the data volume (local only)
 
 The dev credentials (`nc_dev` / `nc_dev`, database `nc_assets_dev`) are in `docker-compose.postgres.yml` and must never be reused anywhere else. `db:check` refuses any host other than localhost, so a Railway URL can never be used by accident.
 
+## Tests and CI
+
+```bash
+npm test               # the whole suite on SQLite; the PostgreSQL tests (test/pg) run too when the local database is up, else skip
+npm run test:pg        # only the PostgreSQL tests, PostgreSQL required (npm run db:up first)
+npm run test:pg-suite  # the whole suite on the PostgreSQL driver plus test/pg, PostgreSQL required
+```
+
+At most 4 test files run at once: the PostgreSQL lock and timeout tests are timing-sensitive and flaked under more load.
+
+**CI** (`.github/workflows/ci.yml`, GitHub Actions) runs `npm test` and, against a `postgres:18` service container with the
+same dev-only credentials, `npm run test:pg-suite`, on every pull request and on every push to `stage`, `main` and
+`integration/postgresql`. It uses no secrets and deploys nothing. A red check means do not merge until it is understood.
+
 ---
 
 ## Planned production direction (not yet built)

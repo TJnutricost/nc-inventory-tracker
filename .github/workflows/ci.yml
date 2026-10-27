@@ -1,0 +1,60 @@
+# Runs the whole test suite on every pull request and on every push to the shared branches: once on SQLite (the live
+# driver) and once on PostgreSQL (the migration target). The PostgreSQL job uses the same throwaway credentials as
+# docker-compose.postgres.yml (dev-only, public); no secrets are used and no environment is deployed.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [stage, main, integration/postgresql]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sqlite:
+    name: Tests (SQLite)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  postgres:
+    name: Tests (PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: nc_dev
+          POSTGRES_PASSWORD: nc_dev
+          POSTGRES_DB: nc_assets_dev
+          TZ: UTC
+          PGTZ: UTC
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U nc_dev -d nc_assets_dev"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # The whole suite on the PostgreSQL driver, plus the PostgreSQL-only tests (test/pg), with PostgreSQL required.
+      - run: npm run test:pg-suite
