@@ -86,35 +86,52 @@ async function allocateTag(q, prefix) { // call only inside a transaction (the c
   }
 }
 
-// Labels printed before the asset exists (see src/assetRecords.js): `count` numbers claimed in ONE transaction (a caller's when given its
-// client); the counter row stays locked until it ends, so two claims (or a claim and a blank-tag create) never share a number.
+// Labels printed before the asset exists (see src/assetRecords.js): the claim also records the numbers it issued and the prefix they were
+// issued under (issued_tag_ranges), which recognising a label and giving a sheet back read instead of the current prefix.
 async function claimTags(q, { prefix, count }) {
   return inTransaction(q, async (c) => {
     const tags = [];
     for (let i = 0; i < count; i++) tags.push(await allocateTag(c, prefix));
+    const nums = tags.map((t) => issuedNumber(prefix, t));
+    await c.query('INSERT INTO issued_tag_ranges (prefix, first_number, last_number) VALUES ($1, $2, $3)', [prefix, Math.min(...nums), Math.max(...nums)]);
     return tags;
   });
 }
+const issuedRanges = async (q) => (await q.query('SELECT prefix, first_number, last_number FROM issued_tag_ranges ORDER BY id DESC')).rows;
+// The number some claim issued as exactly `tag` (see src/assetRecords.js claimedNumber), else null.
+function claimedNumber(ranges, tag) {
+  for (const r of ranges) {
+    const n = issuedNumber(r.prefix, tag);
+    if (n !== null && n >= r.first_number && n <= r.last_number) return n;
+  }
+  return null;
+}
 // Give back a Create labels sheet (see src/assetRecords.js releaseTags): ONE transaction with the counter row locked first, so a claim or
 // a blank-tag create running at the same moment either finishes first (then these are no longer the newest: refused) or waits.
-async function releaseTags(q, { prefix, tags }) {
+async function releaseTags(q, { tags }) {
   return inTransaction(q, async (c) => {
-    const nums = tags.map((t) => issuedNumber(prefix, t));
-    if (!nums.length || nums.includes(null)) return { released: false, reason: 'not_ours' };
     const last = (await c.query('SELECT last_number AS n FROM asset_tag_counter WHERE id = 1 FOR UPDATE')).rows[0].n;
+    const ranges = await issuedRanges(c);
+    const nums = tags.map((t) => claimedNumber(ranges, t));
+    if (!nums.length || nums.includes(null)) return { released: false, reason: 'not_ours' };
     if (Math.max(...nums) !== last) return { released: false, reason: 'newer' };
-    for (const n of nums) if (await tagExists(c, formatTag(prefix, n))) return { released: false, reason: 'used' };
-    await c.query('UPDATE asset_tag_counter SET last_number = $1 WHERE id = 1', [Math.min(...nums) - 1]);
+    for (const t of tags) if (await tagExists(c, String(t).trim())) return { released: false, reason: 'used' };
+    const low = Math.min(...nums);
+    await c.query('UPDATE asset_tag_counter SET last_number = $1 WHERE id = 1', [low - 1]);
+    await c.query('DELETE FROM issued_tag_ranges WHERE first_number >= $1', [low]);
+    await c.query('UPDATE issued_tag_ranges SET last_number = $1 WHERE last_number >= $2', [low - 1, low]);
     return { released: true };
   });
 }
-// One of our claimed, still unused labels (see src/assetRecords.js): the tag as issued, else null. A plain read.
+// One of our claimed, still unused labels (see src/assetRecords.js): the tag as printed, else null. A plain read.
 async function issuedTag(q, code) {
-  const prefix = (await getSettings(q)).tag_prefix;
-  const n = issuedNumber(prefix, code);
-  if (n === null || n > (await q.query('SELECT last_number AS n FROM asset_tag_counter WHERE id = 1')).rows[0].n) return null;
-  const tag = formatTag(prefix, n);
-  return (await tagExists(q, tag)) ? null : tag;
+  for (const r of await issuedRanges(q)) {
+    const n = issuedNumber(r.prefix, code);
+    if (n === null || n < r.first_number || n > r.last_number) continue;
+    const tag = formatTag(r.prefix, n);
+    return (await tagExists(q, tag)) ? null : tag;
+  }
+  return null;
 }
 // (pure; repeated from src/assetRecords.js like formatTag)
 function issuedNumber(prefix, code) {
@@ -242,8 +259,8 @@ async function archiveAsset(q, id, { actorAccountId, reason }) {
 }
 
 // GET /api/next-tag. Preview only: consumes nothing (the `tag_prefix` setting is read here, as on SQLite).
-async function peekTag(q) {
-  const prefix = (await getSettings(q)).tag_prefix;
+async function peekTag(q, prefix) {
+  if (prefix === undefined) prefix = (await getSettings(q)).tag_prefix; // (an explicit prefix: Create labels' unsaved draft)
   let n = (await q.query('SELECT last_number AS n FROM asset_tag_counter WHERE id = 1')).rows[0].n + 1;
   while (await tagExists(q, formatTag(prefix, n))) n++;
   return formatTag(prefix, n);

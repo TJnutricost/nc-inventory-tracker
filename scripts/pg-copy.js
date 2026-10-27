@@ -33,6 +33,7 @@ const COPY_TABLES = [
   { table: 'outbox', key: 'id' },
   { table: 'settings', key: 'key' },
   { table: 'asset_tag_counter', key: 'id' },
+  { table: 'issued_tag_ranges', key: 'id' },
 ];
 const NOT_COPIED = ['sessions'];
 const BASELINE_CATALOG_ROOTS = 13;
@@ -72,7 +73,7 @@ async function assertFreshTarget(client) {
     }
   }
   const migrations = (await client.query('SELECT id FROM schema_migrations ORDER BY id')).rows.map((r) => r.id);
-  if (migrations.join(',') !== '1') problems.push(`schema_migrations is [${migrations.join(', ')}], expected [1]`);
+  if (migrations.join(',') !== '1,2') problems.push(`schema_migrations is [${migrations.join(', ')}], expected [1, 2]`);
   if (problems.length) {
     throw new Error(`Refusing to copy: the target database is not fresh (${problems.join('; ')}). Nothing was changed.`);
   }

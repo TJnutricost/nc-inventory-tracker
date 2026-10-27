@@ -1,4 +1,4 @@
-// PostgreSQL foundation (D-46, Slice 2): the PG baseline matches the final SQLite schema (migrations 1-17).
+// PostgreSQL foundation (D-46, Slice 2): the PG baseline matches the final SQLite schema (migrations 1-18).
 //   1. Structural parity (test-support/pg-parity.js): every table/column/default/nullability/PK/FK/CHECK/index compared;
 //      any difference not on the allow-list fails, and so does an allow-list entry that matches nothing.
 //   2. Behavioral parity: the same rows are inserted/deleted in both databases and must be accepted/rejected alike —
@@ -159,7 +159,7 @@ describe('PostgreSQL baseline ⇄ SQLite schema parity', pgSuite(), () => {
     const p = await describePg(client);
     const sqliteTables = Object.keys(s).filter((t) => t !== 'sqlite_sequence').sort();
     assert.deepEqual(Object.keys(p).sort(), sqliteTables);
-    assert.equal(sqliteTables.length, 16, '15 app tables + schema_migrations');
+    assert.equal(sqliteTables.length, 17, '16 app tables + schema_migrations');
     for (const t of sqliteTables) assert.deepEqual(p[t].columns.map((c) => c.name), s[t].columns.map((c) => c.name), t);
   });
 

@@ -86,3 +86,16 @@ the nav and the routes. Full suite on both drivers.
   and settle on navigation, a level / filter change on the same page fades lightly, menus and buttons ease their colors (none of it when
   the OS asks for reduced motion); every signed-in page has a "‹ Back": pages with a contextual one keep it, the others get the previous
   page from an in-app trail (top-level pages named as in the menu, others by their title), else "‹ Home".
+- Asset tag prefix moved to Create labels (owner, 2026-10-27; out of Settings > Check-out rules). Still ONE global counter and one
+  `tag_prefix` setting; a new prefix only affects future tags (Add asset's automatic numbering and new labels). Saving is explicit
+  ("Save prefix"); the live example is `GET /api/next-tag?prefix=` and consumes nothing; Create & print waits until the draft is saved.
+  **Printed labels survive a prefix change:** a label is `<prefix><number>`, so recognising one (`issuedTag`) and giving a sheet back
+  (`releaseTags`) can no longer read the CURRENT prefix. New table `issued_tag_ranges` (SQLite migration 18, PostgreSQL migration 2):
+  each claim records `(prefix, first_number, last_number)`; `issuedTag` accepts a code only when a claim issued exactly that
+  prefix + number and no asset uses it; `releaseTags` needs every tag to be inside a claim, the highest to still be the counter's last
+  (so a newer batch, under any prefix, refuses it), none on an asset, then lowers the counter and trims the record. Codes that merely
+  look like labels (another prefix, a number no claim issued) are never inferred to be issued. **Limitation:** claims made before
+  migration 18 were not recorded; the migration records `1..counter` under the prefix in force when it runs (exactly what the old
+  check accepted). A label printed under an EARLIER prefix than that cannot be told apart from any other code, so it is not recognised
+  as "issued" (it still scans normally once an asset has its tag). Tests: test/labels.test.js, test/migrations.test.js,
+  test/pg/pg-asset-records.test.js.

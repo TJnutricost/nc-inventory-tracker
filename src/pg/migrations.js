@@ -4,4 +4,5 @@
 // upgrade path here: PostgreSQL databases are created fresh (production data arrives with the Slice 7 data copy).
 module.exports = [
   { id: 1, name: 'baseline schema (SQLite migrations 1-17, final state)', file: '001_baseline.sql' },
+  { id: 2, name: 'issued_tag_ranges (SQLite migration 18)', file: '002_issued_tag_ranges.sql' },
 ];
