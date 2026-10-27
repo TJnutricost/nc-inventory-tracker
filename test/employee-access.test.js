@@ -324,7 +324,7 @@ test('front end: mobile nav — five tabs incl. Profile for everyone; hamburger 
   assert.doesNotMatch(src, /viewMore|label: 'More'/, 'the More page/tab is gone');
   // admin hamburger: exactly the administration destinations — nothing personal, no Sign out
   const menu = src.slice(src.indexOf('const adminMenuItems = () => ['), src.indexOf('// The drawer lives in #sheet-root'));
-  assert.deepEqual(labels(menu), ['People', 'Calendar', 'Print labels', 'Create labels', 'Import / export', 'Activity log', 'Settings']);
+  assert.deepEqual(labels(menu), ['People', 'Calendar', 'Print labels', 'Create labels', 'Import / export', 'Activity log'], 'Settings moved next to My profile (owner, 2026-10-27)');
   const drawer = src.slice(src.indexOf('function openDrawer()'), src.indexOf('function mountShell()'));
   assert.doesNotMatch(drawer, /My profile|Sign out|logout/, 'no personal/account actions in the admin hamburger');
   assert.match(drawer, /if \(!isAdmin\(\)/, 'the drawer refuses to open for a non-admin');
@@ -335,10 +335,14 @@ test('front end: mobile nav — five tabs incl. Profile for everyone; hamburger 
   const account = src.slice(src.indexOf('function viewAccount()'), src.indexOf('async function logout()'));
   const [adminItems, employeeItems] = account.slice(account.indexOf('const items = isAdmin() ? ['), account.indexOf('main().innerHTML')).split('] : [');
   const hrefs = (t) => [...t.matchAll(/\['(#\/\w+)'/g)].map((m) => m[1]);
-  assert.deepEqual(hrefs(adminItems), ['#/profile']);
+  assert.deepEqual(hrefs(adminItems), ['#/profile', '#/settings'], "an admin's Settings sits with My profile");
   assert.deepEqual(hrefs(employeeItems), ['#/equipment', '#/history', '#/profile']);
   assert.match(account, /id="out"[\s\S]*\$\('#out'\)\.onclick = logout/, 'Sign out lives on the Profile page');
-  assert.doesNotMatch(account, /#\/(people|catalog|labels|import|activity|settings)/, 'no administration in Profile');
+  assert.doesNotMatch(account, /#\/(people|catalog|labels|import|activity)/, 'no other administration in Profile');
+  assert.doesNotMatch(employeeItems, /settings/, 'employees have no Settings');
+  // the desktop sidebar and the avatar menu list Settings beside My profile, for admins only
+  assert.match(src, /\{ key: 'profile', href: '#\/profile', label: 'My profile', icon: 'user' \},\n    \.\.\.\(isAdmin\(\) \? \[\{ key: 'settings', href: '#\/settings', label: 'Settings', icon: 'settings' \}\] : \[\]\)\)/);
+  assert.match(src, /My profile<\/a>\$\{isAdmin\(\) \? `<a href="#\/settings" role="menuitem">/);
   // routing: Profile route, old More bookmarks redirect there, and the role guards on admin/employee routes are unchanged
   assert.match(src, /\[\/\^#\\\/account\$\/, viewAccount, \{ key: 'account' \}\]/);
   assert.match(src, /\[\/\^#\\\/more\$\/, \(\) => go\('#\/account'\)/);

@@ -70,3 +70,6 @@ the nav and the routes. Full suite on both drivers.
   source-pinning tests of the catalog / menu / calendar entry points updated to the merged page.
 - Checked in headless Chrome (desktop 1280 and phone 390): All assets root, a category, a status filter, Add asset with its label,
   Create labels.
+- Follow-ups (owner, 2026-10-27): more space between the category cards and the top-level list; All assets' sub-items (Print labels,
+  Create labels) show in the sidebar only while you are in All assets or a label page (`.sidebar.assets-open`); Settings moved next to
+  My profile (sidebar bottom, avatar menu, the phone's Profile tab) and out of the admin section / hamburger.

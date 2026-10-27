@@ -355,9 +355,9 @@ function navItems() {
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
     { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
-    { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
-    { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' });
-  side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' });
+    { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' });
+  side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' },
+    ...(isAdmin() ? [{ key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' }] : [])); // Settings sits with My profile
   return { tabs: common, side };
 }
 // Mobile hamburger (admins only) = administering the system. The signed-in person's own destinations live under the Profile tab.
@@ -368,8 +368,7 @@ const adminMenuItems = () => [
   { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus' },
   { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
   { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
-  { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
-];
+]; // (Settings is under the Profile tab and the avatar menu, with My profile)
 // The drawer lives in #sheet-root like every other overlay, so the router's existing "clear overlays on navigation" also closes it.
 function closeDrawer() {
   $('#sheet-root .drawer-backdrop')?.remove(); document.body.style.overflow = '';
@@ -396,7 +395,7 @@ function mountShell() {
       <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
       <div class="menu-wrap"><button type="button" class="avatar sm" id="avatar-btn" aria-haspopup="menu" aria-expanded="false" title="${esc(S.me.name)}" style="background:var(--brand-accent);border:0;cursor:pointer">${esc(initials(S.me.name))}</button>
         <div class="menu" id="avatar-menu" role="menu" hidden><div class="menu-who"><strong>${esc(S.me.name)}</strong><div class="small muted">${esc(S.me.email || '')}</div></div>
-          <a href="#/profile" role="menuitem">${icon('user')} My profile</a><button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
+          <a href="#/profile" role="menuitem">${icon('user')} My profile</a>${isAdmin() ? `<a href="#/settings" role="menuitem">${icon('settings')} Settings</a>` : ''}<button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
       <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
@@ -424,9 +423,10 @@ function mountShell() {
 const ACCOUNT_KEYS = ['account', 'profile', 'equipment', 'history'];
 function setActive(key) {
   S.activeKey = key;
-  const tabKey = ACCOUNT_KEYS.includes(key) ? 'account' : key.startsWith('labels') ? 'assets' : key; // the Profile tab covers the person's own pages; the label pages sit under Assets
+  const tabKey = ACCOUNT_KEYS.includes(key) || key === 'settings' ? 'account' : key.startsWith('labels') ? 'assets' : key; // the Profile tab covers the person's own pages; the label pages sit under Assets
   $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.key === tabKey));
   $$('.sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key));
+  $('.sidebar')?.classList.toggle('assets-open', ['assets', 'labels', 'labels-new'].includes(key)); // All assets' sub-items show while you are in it
 }
 async function refreshBadge() {
   try {
@@ -2736,7 +2736,7 @@ async function viewAdminAssets() {
         ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
         : `<p class="muted small ct-empty">${st.status ? `No ${esc(statusLabel().toLowerCase())} assets here.` : inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
     } else { // the top: every asset (within the status chip), as the old All assets list
-      below = `<div class="card-head" style="padding:0;margin:4px 0 8px"><h3 class="ct-h" style="margin:0">${st.status ? esc(statusLabel()) : 'All assets'} <span class="muted">${list ? list.length : ''}</span></h3><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
+      below = `<div class="card-head" style="padding:0;margin:24px 0 8px"><h3 class="ct-h" style="margin:0">${st.status ? esc(statusLabel()) : 'All assets'} <span class="muted">${list ? list.length : ''}</span></h3><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
         ${list === null ? '<div class="spinner"></div>' : list.length ? `<div class="card"><ul class="list">${list.map((a) => assetRow(a, null)).join('')}</ul></div>`
           : `<div class="empty">${icon('box')}<p>${st.status ? `No ${esc(statusLabel().toLowerCase())} assets.` : 'No assets yet. Tap <strong>Add</strong>, scan a barcode, or create labels to get started.'}</p></div>`}`;
     }
@@ -2864,6 +2864,7 @@ function viewAccount() {
   if (window.matchMedia('(min-width: 900px)').matches) return go('#/profile'); // the desktop sidebar already lists these
   const items = isAdmin() ? [
     ['#/profile', 'user', 'My profile', 'Your details and password'],
+    ['#/settings', 'settings', 'Settings', 'Categories, locations, email and check-out rules'],
   ] : [
     ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],
     ['#/history', 'history', 'History', 'Equipment you have had before'],
