@@ -237,7 +237,11 @@ The colors are CSS variables at the top of `public/app.css`: `--brand-ink` (blac
 
 ## Security notes
 
-- Passwords are hashed with bcrypt. Sessions last 30 days and are stored in the database. Logins are rate-limited.
+- Passwords are hashed with bcrypt. Sessions last 30 days and are stored in the database. Logins are rate-limited (10 failures per IP and email, 100 per IP, 15 minutes), and an unknown email is answered as slowly as a wrong password. Forgot-password is limited too (20 per IP, 3 emails per address, 15 minutes) and never cancels a pending invite.
+- A sign-in, a reset and the first-run setup always start a new session id. A password change or a reset signs the account out everywhere else.
+- First-run setup is closed in production unless `SETUP_TOKEN` is set (see `.env.example`).
+- Every response carries a Content-Security-Policy that allows only the app's own scripts (no inline script), plus HSTS when `APP_URL` is https. In production set `APP_URL` to the https address: without it cookies are not marked Secure (the app warns at startup).
+- Photo uploads must decode as JPEG, PNG, WebP, HEIF, GIF or TIFF (at most 100 megapixels); they are re-encoded as JPEG.
 - Google sign-in uses the authorization-code flow with PKCE, a single-use `state` and a `nonce`; the app checks the ID token's issuer, audience, expiry, verified email and Workspace domain, and never sees a Google password. Refused Google sign-ins are rate-limited per IP like password logins.
 - Users only see available items and their own items. Purchase cost, vendor, notes and license keys stay hidden unless the user holds that item.
 - A deactivated person is signed out immediately. Their assignment history is kept.

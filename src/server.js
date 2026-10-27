@@ -41,6 +41,10 @@ const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
 // Where photo files live: the volume (default) or a private S3 bucket when S3_BUCKET is set (src/photoStorage.js). Rows stay in the database.
 const photoFiles = require('./photoStorage').fromEnv(process.env, UPLOAD_DIR);
 const secureCookies = APP_URL.startsWith('https://');
+if (process.env.NODE_ENV === 'production' && !secureCookies && !process.env.NC_NO_EXTERNAL_MAIL) {
+  // Without an https APP_URL the session cookie is sent without Secure, HSTS is off and email links point at the wrong place.
+  console.warn(`WARNING: APP_URL is ${APP_URL}. In production set it to the site's https address (e.g. https://it.nutricost.com).`);
+}
 
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
@@ -53,10 +57,17 @@ const hasNul = (v) => (typeof v === 'string' ? v.includes('\u0000')
     : v && typeof v === 'object' ? Object.entries(v).some(([k, x]) => hasNul(k) || hasNul(x)) : false);
 app.use('/api', (req, res, next) => (/%00/i.test(req.url) || hasNul(req.body) ? res.status(400).json({ error: 'That text contains a character that is not allowed.' }) : next()));
 app.use((req, res, next) => { if (req.body === undefined) req.body = {}; next(); });
+// The Content-Security-Policy: our own scripts only (no inline script, no eval), so an HTML-escaping slip in the front end cannot
+// run code. Inline style attributes are used throughout app.js, hence 'unsafe-inline' for styles only. blob:/data: images are
+// photo previews and barcodes; blob: media is the camera scanner. HSTS only when the app is served over https (APP_URL).
+const CSP = ["default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline'", "img-src 'self' blob: data:", "media-src 'self' blob:",
+  "connect-src 'self'", "worker-src 'self' blob:", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'"].join('; ');
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'same-origin');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Content-Security-Policy', CSP);
+  if (secureCookies) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 
@@ -173,35 +184,60 @@ const { capacity } = data.assignments;
 // ---------- setup & auth ----------
 // The SQL of these routes is in src/accounts.js and src/people.js (moved there verbatim in Slice 5B-3); bcrypt, the tokens, the session
 // and the emails stay here, in the same order as before.
+// A new session id for a sign-in (the old session is destroyed): no session id chosen before the sign-in survives it. The store
+// answers asynchronously (Slice 5B-3), so a store failure reaches the error handler (a 500).
+const newSession = (req) => new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+// Compared against when the email has no account or no password, so an unknown email takes as long as a wrong password.
+const NO_ACCOUNT_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 10);
+
+// The first-run setup makes whoever completes it the first admin, so on a fresh server it must not be open to anyone who finds the
+// URL first. With SETUP_TOKEN set, the form needs that code; in production (NODE_ENV=production) without it, setup is closed (the
+// first admin then comes from Google sign-in with GOOGLE_ADMIN_EMAILS, or IT sets SETUP_TOKEN). Local development is unchanged.
+const setupRule = () => (process.env.SETUP_TOKEN ? 'code' : process.env.NODE_ENV === 'production' ? 'closed' : 'open');
+const sameSecret = (a, b) => { const x = crypto.createHash('sha256').update(String(a)).digest(); return crypto.timingSafeEqual(x, crypto.createHash('sha256').update(String(b)).digest()); };
 app.get('/api/setup-needed', async (req, res) => {
-  res.json({ needed: await data.accounts.accountCount() === 0 });
+  const needed = await data.accounts.accountCount() === 0;
+  res.json(needed ? { needed, rule: setupRule() } : { needed });
 });
 app.post('/api/setup', wrap(async (req, res) => {
   if (await data.accounts.accountCount() > 0) throw httpError(400, 'Setup already completed');
+  const rule = setupRule();
+  if (rule === 'closed') throw httpError(403, 'Setup is turned off on this server. Ask whoever runs it to set SETUP_TOKEN, or sign in with Google.');
+  if (rule === 'code' && !sameSecret(req.body.setup_code || '', process.env.SETUP_TOKEN)) throw httpError(403, 'The setup code is not correct.');
   const { name, email, password } = req.body;
   if (!clean(name) || !clean(email) || !password || password.length < 8) throw httpError(400, 'Name, email and a password of at least 8 characters are required');
   const hash = await bcrypt.hash(password, 10);
   const mail = normEmail(email);
   const accountId = await data.accounts.createFirstAdmin({ name: clean(name), mail, hash });
+  await newSession(req);
   req.session.uid = accountId;
   res.json({ ok: true });
 }));
 
+// Attempt counters, 15-minute windows (in memory: one instance). Login: 10 failures per IP and email, and 100 per IP across all emails
+// (no password spraying over every colleague's address; a shared office IP still has room). Forgot-password: 20 requests per IP, and
+// at most 3 emails per address (more are answered the same way but not sent).
 const loginAttempts = new Map();
+const WINDOW = 15 * 60e3;
+const attempts = (key) => {
+  let a = loginAttempts.get(key);
+  if (!a || Date.now() - a.t > WINDOW) { a = { n: 0, t: Date.now() }; loginAttempts.set(key, a); }
+  return a;
+};
+setInterval(() => { const old = Date.now() - WINDOW; for (const [k, a] of loginAttempts) if (a.t < old) loginAttempts.delete(k); }, WINDOW).unref();
 app.post('/api/login', wrap(async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   const key = `${req.ip}|${email}`;
-  const att = loginAttempts.get(key) || { n: 0, t: Date.now() };
-  if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
-  if (att.n >= 10) throw httpError(429, 'Too many attempts. Try again in 15 minutes.');
+  const att = attempts(key);
+  const ipAtt = attempts(`${req.ip}|*`);
+  if (att.n >= 10 || ipAtt.n >= 100) throw httpError(429, 'Too many attempts. Try again in 15 minutes.');
   const u = await data.accounts.loginAccount(email);
-  const ok = u && u.password_hash && (await bcrypt.compare(String(req.body.password || ''), u.password_hash));
-  if (!ok) { att.n++; loginAttempts.set(key, att); throw httpError(401, 'Email or password is incorrect'); }
+  const matches = await bcrypt.compare(String(req.body.password || ''), u?.password_hash || NO_ACCOUNT_HASH);
+  const ok = !!(u && u.password_hash && matches);
+  if (!ok) { att.n++; ipAtt.n++; throw httpError(401, 'Email or password is incorrect'); }
   loginAttempts.delete(key);
   await data.accounts.recordLogin(u.id);
-  // A new session id at sign-in (the old session is destroyed). The store answers asynchronously now (Slice 5B-3), so a store failure
-  // is handed to the error handler here (a 500, as when the store threw synchronously) instead of being thrown inside its callback.
-  await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+  await newSession(req);
   req.session.uid = u.id; // the session identifies the ACCOUNT
   res.json({ ok: true });
 }));
@@ -222,6 +258,10 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
   if (!password || password.length < 8) throw httpError(400, 'New password must be at least 8 characters');
   if (req.user.password_hash && !(await bcrypt.compare(String(current || ''), req.user.password_hash))) throw httpError(400, 'Current password is incorrect');
   await data.accounts.setPassword(req.user.account_id, await bcrypt.hash(password, 10));
+  // A new password signs the account out everywhere else; this browser stays signed in on a new session.
+  await data.sessions.destroyForAccount(req.user.account_id);
+  await newSession(req);
+  req.session.uid = req.user.account_id;
   res.json({ ok: true });
 }));
 // Everyone edits their own name, phone, department, job title and building (owner decision 2026-10-27; employees could not before). The
@@ -237,10 +277,14 @@ app.put('/api/me', auth, async (req, res) => {
 });
 
 app.post('/api/forgot', async (req, res) => {
-  const a = await data.accounts.resetAccount(String(req.body.email || '').trim().toLowerCase());
+  if (attempts(`${req.ip}|forgot`).n++ >= 20) throw httpError(429, 'Too many requests. Try again in 15 minutes.');
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const a = attempts(`forgot|${email}`).n++ < 3 ? await data.accounts.resetAccount(email) : null;
   if (a) {
     const t = newToken(1);
-    await data.accounts.replaceToken(a.id, 'reset', t.token, t.expiresAt);
+    // Its own purpose: a forgot-password link never replaces a pending 7-day invite (purpose 'reset'); either link works once,
+    // and setting the password removes every token of the account (completeReset).
+    await data.accounts.replaceToken(a.id, 'forgot', t.token, t.expiresAt);
     notify.passwordReset({ name: a.name, email: a.login_email }, `${APP_URL}/#/reset/${t.token}`);
   }
   res.json({ ok: true }); // never reveal whether an account exists
@@ -251,6 +295,8 @@ app.post('/api/reset', wrap(async (req, res) => {
   const t = await data.accounts.getToken(String(token || ''));
   if (!t || t.expires_at < new Date().toISOString()) throw httpError(400, 'This link has expired. Ask for a new one.');
   await data.accounts.completeReset(t.user_id, await bcrypt.hash(password, 10)); // the new password, then every token of the account is gone
+  await data.sessions.destroyForAccount(t.user_id); // signed out everywhere else, as after a password change
+  await newSession(req);
   req.session.uid = t.user_id;
   res.json({ ok: true });
 }));
@@ -277,9 +323,8 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   delete req.session.google; // single use, whatever happens next
   // Refusals share POST /api/login's limiter (per IP: 10 failures, then 15 minutes), so refused callbacks cannot run unbounded.
   const key = `${req.ip}|google`;
-  const att = loginAttempts.get(key) || { n: 0, t: Date.now() };
-  if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
-  const refuse = (code) => { att.n++; loginAttempts.set(key, att); res.redirect(`/#/login?error=${code}`); };
+  const att = attempts(key);
+  const refuse = (code) => { att.n++; res.redirect(`/#/login?error=${code}`); };
   if (att.n >= 10) return res.redirect('/#/login?error=too_many');
   let who;
   try {
@@ -295,7 +340,7 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   if (google.admins.has(who.email) && await data.accounts.makeAdmin(accountId)) console.log('[google sign-in] made an admin by GOOGLE_ADMIN_EMAILS:', who.email);
   loginAttempts.delete(key);
   await data.accounts.recordLogin(accountId);
-  await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
+  await newSession(req);
   req.session.uid = accountId; // the session identifies the ACCOUNT, as after a password login
   res.redirect('/#/home');
 }));
@@ -635,6 +680,7 @@ app.post('/api/assets/:id/request-return', admin, async (req, res) => {
 });
 
 // ---------- photos ----------
+const PHOTO_FORMATS = new Set(['jpeg', 'png', 'webp', 'heif', 'gif', 'tiff']);
 const upload = multer({
   dest: path.join(DATA_DIR, 'tmp'),
   limits: { fileSize: 25 * 1024 * 1024, files: 10 },
@@ -657,8 +703,11 @@ app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async 
     const base = `${asset.id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     let full; let thumb;
     try { // the real image content is decoded here (the declared type is not trusted); rotate() applies the orientation, and no metadata is kept
-      full = await sharp(f.path).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
-      thumb = await sharp(f.path).rotate().resize({ width: 400, height: 400, fit: 'cover' }).jpeg({ quality: 75 }).toBuffer();
+      // Only photo formats reach the decoders (no SVG, PDF or other exotic inputs), and at most 100 megapixels (a 48 MP phone photo fits).
+      const img = () => sharp(f.path, { limitInputPixels: 100e6 });
+      if (!PHOTO_FORMATS.has((await img().metadata()).format)) throw new Error('not a photo format');
+      full = await img().rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+      thumb = await img().rotate().resize({ width: 400, height: 400, fit: 'cover' }).jpeg({ quality: 75 }).toBuffer();
     } catch (e) { unreadable.push(label); continue; } finally { fs.rm(f.path, () => {}); }
     try {
       await photoFiles.put(base + '.jpg', full);

@@ -101,7 +101,7 @@ describe('Slice 5D-1: the app on DB_DRIVER=pg', pgSuite(), () => {
   });
 
   test('setup and sign-in work, and the session is stored in PostgreSQL', async () => {
-    assert.deepEqual((await admin.get('/api/setup-needed')).body, { needed: true });
+    assert.deepEqual((await admin.get('/api/setup-needed')).body, { needed: true, rule: 'open' });
     const r = await admin.post('/api/setup', { name: 'Ada Admin', email: 'ada@nutricost.com', password: 'correct-horse-1' });
     assert.equal(r.status, 200, JSON.stringify(r.body));
     const me = await admin.get('/api/me');
