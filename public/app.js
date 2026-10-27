@@ -255,75 +255,119 @@ function confirmSheet(title, text, okLabel = 'Confirm', danger = false) {
 }
 
 // ============================================================ barcode scanner
+// One camera overlay at a time (a second would fight for the camera). html5-qrcode draws the only
+// scan window (its shaded box) and decodes exactly that box, but it assumes its <video> shows the whole stream at the size it
+// measured: .qr-reader is therefore left to size the video itself and the overlay only centres it (see .scanner in app.css).
+let activeScanner = null;
+let scanChain = Promise.resolve(); // every scanner's start / stop, one after another: a new camera never starts while the previous one is still being released
+let scanSeq = 0;
 function openScanner({ title = 'Scan a barcode', hint = 'Point the camera at the barcode or QR code', onResult }) {
+  if (activeScanner) activeScanner.close();
+  const readerId = 'qr-reader-' + (++scanSeq); // unique per overlay: the old one may still be on screen while it is released
   const wrap = document.createElement('div');
   wrap.className = 'scanner';
   wrap.innerHTML = `
     <div class="sc-top"><button class="iconbtn" id="sc-close" aria-label="Close">${icon('x')}</button>
       <strong>${esc(title)}</strong><button class="iconbtn" id="sc-torch" aria-label="Flashlight" style="visibility:hidden">${icon('flash')}</button></div>
-    <div class="sc-view"><div id="qr-reader"></div><div class="frame"><div class="laser"></div></div><div class="sc-hint">${esc(hint)}</div></div>
+    <div class="sc-view"><div id="${readerId}" class="qr-reader"></div><div class="sc-hint">${esc(hint)}</div></div>
     <div class="sc-bottom"><form class="input-group" id="sc-form"><input id="sc-manual" placeholder="Or type the tag / serial number" autocomplete="off" autocapitalize="characters" enterkeyhint="go"><button class="btn primary">Go</button></form></div>`;
   document.body.appendChild(wrap);
   document.body.style.overflow = 'hidden';
-  let scanner = null; let done = false;
-  const finish = async (code) => {
-    if (done) return; done = true;
-    try { navigator.vibrate && navigator.vibrate(60); } catch { /* */ }
-    await stop();
-    onResult(String(code).trim());
+  let scanner = null; let done = false; let failed = false; let closing = null; let restarts = 0;
+  const enqueue = (fn) => (scanChain = scanChain.then(fn, fn));
+
+  const showErr = (msg) => { failed = true; $('.sc-view', wrap).innerHTML = `<div class="sc-err"><div>${icon('camera')}<p style="margin-top:10px">${msg}</p><p class="small" style="opacity:.7">You can still type the tag below, or use a USB/Bluetooth barcode scanner.</p></div></div>`; setTimeout(() => $('#sc-manual', wrap)?.focus(), 50); };
+
+  // Releases the camera: the library's stop(), then every track it may have left running (a failed stop() used to be swallowed
+  // and left the camera on, so the next scanner could not get it).
+  const release = async () => {
+    const s = scanner; scanner = null;
+    if (!s) return;
+    const tracks = [...wrap.querySelectorAll('video')].flatMap((v) => (v.srcObject && v.srcObject.getTracks ? v.srcObject.getTracks() : []));
+    try { if (s.isScanning) await s.stop(); } catch (e) { console.warn('Scanner stop failed:', e); }
+    try { s.clear(); } catch { /* nothing rendered */ }
+    tracks.forEach((t) => { try { t.stop(); } catch { /* already stopped */ } });
   };
-  let starting = Promise.resolve();
-  const stop = async () => {
-    wrap.style.display = 'none'; document.body.style.overflow = '';
-    await starting.catch(() => {});
-    try { if (scanner && scanner.isScanning) await scanner.stop(); } catch { /* */ }
-    try { scanner && scanner.clear(); } catch { /* */ }
-    wrap.remove(); document.body.style.overflow = '';
-  };
-  $('#sc-close', wrap).onclick = () => { done = true; stop(); };
-  $('#sc-form', wrap).onsubmit = (e) => { e.preventDefault(); const v = $('#sc-manual', wrap).value.trim(); if (v) finish(v); };
-  const showErr = (msg) => { $('.sc-view', wrap).innerHTML = `<div class="sc-err"><div>${icon('camera')}<p style="margin-top:10px">${msg}</p><p class="small" style="opacity:.7">You can still type the tag below, or use a USB/Bluetooth barcode scanner.</p></div></div>`; setTimeout(() => $('#sc-manual', wrap)?.focus(), 50); };
-  if (!window.isSecureContext) return showErr('The camera needs a secure (https://) connection.'), { close: stop };
-  if (!window.Html5Qrcode) return showErr('Scanner is still loading — try again in a second.'), { close: stop };
-  const F = window.Html5QrcodeSupportedFormats;
-  const formats = [F.QR_CODE, F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF, F.CODABAR, F.DATA_MATRIX].filter((x) => x !== undefined);
-  try {
-    scanner = new window.Html5Qrcode('qr-reader', { formatsToSupport: formats, verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
-  } catch (e) { return showErr('Could not start the scanner.'), { close: stop }; }
-  starting = scanner.start({ facingMode: 'environment' }, {
-    fps: 12,
-    qrbox: (w, h) => ({ width: Math.max(60, Math.floor(Math.min(w * 0.82, 380))), height: Math.max(60, Math.floor(Math.min(w * 0.46, 210, h * 0.5))) }),
-    aspectRatio: window.innerHeight / window.innerWidth,
-    videoConstraints: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
-  }, (text) => finish(text), () => {});
-  starting.then(() => {
+
+  const begin = () => enqueue(async () => {
+    if (done || failed || scanner) return;
+    if (!window.isSecureContext) return showErr('The camera needs a secure (https://) connection.');
+    if (!window.Html5Qrcode) return showErr('Scanner is still loading — try again in a second.');
+    const F = window.Html5QrcodeSupportedFormats;
+    const formats = [F.QR_CODE, F.CODE_128, F.CODE_39, F.CODE_93, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.ITF, F.CODABAR, F.DATA_MATRIX].filter((x) => x !== undefined);
+    let s;
+    try { s = new window.Html5Qrcode(readerId, { formatsToSupport: formats, verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } }); } catch (e) { console.warn('Scanner init failed:', e); return showErr('Could not start the scanner.'); }
+    scanner = s;
     try {
-      const caps = scanner.getRunningTrackCapabilities && scanner.getRunningTrackCapabilities();
-      if (caps && caps.torch) {
-        const b = $('#sc-torch', wrap); b.style.visibility = 'visible'; let on = false;
-        b.onclick = () => { on = !on; scanner.applyVideoConstraints({ advanced: [{ torch: on }] }).catch(() => {}); };
+      await s.start({ facingMode: 'environment' }, {
+        fps: 12,
+        // w x h is the video as it is really shown, so this box is both what is drawn and what is decoded.
+        qrbox: (w, h) => ({ width: Math.max(60, Math.floor(Math.min(w * 0.82, 380))), height: Math.max(60, Math.floor(Math.min(w * 0.46, 210, h * 0.5))) }),
+        videoConstraints: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      }, (text) => finish(text), () => {});
+    } catch (err) {
+      console.warn('Scanner start failed:', err);
+      await release();
+      const m = String(err && (err.message || err));
+      return showErr(/NotAllowed|Permission/i.test(m) ? 'Camera access was blocked. Allow camera access for this site in your browser settings.' : /NotFound|Requested device not found/i.test(m) ? 'No camera was found on this device.' : 'Could not open the camera.');
+    }
+    try {
+      const caps = s.getRunningTrackCapabilities && s.getRunningTrackCapabilities();
+      const torch = $('#sc-torch', wrap);
+      if (caps && caps.torch && torch) {
+        torch.style.visibility = 'visible'; let on = false;
+        torch.onclick = () => { on = !on; s.applyVideoConstraints({ advanced: [{ torch: on }] }).catch((e) => console.warn('Flashlight:', e)); };
       }
-    } catch { /* */ }
-  }).catch((err) => {
-    const m = String(err && (err.message || err));
-    showErr(/NotAllowed|Permission/i.test(m) ? 'Camera access was blocked. Allow camera access for this site in your browser settings.' : /NotFound|Requested device not found/i.test(m) ? 'No camera was found on this device.' : 'Could not open the camera.');
+    } catch { /* no torch control */ }
+    // The camera can be taken away while the overlay stays open (another app, a call): open a fresh one rather than show a frozen picture.
+    const track = [...wrap.querySelectorAll('video')].map((v) => v.srcObject && v.srcObject.getVideoTracks && v.srcObject.getVideoTracks()[0]).find(Boolean);
+    if (track) track.addEventListener('ended', () => { if (!done && scanner === s && restarts++ < 3) enqueue(release).then(begin); });
   });
-  return { close: stop };
+
+  // iOS suspends the camera when the page goes to the background and the old stream never recovers: let go of it, open a new one on return.
+  const onVisibility = () => { if (done) return; if (document.hidden) enqueue(release); else begin(); };
+  const close = () => closing || (closing = (async () => {
+    done = true; if (activeScanner === handle) activeScanner = null;
+    document.removeEventListener('visibilitychange', onVisibility);
+    window.removeEventListener('hashchange', onRoute);
+    wrap.style.display = 'none';
+    await enqueue(release);
+    wrap.remove();
+    if (!$('.scanner')) document.body.style.overflow = ''; // (a newer overlay keeps the page locked)
+  })());
+  const finish = (code) => {
+    if (done) return;
+    done = true; // first result wins: later frames, the manual box and Close can no longer act
+    try { navigator.vibrate && navigator.vibrate(60); } catch { /* */ }
+    close().then(() => onResult(String(code).trim())).catch((e) => console.error('Scan result handler failed:', e));
+  };
+  document.addEventListener('visibilitychange', onVisibility);
+  const route0 = location.hash.split('?')[0];
+  const onRoute = () => { if (location.hash.split('?')[0] !== route0) close(); }; // a page change (Back, a link) must not leave the camera running behind the next page
+  window.addEventListener('hashchange', onRoute);
+  $('#sc-close', wrap).onclick = () => close();
+  $('#sc-form', wrap).onsubmit = (e) => { e.preventDefault(); const v = $('#sc-manual', wrap).value.trim(); if (v) finish(v); };
+  const handle = { close };
+  activeScanner = handle;
+  begin();
+  return handle;
 }
 
+// A scanned (or typed, or keyboard-wedge) code opens its asset: lookup matches the asset tag, then the serial number. Any value is
+// accepted; no tag format or prefix is assumed. A code no asset uses shows "No asset found for <code>" with Scan again, and for IT
+// Add asset, which opens the Add asset form with the code as the tag (nothing is saved until they submit it). A failed lookup is an
+// error, never "not found".
 async function handleScannedCode(code, ctx = '') { // ctx: where the asset page should say it came from (the Scan page passes srcQ('scan'))
-  try {
-    const r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code));
-    if (r.found) return go('#/asset/' + r.id + ctx);
-    if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
-    if (isAdmin()) {
-      const { el, close } = sheet(`<h2>New barcode</h2><p class="muted">No asset uses <strong class="mono">${esc(code)}</strong> yet. Want to tag a new asset with it?</p>
-        <div class="stack" style="margin-top:16px"><button class="btn primary lg block" id="mk">${icon('plus')} Add a new asset with this tag</button>
-        <button class="btn block" id="again">${icon('scan')} Scan again</button></div>`);
-      $('#mk', el).onclick = () => { close(); go('#/new?tag=' + encodeURIComponent(code)); };
-      $('#again', el).onclick = () => { close(); openScanner({ onResult: (c) => handleScannedCode(c, ctx) }); };
-    } else toast(`No asset found for ${code}`, true);
-  } catch (e) { fail(e); }
+  let r;
+  try { r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code)); } catch (e) { return fail(e); }
+  if (r.found) return go('#/asset/' + r.id + ctx);
+  if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
+  const { el, close } = sheet(`<h2 style="overflow-wrap:anywhere">No asset found for <span class="mono">${esc(code)}</span></h2>
+    <div class="stack" style="margin-top:16px">${isAdmin() ? `<button class="btn primary lg block" id="mk">${icon('plus')} Add asset</button>` : ''}
+    <button class="btn block" id="again">${icon('scan')} Scan again</button></div>`);
+  const mk = $('#mk', el);
+  if (mk) mk.onclick = () => { close(); go('#/new?tag=' + encodeURIComponent(code)); };
+  $('#again', el).onclick = () => { close(); openScanner({ onResult: (c) => handleScannedCode(c, ctx) }); };
 }
 
 // ============================================================ shell / navigation

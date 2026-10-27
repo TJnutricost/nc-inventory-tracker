@@ -302,14 +302,12 @@ legend { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
 .scanner { position: fixed; inset: 0; background: #000; z-index: 70; display: flex; flex-direction: column; color: #fff; }
 .scanner .sc-top { display: flex; align-items: center; justify-content: space-between; padding: calc(env(safe-area-inset-top) + 10px) 12px 10px; }
 .scanner .sc-top .iconbtn { color: #fff; background: rgba(255,255,255,.12); }
-.scanner .sc-view { flex: 1; position: relative; overflow: hidden; }
-.scanner #qr-reader { position: absolute; inset: 0; }
-.scanner #qr-reader video { width: 100% !important; height: 100% !important; object-fit: cover; }
-.scanner .frame { position: absolute; left: 50%; top: 45%; width: min(82vw, 380px); height: min(46vw, 210px); transform: translate(-50%, -50%); border-radius: 18px; box-shadow: 0 0 0 9999px rgba(0,0,0,.45); pointer-events: none; }
-.scanner .frame::before { content: ""; position: absolute; inset: 0; border: 3px solid #fff; border-radius: 18px; }
-.scanner .frame .laser { position: absolute; left: 8%; right: 8%; top: 50%; height: 2px; background: #ff3b30; box-shadow: 0 0 10px #ff3b30; animation: laser 1.6s ease-in-out infinite; }
-@keyframes laser { 50% { transform: translateY(-40px); } }
-.scanner .sc-hint { position: absolute; left: 0; right: 0; top: calc(45% + min(23vw, 105px) + 18px); text-align: center; font-weight: 600; text-shadow: 0 1px 3px #000; }
+.scanner .sc-view { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+/* html5-qrcode sizes its own <video> to this width, measures it, and draws and decodes ONE box (its shaded region) in that
+   measured space. The video must therefore not be stretched or cropped here (it was: width/height 100% + object-fit: cover, with a
+   second hand-drawn frame): the box on screen and the area decoded then differed. Flex centring keeps a tall video centred. */
+.scanner .qr-reader { width: min(100%, 640px); flex: none; }
+.scanner .sc-hint { position: absolute; left: 0; right: 0; top: 14px; text-align: center; font-weight: 600; text-shadow: 0 1px 3px #000; pointer-events: none; z-index: 2; }
 .scanner .sc-bottom { padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); background: #111; }
 .scanner .sc-bottom input { background: #1c1f24; border-color: #333; color: #fff; }
 .scanner .sc-err { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; color: #ddd; }
