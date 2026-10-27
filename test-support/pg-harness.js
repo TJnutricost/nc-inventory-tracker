@@ -111,7 +111,13 @@ async function createTestDatabase({ migrate = true, env = process.env } = {}) {
       // WITH (FORCE) (which terminates any remaining connection), then give the pools a moment to finish closing.
       const ending = Promise.all(pools.splice(0).map((p) => p.end().catch(() => {})));
       await dropTestDatabase(name, env);
-      await Promise.race([ending, new Promise((r) => setTimeout(r, 1000).unref())]);
+      // The grace timer must keep the event loop alive (no unref): a pool still waiting for a terminated, checked-out
+      // client never settles `ending`, and with nothing else pending the process would exit mid-await (Node 22:
+      // "Promise resolution is still pending but the event loop has already resolved"). It is cleared as soon as the
+      // pools have closed, so a normal drop does not wait.
+      let grace;
+      await Promise.race([ending, new Promise((r) => { grace = setTimeout(r, 1000); })]);
+      clearTimeout(grace);
     },
   };
   tdb.pool = tdb.newPool();

@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "NODE_ENV=development node --watch src/server.js",
-    "test": "node --test test/",
-    "test:pg-suite": "node test-support/pg-probe.js && NC_TEST_DRIVER=pg NC_REQUIRE_PG=1 node --test test/",
-    "test:pg": "node test-support/pg-probe.js && NC_REQUIRE_PG=1 node --test test/pg/",
+    "test": "node test-support/run-tests.js test",
+    "test:pg-suite": "node test-support/pg-probe.js && NC_TEST_DRIVER=pg NC_REQUIRE_PG=1 node test-support/run-tests.js test",
+    "test:pg": "node test-support/pg-probe.js && NC_REQUIRE_PG=1 node test-support/run-tests.js test/pg",
     "seed:dev": "node scripts/seed-dev.js",
     "seed:verify": "node scripts/seed-verify.js",
     "db:up": "docker compose -f docker-compose.postgres.yml up -d --wait",
