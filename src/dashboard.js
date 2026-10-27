@@ -25,7 +25,9 @@ function dashboard(db, user) {
     out.stats = {
       total: c("SELECT COUNT(*) c FROM assets WHERE status NOT IN ('retired','lost','disposed') AND archived_at IS NULL"),
       available: c("SELECT COUNT(*) c FROM assets WHERE status = 'available' AND archived_at IS NULL"),
-      checked_out: c("SELECT COUNT(DISTINCT asset_id) c FROM assignments WHERE returned_at IS NULL"),
+      // Checked out = assets someone holds on a TEMPORARY checkout (a permanent assignment, e.g. a license seat, is not a checkout). The All assets
+      // list for ?status=checked_out uses the same test (src/assetViews.js), so the card and its list agree.
+      checked_out: c("SELECT COUNT(DISTINCT asset_id) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'checkout'"),
       maintenance: c("SELECT COUNT(*) c FROM assets WHERE status = 'maintenance' AND archived_at IS NULL"),
       overdue: c("SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND due_date < date('now')"),
       open_requests: c("SELECT COUNT(*) c FROM requests WHERE status IN ('open','approved','dropped_off')"),

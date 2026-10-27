@@ -48,7 +48,7 @@ async function dashboard(q, user) {
     out.stats = {
       total: await c(`SELECT COUNT(*) c FROM assets WHERE ${LIVE_ASSET}`),
       available: await c("SELECT COUNT(*) c FROM assets WHERE status = 'available' AND archived_at IS NULL"),
-      checked_out: await c('SELECT COUNT(DISTINCT asset_id) c FROM assignments WHERE returned_at IS NULL'),
+      checked_out: await c("SELECT COUNT(DISTINCT asset_id) c FROM assignments WHERE returned_at IS NULL AND assignment_type = 'checkout'"),
       maintenance: await c("SELECT COUNT(*) c FROM assets WHERE status = 'maintenance' AND archived_at IS NULL"),
       overdue: await c(`SELECT COUNT(*) c FROM assignments WHERE returned_at IS NULL AND due_date < ${TODAY}`),
       open_requests: await c("SELECT COUNT(*) c FROM requests WHERE status IN ('open','approved','dropped_off')"),

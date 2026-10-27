@@ -85,6 +85,7 @@ function listAssets(db, user, query) {
     where.push(`a.catalog_node_id IN (${ids.map(() => '?').join(',')})`); params.push(...ids);
   }
   if (status === 'overdue') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.due_date < date('now'))`); }
+  else if (status === 'checked_out') { where.push(`EXISTS (SELECT 1 FROM assignments s WHERE s.asset_id = a.id AND s.returned_at IS NULL AND s.assignment_type = 'checkout')`); } // what the Home card counts: assets on a temporary checkout (not permanent seats)
   else if (status === 'active') { where.push(`a.status NOT IN ('retired','lost','disposed')`); }
   else if (status) { where.push('a.status = ?'); params.push(status); }
   if (!(user.role === 'admin' && query.include_archived === '1')) where.push('a.archived_at IS NULL');

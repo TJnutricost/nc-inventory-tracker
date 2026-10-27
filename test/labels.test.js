@@ -160,7 +160,7 @@ test('front end: the asset tag prefix lives in Create labels (explicit save, liv
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const settings = src.slice(src.indexOf('async function viewSettings('), src.indexOf("$('#test').onclick"));
   assert.doesNotMatch(settings, /tag_prefix|Asset tag prefix/, 'Settings no longer shows or sends the prefix');
-  assert.match(settings, /default_loan_days: fd\.get\('default_loan_days'\),\s+locations:/, 'the checkout settings body is otherwise unchanged');
+  assert.match(settings, /default_loan_days: fd\.get\('default_loan_days'\),\s+it_email_name:/, 'the checkout settings body is otherwise unchanged');
   const labels = src.slice(src.indexOf('async function viewCreateLabels('), src.indexOf('// ============================================================ import / export'));
   assert.match(labels, /Asset tag prefix/);
   assert.match(labels, /Save prefix/);

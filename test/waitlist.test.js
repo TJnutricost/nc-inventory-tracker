@@ -933,9 +933,10 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
   assert.match(catalog, /if \(fromSettings\(\)\) q\.push\(`from=\$\{encodeURIComponent\('#\/settings'\)\}`\)/);
   assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : autoBack\(\)/, 'from Settings: back to Settings; otherwise the previous page (every page has a Back)');
   assert.doesNotMatch(catalog, /history\.replaceState\(null, '', '#\/(catalog|assets)'\)/, 'even the stale-node fallback keeps the source');
-  // Settings layout: a header row (title + description, then the action), Locations kept
+  // Settings layout: a header row (title + description, then the action); Locations is managed on its own page (Locations under All assets)
   assert.match(src, /<div class="set-head"><div class="field"><span>Categories &amp; equipment types<\/span>/);
-  assert.match(src, /name="locations"/);
+  assert.doesNotMatch(src, /name="locations"/, 'the multiline Locations field is gone: one source of truth');
+  assert.match(src, /<a class="btn" href="#\/locations">/, 'Settings links to the Locations page');
   assert.match(css, /\.set-head \{ display: flex; flex-wrap: wrap;/);
   // Shorten: an always-visible calendar instead of a date input; success is a green toast naming the result
   const shorten = src.slice(src.indexOf('function shortenSheet('), src.indexOf('// Wires every reservation button'));

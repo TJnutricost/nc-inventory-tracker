@@ -1047,9 +1047,15 @@ app.put('/api/settings', admin, async (req, res) => {
   if (b.default_loan_days !== undefined) await data.settings.setSetting('default_loan_days', String(Math.max(0, parseInt(b.default_loan_days, 10) || 0)));
   if (b.tag_prefix !== undefined) await data.settings.setSetting('tag_prefix', String(b.tag_prefix).trim().slice(0, 10));
   if (Array.isArray(b.categories)) await data.settings.setSetting('categories', b.categories.map((s) => String(s).trim()).filter(Boolean));
-  if (Array.isArray(b.locations)) await data.settings.setSetting('locations', b.locations.map((s) => String(s).trim()).filter(Boolean));
+  // (`locations` is no longer written here: the managed list below is the one source of truth, and it refuses to drop a used location)
   res.json(await data.settings.getSettings());
 });
+// Managed locations (Locations under All assets): the `locations` setting plus the assets that use each name. IT only. Every write answers with the
+// refreshed overview; a rename rewrites the assets that carried the old name in the same transaction, and a location some asset uses cannot be removed.
+app.get('/api/locations', admin, async (req, res) => res.json(await data.locations.overview()));
+app.post('/api/locations', admin, async (req, res) => res.json(await data.locations.add({ name: req.body.name })));
+app.put('/api/locations', admin, async (req, res) => res.json(await data.locations.rename({ from: req.body.from, to: req.body.to })));
+app.delete('/api/locations', admin, async (req, res) => res.json(await data.locations.remove({ name: req.body.name })));
 app.post('/api/settings/test-email', admin, wrap(async (req, res) => {
   await notify.test(req.user.email);
   const last = await data.outbox.latest();

@@ -115,7 +115,7 @@ function makeClient(server) {
     get: (url) => req('GET', url),
     post: (url, body) => req('POST', url, body),
     put: (url, body) => req('PUT', url, body),
-    del: (url) => req('DELETE', url),
+    del: (url, body) => req('DELETE', url, body),
     rawPost: async (url, { headers = {}, body }) => {
       const h = { ...headers };
       if (cookie) h['Cookie'] = cookie;

@@ -692,12 +692,12 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
 .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--brand-accent-soft); border-color: var(--brand-accent); color: var(--brand-accent); }
 .fchip svg { width: 14px; height: 14px; }
 @media (min-width: 900px) {
-  .atools { flex-direction: row; align-items: center; }
+  .atools { flex-direction: row; flex-wrap: wrap; align-items: center; } /* wraps only when the search would get squeezed below ~160px (900-1000px wide) */
   .atools-row { display: contents; }
-  .atools-find .search { order: 1; flex: 1 1 auto; }
+  .atools-find .search { order: 1; flex: 1 1 160px; }
   #scanbtn { order: 2; }
   #ddlabels { order: 3; flex: none; }
-  #ddfilter-slot { order: 4; flex: none; }
+  .atools-row > #ddfilter-slot { order: 4; flex: none; } /* (needs the row selector: the phone rule `.atools-row > #ddfilter-slot` made the slot grow, ~50px wider than its button) */
   .atools-row .dd { flex: none; }
   .atools-row .dd > .btn { width: auto; justify-content: center; }
   /* Add and the calendar move from the header row into the toolbar, after Filter; every control is the .btn height (44px) */
