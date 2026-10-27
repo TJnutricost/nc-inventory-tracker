@@ -108,6 +108,29 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     for (const e of ['offwork@nutricost.com', 'left@nutricost.com', 'bare@nutricost.com', 'robot@nutricost.com']) assert.equal((await same(`refused ${e}`, 'googleAccount', e)).ok, undefined);
   });
 
+  test('provisionGoogleAccount: the same outcome and the same rows on both engines', async () => {
+    await tw.employee({ name: 'Gone Two', work_email: 'gone2@nutricost.com', status: 'inactive' });
+    const cases = [
+      ['a new address: a new employee and its employee login', { email: 'newbie@nutricost.com', name: 'New Bie' }],
+      ['the same address again: that login', { email: 'newbie@nutricost.com', name: 'Other' }],
+      ['an employee without a login: linked to them', { email: 'bare@nutricost.com', name: 'Ignored' }],
+      ['an active login (found by googleAccount first in the route): that login', { email: 'ana@nutricost.com', name: 'x' }],
+      ['a login IT turned off', { email: 'offwork@nutricost.com', name: 'x' }],
+      ['a person who left, with a login', { email: 'left@nutricost.com', name: 'x' }],
+      ['a person who left, without a login', { email: 'gone2@nutricost.com', name: 'x' }],
+      ['the address is another login', { email: 'ana.admin@nutricost.com', name: 'x' }],
+    ];
+    const out = {};
+    for (const [label, args] of cases) out[label] = await write(label, (q) => pg.provisionGoogleAccount(q, args), (db) => sq.provisionGoogleAccount(db, args));
+    const t = await tables(tw, 'after provisioning');
+    const made = t.accounts.find((a) => a.login_email === 'newbie@nutricost.com');
+    assert.deepEqual([made.role, made.password_hash, t.employees.find((e) => e.id === made.employee_id).name], ['employee', null, 'New Bie']);
+    assert.equal(out[cases[1][0]].ok, made.id);
+    assert.equal(out[cases[3][0]].ok, w.ana.id);
+    for (const [label] of cases.slice(4)) assert.deepEqual(out[label], { ok: null }, label);
+    assert.equal(await pg.provisionGoogleAccount(tw.pg, { email: 'nul@nutricost.com', name: 'a\u0000b' }), null, 'NUL: refused, nothing stored');
+  });
+
   test('recordLogin and setPassword write the same rows', async () => {
     await write('recordLogin', (q) => pg.recordLogin(q, w.robot.id), (db) => sq.recordLogin(db, w.robot.id));
     const stamp = (await tw.pg.query('SELECT last_login_at FROM accounts WHERE id = $1', [w.robot.id])).rows[0].last_login_at;
@@ -186,6 +209,17 @@ describe('PostgreSQL accounts twin under concurrency', pgSuite(), () => {
     await pg.replaceToken(pool, id, 'reset', 'twice', LATER);
     const outs = await Promise.all([result(() => pg.completeReset(pool, id, 'h-c')), result(() => pg.completeReset(pool, id, 'h-d'))]);
     assert.equal(outs.filter((o) => 'ok' in o).length, 1, JSON.stringify(outs));
+  });
+
+  test('two first Google sign-ins with the same address at once: one person, one login, both signed into it', async () => {
+    const args = { email: 'twice@nutricost.com', name: 'Twice' };
+    const r = await overlap(pool, sampler, (c) => pg.provisionGoogleAccount(c, args), (q) => pg.provisionGoogleAccount(q, args));
+    assert.ok(r.blocked, 'the second waited for the first');
+    assert.equal(typeof r.first.ok, 'number');
+    assert.deepEqual(r.second, r.first);
+    const many = await Promise.all([1, 2, 3, 4].map(() => result(() => pg.provisionGoogleAccount(pool, { email: 'four@nutricost.com', name: 'Four' }))));
+    assert.equal(new Set(many.map((o) => o.ok)).size, 1, JSON.stringify(many));
+    assert.equal((await pool.query("SELECT COUNT(*) AS n FROM employees WHERE work_email IN ('twice@nutricost.com', 'four@nutricost.com')")).rows[0].n, 2);
   });
 
   test('two simultaneous invites for one account leave exactly one live token (the later one)', async () => {

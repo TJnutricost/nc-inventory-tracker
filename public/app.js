@@ -552,7 +552,7 @@ function authPanel(inner) {
 }
 // Google sign-in (src/server.js /auth/google) comes back to #/login?error=<code> when it is refused.
 const GOOGLE_ERRORS = {
-  not_registered: 'That Google account has no login here. Ask IT to give you access.',
+  no_access: 'Your access to this app is turned off. Ask IT if you need it.',
   domain: 'Use your Nutricost Google account.',
   unverified: 'That Google account\'s email is not verified.',
   cancelled: 'Google sign-in was cancelled.',

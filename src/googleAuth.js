@@ -1,6 +1,6 @@
 // Google sign-in (D-10, docs/briefs/google-sign-in.md): the OAuth 2.0 / OpenID Connect authorization-code flow with PKCE, beside the
-// email + password login. This module only talks to Google and checks what Google answers; who may sign in (an active employee's work
-// email with an active login) is src/accounts.js googleAccount, and the session is set by the route, exactly as POST /api/login sets it.
+// email + password login. This module only talks to Google and checks what Google answers; who may sign in is src/accounts.js
+// (googleAccount, then provisionGoogleAccount on a first sign-in), and the session is set by the route, as POST /api/login sets it.
 //
 // The ID token comes straight from Google's token endpoint over TLS, in exchange for our client secret, so its signature is not checked:
 // OpenID Connect Core 1.0 §3.1.3.7 accepts TLS server validation in place of the signature for a token received this way. Every claim
@@ -43,7 +43,7 @@ function start(cfg, redirectUri, now = Date.now()) {
     client_id: cfg.clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'openid email',
+    scope: 'openid email profile', // profile: the name a first sign-in gives the new person
     state: pending.state,
     nonce: pending.nonce,
     code_challenge: crypto.createHash('sha256').update(pending.verifier).digest('base64url'),
@@ -60,7 +60,14 @@ function decodeIdToken(idToken) {
   try { return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')); } catch { throw new SignInError('token', 'unreadable ID token'); }
 }
 
-// The claims of a token from Google's token endpoint, checked; returns the verified email, trimmed and lower-cased.
+// The name a first sign-in gives the new person: Google's `name`, control characters removed, at most 100 characters; else the
+// address's local part.
+function displayName(claims, email) {
+  const name = typeof claims.name === 'string' ? claims.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 100) : '';
+  return name || email.split('@')[0];
+}
+
+// The claims of a token from Google's token endpoint, checked; returns { email (trimmed, lower-cased), name }.
 function checkClaims(cfg, claims, nonce, now = Date.now()) {
   const sec = Math.floor(now / 1000);
   const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
@@ -72,11 +79,11 @@ function checkClaims(cfg, claims, nonce, now = Date.now()) {
   if (!email || !(claims.email_verified === true || claims.email_verified === 'true')) throw new SignInError('unverified');
   const hd = typeof claims.hd === 'string' ? claims.hd.toLowerCase() : '';
   if (hd !== cfg.domain || !email.endsWith(`@${cfg.domain}`)) throw new SignInError('domain');
-  return email;
+  return { email, name: displayName(claims, email) };
 }
 
 // GET /auth/google/callback: `pending` is what start() left in the session (already removed from it by the route: single use), `query`
-// is Google's redirect. Exchanges the code and returns the verified email; throws SignInError for anything refused.
+// is Google's redirect. Exchanges the code and returns { email, name }; throws SignInError for anything refused.
 async function finish(cfg, { pending, query, redirectUri, now = Date.now() }) {
   if (!pending || !sameText(String(query.state || ''), pending.state) || now - pending.at > PENDING_MS) throw new SignInError('state');
   if (query.error) throw new SignInError('cancelled', String(query.error));
