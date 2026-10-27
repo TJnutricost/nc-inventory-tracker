@@ -193,7 +193,7 @@ To check it, go to **Settings → Send me a test email**. The Outbox shows each 
 
 Off until it is configured: with both variables below set, the login screen shows **Sign in with Google** above the password form (which stays).
 
-Who gets in: the Google email must be the **work email of an active person in People who has an active login**. Nobody is ever created by a Google sign-in; anyone else sees "ask IT to give you access". A person IT gave a login can use Google right away, before setting a password. Only `GOOGLE_HOSTED_DOMAIN` accounts are accepted.
+Who gets in: anyone with a verified `GOOGLE_HOSTED_DOMAIN` Google account. On their **first** sign-in the app gives them a login with the **Employee** role: linked to their People record if IT already added them (matched by work email), otherwise as a new person named from their Google profile. **Admin is only given by IT** (People → edit → Access). Refused: a person IT deactivated, a login IT turned off, or an address that is already someone else's login.
 
 Setup (once, in the Google Cloud Console, signed in with a company account):
 1. Create a project inside the company organization.

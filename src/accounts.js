@@ -35,6 +35,20 @@ const loginAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a LEFT 
 // this way (they keep the password). The same row as loginAccount.
 const googleAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a JOIN employees e ON e.id = a.employee_id
     WHERE e.work_email = ? AND a.active = 1 AND e.status = 'active'`).get(email);
+// Google sign-in, first time (owner decision 2026-10-27, D-10 revised): a verified company Google address with no login yet gets one,
+// role 'employee' (admin is only ever given by IT in People). One transaction. An active employee with that work email and no login
+// gets a login linked to them; nobody with that work email: a new employee (`name` from Google) and its login. Refused (null): the
+// employee left (inactive), their login was turned off by IT, or the address is already another person's login. Returns the account id.
+function provisionGoogleAccount(db, { email, name }) {
+  return db.transaction(() => {
+    const e = db.prepare(`SELECT e.id, e.status, a.id AS account_id, a.active FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id
+      WHERE e.work_email = ?`).get(email);
+    if (e && e.account_id) return e.status === 'active' && e.active === 1 ? e.account_id : null;
+    if ((e && e.status !== 'active') || db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) return null;
+    const emp = e ? e.id : db.prepare('INSERT INTO employees (name, work_email) VALUES (?, ?)').run(name, email).lastInsertRowid;
+    return db.prepare("INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, 'employee')").run(emp, email).lastInsertRowid;
+  })();
+}
 function recordLogin(db, accountId) { db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(accountId); }
 
 // ---- passwords and tokens ----
@@ -59,4 +73,4 @@ function completeReset(db, accountId, hash) {
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(accountId);
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

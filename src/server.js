@@ -253,8 +253,9 @@ app.post('/api/reset', wrap(async (req, res) => {
 
 // ---------- Google sign-in (D-10; docs/briefs/google-sign-in.md) ----------
 // Beside the password login, off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set. src/googleAuth.js talks to Google and checks
-// its answer; the account is an active employee's work email with an active login (src/accounts.js googleAccount); nothing is ever
-// created. A success signs in exactly as POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
+// its answer (a verified address of the company domain). The account: an active employee's work email with an active login
+// (src/accounts.js googleAccount); on a first sign-in one is made, role 'employee' (provisionGoogleAccount; owner decision 2026-10-27),
+// unless IT turned that person or login off. A success signs in exactly as POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
 // so the CSRF header check does not apply; `state` (single use, kept in the session) and PKCE protect the round trip instead.
 const google = googleAuth.config();
 const GOOGLE_CALLBACK = `${APP_URL}/auth/google/callback`;
@@ -275,20 +276,21 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
   if (Date.now() - att.t > 15 * 60e3) { att.n = 0; att.t = Date.now(); }
   const refuse = (code) => { att.n++; loginAttempts.set(key, att); res.redirect(`/#/login?error=${code}`); };
   if (att.n >= 10) return res.redirect('/#/login?error=too_many');
-  let email;
+  let who;
   try {
-    email = await googleAuth.finish(google, { pending, query: req.query, redirectUri: GOOGLE_CALLBACK });
+    who = await googleAuth.finish(google, { pending, query: req.query, redirectUri: GOOGLE_CALLBACK });
   } catch (e) {
     if (!e.signInCode) throw e;
     if (e.signInCode === 'google' || e.signInCode === 'token') console.error('[google sign-in]', e.signInCode, e.message);
     return refuse(e.signInCode);
   }
-  const u = await data.accounts.googleAccount(email);
-  if (!u) return refuse('not_registered');
+  const found = await data.accounts.googleAccount(who.email);
+  const accountId = found ? found.id : await data.accounts.provisionGoogleAccount(who);
+  if (!accountId) return refuse('no_access');
   loginAttempts.delete(key);
-  await data.accounts.recordLogin(u.id);
+  await data.accounts.recordLogin(accountId);
   await new Promise((resolve, reject) => req.session.regenerate((err) => (err ? reject(err) : resolve())));
-  req.session.uid = u.id; // the session identifies the ACCOUNT, as after a password login
+  req.session.uid = accountId; // the session identifies the ACCOUNT, as after a password login
   res.redirect('/#/home');
 }));
 

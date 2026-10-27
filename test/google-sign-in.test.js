@@ -88,6 +88,10 @@ before(async () => {
   db.prepare("UPDATE accounts SET active = 0 WHERE login_email = 'off@nutricost.com'").run();
   const left = await person({ name: 'Left Company', email: 'left@nutricost.com' });
   assert.equal((await admin.put(`/api/users/${left.id}`, { active: false })).status, 200);
+  await person({ name: 'Left No Login', email: 'gone@nutricost.com', login: false });
+  db.prepare("UPDATE employees SET status = 'inactive' WHERE work_email = 'gone@nutricost.com'").run();
+  await person({ name: 'Dual', email: 'dual@nutricost.com' }); // then its login moved to another address: that address is taken
+  db.prepare("UPDATE accounts SET login_email = 'taken@nutricost.com' WHERE login_email = 'dual@nutricost.com'").run();
 });
 after(async () => {
   await stopServer(server);
@@ -101,7 +105,7 @@ test('Google sign-in is offered, and GET /auth/google sends the browser to Googl
   assert.equal(`${url.origin}${url.pathname}`, 'https://accounts.google.com/o/oauth2/v2/auth');
   assert.equal(p.client_id, CLIENT_ID);
   assert.equal(p.redirect_uri, CALLBACK);
-  assert.deepEqual([p.response_type, p.scope, p.code_challenge_method, p.hd, p.prompt], ['code', 'openid email', 'S256', 'nutricost.com', 'select_account']);
+  assert.deepEqual([p.response_type, p.scope, p.code_challenge_method, p.hd, p.prompt], ['code', 'openid email profile', 'S256', 'nutricost.com', 'select_account']);
   assert.ok(p.state.length >= 40 && p.nonce.length >= 40 && p.state !== p.nonce);
   assert.ok(b.cookie(), 'the pending sign-in is kept in a session');
 });
@@ -135,14 +139,50 @@ test('the Google email is matched trimmed and case-insensitively; an admin keeps
   assert.equal((await a.me()).role, 'admin');
 });
 
-test('nobody is signed in or created for an unknown email, a person without a login, a disabled login or a person who left', async () => {
-  const before_ = db.prepare('SELECT (SELECT COUNT(*) FROM employees) AS e, (SELECT COUNT(*) FROM accounts) AS a').get();
-  for (const email of ['stranger@nutricost.com', 'nolog@nutricost.com', 'off@nutricost.com', 'left@nutricost.com']) {
+const counts = () => db.prepare('SELECT (SELECT COUNT(*) FROM employees) AS e, (SELECT COUNT(*) FROM accounts) AS a').get();
+
+test('a first Google sign-in makes a new person with an employee login (never an admin), and the next one reuses it', async () => {
+  const before_ = counts();
+  const b = browser();
+  b.last = await signIn(b, 'Sam.New@nutricost.com', { claims: { name: 'Sam New' } });
+  assert.equal(b.last.r.location, '/#/home');
+  const me = await b.me();
+  assert.deepEqual([me.email, me.name, me.role, me.has_password], ['sam.new@nutricost.com', 'Sam New', 'employee', false]);
+  assert.deepEqual(counts(), { e: before_.e + 1, a: before_.a + 1 });
+  assert.deepEqual(db.prepare("SELECT e.work_email, e.status, a.active FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE e.name = 'Sam New'").get(),
+    { work_email: 'sam.new@nutricost.com', status: 'active', active: 1 });
+  const again = browser();
+  again.last = await signIn(again, 'sam.new@nutricost.com', { claims: { name: 'Another Name' } });
+  assert.equal((await again.me()).account_id, me.account_id, 'the same login, not a second person');
+  assert.deepEqual(counts(), { e: before_.e + 1, a: before_.a + 1 });
+});
+
+test('a first sign-in without a Google name uses the address; control characters are dropped from a name', async () => {
+  const b = browser();
+  b.last = await signIn(b, 'no.name@nutricost.com');
+  assert.equal((await b.me()).name, 'no.name');
+  const c = browser();
+  c.last = await signIn(c, 'odd@nutricost.com', { claims: { name: '  Odd\u0000\u0007 Name  ' } });
+  assert.equal((await c.me()).name, 'Odd Name');
+});
+
+test('a person IT added without a login gets one on their first sign-in, linked to them (no second person)', async () => {
+  const before_ = counts();
+  const b = browser();
+  b.last = await signIn(b, 'nolog@nutricost.com', { claims: { name: 'Not Used' } });
+  const me = await b.me();
+  assert.deepEqual([me.name, me.role], ['No Login', 'employee'], "IT's record is kept as it is");
+  assert.deepEqual(counts(), { e: before_.e, a: before_.a + 1 });
+});
+
+test('refused, nothing created: a login IT turned off, a person who left (with or without a login), an address that is another login', async () => {
+  const before_ = counts();
+  for (const email of ['off@nutricost.com', 'left@nutricost.com', 'gone@nutricost.com', 'taken@nutricost.com']) {
     const b = browser();
     b.last = await signIn(b, email);
-    await refused(b, 'not_registered', email);
+    await refused(b, 'no_access', email);
   }
-  assert.deepEqual(db.prepare('SELECT (SELECT COUNT(*) FROM employees) AS e, (SELECT COUNT(*) FROM accounts) AS a').get(), before_);
+  assert.deepEqual(counts(), before_);
 });
 
 test('ID tokens that fail a check are refused: domain, unverified email, issuer, audience, expiry, nonce', async () => {
@@ -201,16 +241,16 @@ test('state: a wrong one, none started, or a replayed callback is refused (singl
 
 test('refusals are rate-limited per IP (10, then 15 minutes); a success resets the count', async () => {
   const b = browser();
-  for (let i = 0; i < 10; i++) { b.last = await signIn(b, 'stranger@nutricost.com'); await refused(b, 'not_registered', `refusal ${i + 1}`); }
+  for (let i = 0; i < 10; i++) { b.last = await signIn(b, 'off@nutricost.com'); await refused(b, 'no_access', `refusal ${i + 1}`); }
   b.last = await signIn(b, 'bea@nutricost.com');
   await refused(b, 'too_many', 'the 11th try, even a good one');
   const c = browser();
-  for (let i = 0; i < 9; i++) c.last = await signIn(c, 'stranger@nutricost.com');
+  for (let i = 0; i < 9; i++) c.last = await signIn(c, 'off@nutricost.com');
   c.last = await signIn(c, 'bea@nutricost.com');
   assert.equal(c.last.r.location, '/#/home');
   await c('/api/logout', { method: 'POST', headers: { 'X-Requested-With': 'fetch' } });
-  c.last = await signIn(c, 'stranger@nutricost.com');
-  await refused(c, 'not_registered', 'counting starts again after a success');
+  c.last = await signIn(c, 'off@nutricost.com');
+  await refused(c, 'no_access', 'counting starts again after a success');
 });
 
 test('the password login still works beside Google', async () => {

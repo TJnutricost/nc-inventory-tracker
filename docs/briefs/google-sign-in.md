@@ -80,3 +80,16 @@ an active employee with a login there). No Railway, no real email.
 - Tests: `test/google-sign-in.test.js` (end to end, both drivers), a not-configured test in `test/auth.test.js`, and a `googleAccount`
   differential case in `test/pg/pg-accounts.test.js`.
 - Docs: README "Google sign-in" (setup steps) and security note, `.env.example`.
+
+### Revision 2026-10-27 (owner): first sign-in creates the login (D-10 revised)
+The owner chose self-registration for the company domain after the first staging test was refused ("no login here").
+- Lookup unchanged first (`googleAccount`). When it finds nothing, `accounts.provisionGoogleAccount({ email, name })` (both drivers, ONE
+  transaction): an active employee with that work email and no login gets a login linked to them; nobody with that work email: a new
+  employee (Google's `name`, else the address's local part; control characters removed, at most 100 characters) and its login. Role is
+  always `employee`, no password. Refused (`/#/login?error=no_access`, nothing written): the employee is inactive, their login is turned
+  off, or the address is another person's login. The `not_registered` code is gone.
+- Scope is now `openid email profile` (the name).
+- PostgreSQL: a transaction advisory lock per lower-cased address (two-key form, class 46512020) serializes two first sign-ins of one
+  person, so both end in the same login; a concurrent admin create with the same address is caught by the unique indexes (23505: refused,
+  a retry signs in). Tested on both engines (differential) and under overlap.
+- Unchanged: the domain check, the limiter (refusals only), the session, the password login.
