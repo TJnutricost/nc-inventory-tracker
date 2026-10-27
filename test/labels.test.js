@@ -102,9 +102,9 @@ test('front end: label pages under All assets, the catalog folded into All asset
   assert.match(src, /\[\/\^#\\\/catalog\$\/, \(\) => \{ history\.replaceState\(null, '', '#\/assets'/, 'old catalog links land on All assets');
   assert.match(src, /return isAdmin\(\) \? viewAdminAssets\(\) : viewBrowse\(\);/);
   assert.doesNotMatch(src, /async function viewCatalog\(/);
-  // All assets keeps the old list's tools: status chips (the Home cards link to them), Add asset, scan, CSV export
+  // All assets keeps the old list's tools: the status Filter (the Home cards link to them), Add asset, scan, CSV export
   const page = src.slice(src.indexOf('const ADMIN_STATUSES = ['), src.indexOf('// ============================================================ profile'));
-  for (const s of ["['overdue', 'Overdue']", 'href="#/labels/new"', 'href="#/labels"', 'id="scanbtn"', '/api/export/assets.csv', "if (st.status) u.set('status', st.status)"]) assert.ok(page.includes(s), s);
+  for (const s of ["['overdue', 'Overdue']", "href: '#/labels/new'", "href: '#/labels'", 'id="scanbtn"', '/api/export/assets.csv', "if (st.status) u.set('status', st.status)"]) assert.ok(page.includes(s), s);
   // the form: a label preview; Print label reserves a number only when the tag field is empty
   const form = src.slice(src.indexOf('async function viewAssetForm('), src.indexOf('// ============================================================ scan'));
   assert.match(form, /serial: qs\(\)\.get\('serial'\) \|\| ''/);

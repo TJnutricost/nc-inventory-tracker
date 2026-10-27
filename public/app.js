@@ -28,6 +28,15 @@ const debounce = (fn, ms = 250) => { let t; return (...a) => { clearTimeout(t); 
 const qs = () => new URLSearchParams((location.hash.split('?')[1]) || '');
 const go = (h) => { if (location.hash === h) route(); else location.hash = h; };
 
+// Appearance: System (default; the OS decides through prefers-color-scheme, so it follows OS changes with no JS), Light or Dark.
+// Stored in localStorage only. An explicit choice is the data-theme attribute on <html>; index.html sets it before first paint.
+const THEME_KEY = 'nc-theme';
+const THEMES = [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']];
+const getTheme = () => { try { const t = localStorage.getItem(THEME_KEY); return t === 'light' || t === 'dark' ? t : 'system'; } catch { return 'system'; } };
+const applyTheme = () => { const t = getTheme(); if (t === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', t); };
+const setTheme = (t) => { try { if (t === 'light' || t === 'dark') localStorage.setItem(THEME_KEY, t); else localStorage.removeItem(THEME_KEY); } catch { /* storage blocked: it still applies for this visit */ } if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme'); };
+window.addEventListener('storage', (e) => { if (e.key === THEME_KEY) applyTheme(); }); // another tab changed it
+
 async function api(method, url, body, { raw } = {}) {
   const opts = { method, headers: { 'X-Requested-With': 'fetch' }, credentials: 'same-origin' };
   if (body instanceof FormData) opts.body = body;
@@ -82,6 +91,8 @@ const P = {
   archive: '<path d="M3 5h18v4H3zM5 9v10h14V9M10 13h4"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   check: '<path d="m5 12 5 5L20 7"/>',
+  filter: '<path d="M3 5h18l-7 8v6l-4 2v-8z"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
   out: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 7l5 5-5 5M14 12H3"/>',
   in: '<path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4"/><path d="M15 17l-5-5 5-5M10 12h11"/>',
   alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.01"/>',
@@ -245,6 +256,51 @@ function sheet(html, { onOpen, wide } = {}) {
   if (first && window.matchMedia('(min-width: 700px)').matches) setTimeout(() => first.focus(), 50);
   return { el, close };
 }
+// ============================================================ dropdown menus
+// A button that opens a small menu (All assets: Add, Labels, Filter). Items are links ({ href }) or buttons ({ act }, handed to wireDropdowns'
+// `acts`). Escape, a click outside, or focus leaving closes it; Arrow keys move between items.
+function ddMenu({ id, label, ic, cls = 'btn', items, align = 'left', checked = null, up = false, sub = '' }) {
+  const body = items.map((i) => {
+    const on = checked !== null && i.v === checked;
+    const inner = `${i.ic ? icon(i.ic) : ''}<span>${esc(i.label)}</span>${checked !== null ? (on ? icon('check', 'dd-tick') : '') : ''}`;
+    return i.href
+      ? `<a role="menuitem" href="${i.href}">${inner}</a>`
+      : `<button type="button" role="${checked !== null ? 'menuitemradio' : 'menuitem'}" ${checked !== null ? `aria-checked="${on}"` : ''} data-act="${i.act}" ${i.v !== undefined ? `data-v="${esc(i.v)}"` : ''}>${inner}</button>`;
+  }).join('');
+  return `<div class="dd ${align === 'right' ? 'dd-right' : ''} ${up ? 'dd-up' : ''}" id="${id}"><button type="button" class="${cls} dd-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}-menu">${ic ? icon(ic) : ''}<span class="dd-label">${esc(label)}</span>${sub ? `<span class="dd-sub">${esc(sub)}</span>` : ''}${icon('chev', 'dd-caret')}</button>
+    <div class="menu dd-menu" id="${id}-menu" role="menu" aria-label="${esc(label)}" hidden>${body}</div></div>`;
+}
+function setDropdown(dd, open, focusFirst = false) {
+  const m = $('.dd-menu', dd); const b = $('.dd-btn', dd); if (!m || !b) return;
+  m.hidden = !open; b.setAttribute('aria-expanded', String(open)); dd.classList.toggle('open', open);
+  if (open && focusFirst) ($('[role^=menuitem]', m) || m).focus();
+}
+function wireDropdowns(root, acts = {}) {
+  $$('.dd', root).forEach((dd) => {
+    const b = $('.dd-btn', dd);
+    b.onclick = (e) => { const open = !dd.classList.contains('open'); $$('.dd.open').forEach((o) => o !== dd && setDropdown(o, false)); setDropdown(dd, open, open && e.detail === 0); };
+    // (stopPropagation: the document-level arrow handler below would otherwise step on to the second item right away)
+    b.onkeydown = (e) => { if (e.key === 'ArrowDown') { e.preventDefault(); e.stopPropagation(); $$('.dd.open').forEach((o) => o !== dd && setDropdown(o, false)); setDropdown(dd, true, true); } };
+    $('.dd-menu', dd).onclick = (e) => {
+      const it = e.target.closest('[role^=menuitem]'); if (!it) return;
+      setDropdown(dd, false);
+      if (it.dataset.act && acts[it.dataset.act]) acts[it.dataset.act](it.dataset.v);
+    };
+  });
+  if (wireDropdowns.done) return;
+  wireDropdowns.done = true; // document-level listeners are registered once, however many pages are built
+  document.addEventListener('click', (e) => { $$('.dd.open').forEach((dd) => { if (!dd.contains(e.target)) setDropdown(dd, false); }); });
+  document.addEventListener('focusin', (e) => { $$('.dd.open').forEach((dd) => { if (!dd.contains(e.target)) setDropdown(dd, false); }); });
+  document.addEventListener('keydown', (e) => {
+    const dd = $('.dd.open'); if (!dd) return;
+    if (e.key === 'Escape') { e.preventDefault(); setDropdown(dd, false); $('.dd-btn', dd).focus(); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Home' && e.key !== 'End') return;
+    const items = $$('[role^=menuitem]', dd); if (!items.length) return;
+    e.preventDefault();
+    const at = items.indexOf(document.activeElement);
+    items[e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : e.key === 'ArrowDown' ? (at + 1) % items.length : (at <= 0 ? items.length - 1 : at - 1)].focus();
+  });
+}
 function confirmSheet(title, text, okLabel = 'Confirm', danger = false) {
   return new Promise((resolve) => {
     const { el, close } = sheet(`<h2>${esc(title)}</h2><p class="muted">${esc(text)}</p>
@@ -404,7 +460,7 @@ function navItems() {
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
     { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' });
   side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' },
-    ...(isAdmin() ? [{ key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' }] : [])); // Settings sits with My profile
+    ...(isAdmin() ? [{ key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings', foot: true }] : [])); // desktop: pinned to the bottom of the sidebar, above Appearance
   return { tabs: common, side };
 }
 // Mobile hamburger (admins only) = administering the system. The signed-in person's own destinations live under the Profile tab.
@@ -434,6 +490,7 @@ function openDrawer() {
 }
 function mountShell() {
   const { tabs, side } = navItems();
+  const sideLink = (i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.key === 'assets' && isAdmin() ? icon('chev', 'nav-caret') : ''}${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`;
   $('#app').innerHTML = `
     <header class="topbar">
       ${isAdmin() ? `<button type="button" class="iconbtn nav-toggle" id="nav-toggle" aria-label="Open administration menu" aria-haspopup="dialog">${icon('menu')}</button>` : ''}
@@ -445,10 +502,16 @@ function mountShell() {
           <a href="#/profile" role="menuitem">${icon('user')} My profile</a>${isAdmin() ? `<a href="#/settings" role="menuitem">${icon('settings')} Settings</a>` : ''}<button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
-      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.key === 'assets' && isAdmin() ? icon('chev', 'nav-caret') : ''}${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
+      <nav class="sidebar" aria-label="Main"><div class="side-main">${side.filter((i) => !i.foot).map(sideLink).join('')}</div><div class="side-foot">${side.filter((i) => i.foot).map(sideLink).join('')}<div id="themeslot"></div></div></nav>
       <main id="main"></main>
     </div>
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
+  const paintTheme = () => {
+    const cur = getTheme();
+    $('#themeslot').innerHTML = ddMenu({ id: 'ddtheme', label: 'Appearance', ic: 'sun', cls: 'side-link', up: true, checked: cur, sub: (THEMES.find(([v]) => v === cur) || THEMES[0])[1], items: THEMES.map(([v, l]) => ({ act: 'theme', v, label: l })) });
+    wireDropdowns($('#themeslot'), { theme: (v) => { setTheme(v); paintTheme(); $('#ddtheme .dd-btn').focus(); } });
+  };
+  paintTheme();
   const setTopbarH = () => document.documentElement.style.setProperty('--topbar-h', $('.topbar').offsetHeight + 'px');
   setTopbarH(); window.addEventListener('resize', setTopbarH);
   if (isAdmin()) $('#nav-toggle').onclick = openDrawer;
@@ -505,9 +568,9 @@ function assetCtx() {
   if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
   const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
   // `from=#/settings` rides along only when the catalog itself was opened from Settings: the asset's Back then returns to the catalog WITH it.
-  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', status: src === 'catalog' && ADMIN_STATUSES.some(([v]) => v && v === p.get('status')) ? p.get('status') : null, tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
 }
-const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, tab: c.tab, from: c.fromSettings ? '#/settings' : null }) : ''; }; // carried on to the edit form and back
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, status: c.status, tab: c.tab, from: c.fromSettings ? '#/settings' : null }) : ''; }; // carried on to the edit form and back
 async function assetBackTarget() {
   const c = assetCtx();
   const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
@@ -522,7 +585,8 @@ async function assetBackTarget() {
     try { const u = (await api('GET', '/api/users/' + c.id)).user; return { href: `#/person/${c.id}`, label: u.name, exact: true }; } catch { return { href: '#/people', label: 'People', exact: true }; }
   }
   // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
-  const catFrom = (href) => (c.fromSettings ? `${href}${href.includes('?') ? '&' : '?'}from=${encodeURIComponent('#/settings')}` : href); // the catalog keeps its Settings source
+  // The catalog keeps its Settings source and its status filter (All assets > Filter), so Back lands on the same filtered list.
+  const catFrom = (href) => { const x = [...(c.status ? [`status=${c.status}`] : []), ...(c.fromSettings ? [`from=${encodeURIComponent('#/settings')}`] : [])]; return x.length ? `${href}${href.includes('?') ? '&' : '?'}${x.join('&')}` : href; };
   // ('catalog' = IT's All assets page, which is the catalog drill-down since docs/briefs/labels-and-assets.md)
   const root = c.src === 'catalog' ? { href: catFrom('#/assets'), label: 'All assets' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
   if (!c.node) return { ...root, exact: true };
@@ -649,7 +713,7 @@ window.addEventListener('hashchange', () => {
 // Google's "G" mark, as its sign-in branding guidelines ask for on a "Sign in with Google" button.
 const GOOGLE_MARK = '<svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>';
 function authPanel(inner) {
-  $('#app').innerHTML = `<div class="auth"><div class="panel"><div class="brand"><picture><source srcset="/logo-white.png" media="(prefers-color-scheme: dark)"><img src="/logo.png" alt="Nutricost"></picture><div>IT Asset Tracker</div></div>${inner}</div></div>`;
+  $('#app').innerHTML = `<div class="auth"><div class="panel"><div class="brand"><img class="logo-light" src="/logo.png" alt="Nutricost"><img class="logo-dark" src="/logo-white.png" alt="" aria-hidden="true"><div>IT Asset Tracker</div></div>${inner}</div></div>`;
 }
 // Google sign-in (src/server.js /auth/google) comes back to #/login?error=<code> when it is refused.
 const GOOGLE_ERRORS = {
@@ -1690,6 +1754,13 @@ async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) 
 }
 
 // ============================================================ asset form
+// The Add asset Photos area: a large dashed drop zone (drag files onto it on a desktop, tap it on a phone) that shows the chosen photos as
+// thumbnails. The buttons stay under the thumbnails so more can always be added; photos are optional.
+const photoDropHtml = () => `<div class="ph-drop" id="ph-drop" role="group" aria-label="Photos">
+  <div class="ph-hero" id="ph-hero">${icon('camera')}<strong>Add photos</strong><span class="small muted">Snap the device, its label or any damage.<span class="ph-dd"> Drag photos here, or choose them.</span></span></div>
+  <div class="ph-pending" id="ph-pending" aria-live="polite"></div>
+  <div class="ph-actions"><button type="button" class="btn" id="ph-cam">${icon('camera')} Take photos</button><button type="button" class="btn" id="ph-pick">${icon('upload')} Choose files</button><input type="file" accept="image/*" multiple hidden id="ph" aria-label="Choose photos"></div>
+  <div class="small muted ph-count" id="ph-count"></div></div>`;
 async function viewAssetForm(id) {
   const editing = !!id;
   // #/new?tag=… (a scanned label) and #/new?serial=… (a scanned manufacturer barcode) fill those fields in
@@ -1711,9 +1782,9 @@ async function viewAssetForm(id) {
         ${editing
           ? `<label class="field"><span>Asset tag</span><input value="${esc(a.tag)}" class="mono" disabled title="Asset tags can't be changed once created"></label>`
           : `<label class="field"><span>Asset tag</span><div class="input-group"><input name="tag" value="${esc(a.tag || '')}" placeholder="${nextTag ? `Auto: ${esc(nextTag)}` : ''}" class="mono" autocapitalize="characters"><button type="button" class="btn" data-scan="tag" title="Scan barcode">${icon('scan')}</button></div></label>`}
+        ${!editing ? `<div class="field full"><span>Photos <span class="muted small">(optional, up to 10)</span></span>${photoDropHtml()}</div>` : ''}
         ${!editing ? `<div class="field full"><span>Label</span><div class="row wrap" style="gap:14px;align-items:center"><div class="label-preview" id="lprev"></div>
           <div class="grow" style="min-width:180px"><button type="button" class="btn" id="plabel">${icon('printer')} Print label</button><div class="small muted" id="lhint" style="margin-top:6px"></div></div></div></div>` : ''}
-        ${!editing ? `<div class="field full"><span>Photos</span><div class="ph-actions"><button type="button" class="btn" id="ph-cam">${icon('camera')} Take photos</button><label class="btn">${icon('upload')} Choose files<input type="file" accept="image/*" multiple hidden id="ph"></label></div><div class="ph-pending" id="ph-pending"></div></div>` : ''}
       </fieldset></div>
       <div class="card pad"><fieldset class="form-grid cols"><legend>Details</legend>
         ${f('brand', 'Brand', 'placeholder="Dell, Apple, Logitech…"')}${f('model', 'Model')}
@@ -1789,6 +1860,10 @@ async function viewAssetForm(id) {
   const drawPending = () => {
     const box = $('#ph-pending'); if (!box) return;
     box.innerHTML = pending.map((p, i) => `<div class="pc-th"><img src="${p.url}" alt="Photo ${i + 1}"><button type="button" data-rm="${i}" aria-label="Remove photo ${i + 1}">${icon('x')}</button></div>`).join('');
+    const full = pending.length >= 10;
+    $('#ph-drop').classList.toggle('has', pending.length > 0);
+    $('#ph-cam').disabled = full; $('#ph-pick').disabled = full;
+    $('#ph-count').textContent = !pending.length ? '' : full ? '10 of 10 photos. Remove one to add another.' : `${pending.length} of 10 photos. Add more, or remove any with the ✕.`;
   };
   const addPending = (files) => {
     const room = 10 - pending.length;
@@ -1796,7 +1871,26 @@ async function viewAssetForm(id) {
     if (files.length > room) toast('Up to 10 photos at a time.', true);
     drawPending();
   };
-  const ph = $('#ph'); if (ph) ph.onchange = () => { addPending(ph.files); ph.value = ''; };
+  const ph = $('#ph');
+  if (ph) {
+    ph.onchange = () => { addPending(ph.files); ph.value = ''; };
+    $('#ph-pick').onclick = () => ph.click();
+    $('#ph-hero').onclick = () => { if (pending.length < 10) ph.click(); }; // anywhere in the empty area opens the chooser
+    const drop = $('#ph-drop'); let depth = 0; // (dragenter/leave also fire for children, so count them)
+    const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes('Files');
+    drop.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; drop.classList.add('drag'); });
+    drop.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault(); });
+    drop.addEventListener('dragleave', () => { depth = Math.max(0, depth - 1); if (!depth) drop.classList.remove('drag'); });
+    drop.addEventListener('drop', (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault(); depth = 0; drop.classList.remove('drag');
+      const imgs = Array.from(e.dataTransfer.files).filter((f) => /^image\//.test(f.type));
+      if (!imgs.length) return toast('Only photos can be added here.', true);
+      if (imgs.length < e.dataTransfer.files.length) toast('Skipped files that are not photos.', true);
+      addPending(imgs);
+    });
+    drawPending();
+  }
   const phCam = $('#ph-cam'); if (phCam) phCam.onclick = () => openPhotoCapture({ max: 10 - pending.length, onDone: addPending });
   const phBox = $('#ph-pending'); if (phBox) phBox.onclick = (e) => { const b = e.target.closest('[data-rm]'); if (!b) return; const [p] = pending.splice(Number(b.dataset.rm), 1); if (p) URL.revokeObjectURL(p.url); drawPending(); };
   $('#f').onsubmit = (e) => {
@@ -2964,7 +3058,7 @@ async function viewSettings() {
 // the status chips, Add asset, the label pages and the scanner. Every level lists its assets under the cards, filtered by the status.
 const ADMIN_STATUSES = [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']];
 async function viewAdminAssets() {
-  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1 };
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1, listOpen: false };
   // The URL is the state: #/assets (all categories), #/assets?node=<id>, #/assets?node=<id>&all=1 ("All in <name>", a browsing view of
   // the real entry <id>), each optionally &status=<chip> (the Home stat cards link to #/assets?status=overdue …). Cards, breadcrumbs and
   // Back navigate to those URLs; hashchange (S.soft) repaints in place. Opened from Settings ("Manage the equipment catalog") the route
@@ -2978,16 +3072,42 @@ async function viewAdminAssets() {
   };
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">All assets</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
-      <div class="row wrap" style="gap:8px"><a class="btn sm" href="#/labels/new">${icon('plus')} Create labels</a><a class="btn sm" href="#/labels">${icon('printer')} Print labels</a></div>
-      <div class="row"><div class="search grow">${icon('search')}<input id="cq" type="search" placeholder="Search name, tag, serial, person, brand, category…" value="${esc(st.search)}" enterkeyhint="search" autocomplete="off"></div>
-        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
-      <div class="chips" id="chips">${ADMIN_STATUSES.map(([v, l]) => `<button class="chip" data-v="${v}">${l}</button>`).join('')}</div>
-      <label class="check"><input type="checkbox" id="showarch"><span>Show archived catalog entries</span></label>
+      <div class="atools">
+        <div class="atools-row">${ddMenu({ id: 'ddlabels', label: 'Labels', ic: 'tag', items: [{ href: '#/labels/new', label: 'Create labels', ic: 'plus' }, { href: '#/labels', label: 'Print labels', ic: 'printer' }] })}<div id="ddfilter-slot"></div></div>
+        <div class="atools-row atools-find"><div class="search grow">${icon('search')}<input id="cq" type="search" aria-label="Search assets" placeholder="Search name, tag, serial, person, brand, category…" value="${esc(st.search)}" enterkeyhint="search" autocomplete="off"></div>
+          <button class="btn" id="scanbtn" title="Scan" aria-label="Scan a barcode">${icon('scan')}</button></div>
+      </div>
+      <div class="fchips" id="fchips"></div>
+      <label class="check" id="archrow"><input type="checkbox" id="showarch"><span>Show archived catalog entries</span></label>
       <div id="ct"><div class="spinner"></div></div>
     </div>
 `;
   const statusLabel = () => (ADMIN_STATUSES.find(([v]) => v === st.status) || ['', ''])[1];
-  const markChips = () => $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c.dataset.v === st.status));
+  wireDropdowns($('.atools')); // Labels (static markup); Add and Filter are painted, and wired, as the page renders
+  // The heading over a status-filtered list: "Overdue assets", "Checked out assets", "Assets in repair"…
+  const filteredTitle = () => (st.status === 'maintenance' ? 'Assets in repair' : `${statusLabel()} assets`);
+  // The status Filter: a dropdown on desktop, a bottom sheet on phones. The URL (?status=) stays the one source of truth; the button, the
+  // menu's tick and the removable chip under the search all follow it.
+  const phone = () => window.matchMedia('(max-width: 899px)').matches;
+  const gotoStatus = (v) => go(hashFor(st.sel, st.all, v));
+  const paintFilter = () => {
+    $('#ddfilter-slot').innerHTML = ddMenu({ id: 'ddfilter', label: st.status ? 'Filter (1)' : 'Filter', ic: 'filter', cls: `btn${st.status ? ' active' : ''}`, checked: st.status, items: ADMIN_STATUSES.map(([v, l]) => ({ act: 'status', v, label: l })) });
+    wireDropdowns($('#ddfilter-slot'), { status: gotoStatus });
+    const b = $('#ddfilter .dd-btn'); const toggle = b.onclick;
+    b.onclick = (e) => { if (phone()) return openFilterSheet(); toggle(e); }; // phones get the sheet instead of the popover
+    $('#fchips').innerHTML = st.status ? `<button type="button" class="chip fchip" id="fclear" aria-label="Remove the ${esc(statusLabel())} filter">Status: ${esc(statusLabel())}${icon('x')}</button>` : '';
+  };
+  const openFilterSheet = () => {
+    const { el, close } = sheet(`<h2>Filter by status</h2><div class="fsheet" role="radiogroup" aria-label="Status">${ADMIN_STATUSES.map(([v, l]) => `<button type="button" class="fopt${v === st.status ? ' on' : ''}" role="radio" aria-checked="${v === st.status}" data-v="${esc(v)}"><span>${esc(l)}</span>${v === st.status ? icon('check') : ''}</button>`).join('')}</div>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+    el.onclick = (e) => { const o = e.target.closest('[data-v]'); if (!o) return; close(); gotoStatus(o.dataset.v); };
+  };
+  // The header's blue Add menu. "Add category" is only offered at the top of the catalog (and not while searching); inside a category the
+  // contextual button is "+ Add subcategory".
+  const paintHead = ({ cat, node }) => {
+    $('#headact').innerHTML = `${ddMenu({ id: 'ddadd', label: 'Add', ic: 'plus', cls: 'btn primary', align: 'right', items: [{ href: '#/new', label: 'Add asset', ic: 'box' }, ...(cat ? [{ act: 'addroot', label: 'Add category', ic: 'tag' }] : [])] })}${node === undefined ? '' : calendarLink({ node })}`;
+    wireDropdowns($('#headact'), { addroot: () => addRoot() });
+  };
   // Lists show PAGE assets at a time (owner, 2026-10-27); the page resets whenever the entry, the status chip or the search changes.
   const PAGE = 10;
   const pageOf = (list) => { st.page = Math.min(Math.max(1, st.page), Math.max(1, Math.ceil(list.length / PAGE))); return list.slice((st.page - 1) * PAGE, st.page * PAGE); };
@@ -3009,14 +3129,14 @@ async function viewAdminAssets() {
     const rel = !a.catalog_path ? '' : !node ? crumbText(a.catalog_path) : a.catalog_node_id !== node.id ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
     const seats = a.license_seats > 1 ? `${a.seats_used}/${a.license_seats} seats` : '';
     const extra = [a.holder_names, seats, a.model && !a.name.includes(a.model) ? a.model : '', !a.holder_names ? a.location : '', rel].filter(Boolean).map(esc).join(' · ');
-    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node ? node.id : null, all: st.all, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node ? node.id : null, all: st.all, status: st.status, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
   // Search: while there is text in the box the card grid steps aside for the matching assets (the old All assets search: name, tag, serial,
   // person, brand… within the status chip) and the matching catalog entries, each with its full path; empty = the grid, unchanged.
   const renderFound = () => {
     const f = st.found;
-    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a><a href="#/new" class="btn primary mob-only">${icon('plus')} Add</a>`;
+    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); paintHead({ cat: false });
     if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
     const assets = f.assets.length
       ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
@@ -3049,34 +3169,40 @@ async function viewAdminAssets() {
     // a subcategory card narrows it. A category with nothing below it lists what is filed in it.
     const inAll = !!n && ch.length > 0;
     const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
+    const filtered = !!st.status; // a status filter shows the matching assets straight away: no cards, no catalog controls
     const cards = [];
-    if (n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
-    for (const c of ch) cards.push(cgCard({ attrs: `data-select="${c.id}"`, name: c.name, meta: `${countText(c.asset_count)}${c.child_count ? ` · ${c.child_count} ${c.child_count === 1 ? 'subcategory' : 'subcategories'}` : ''}`, kind: c.live ? '' : 'off', extra: c.archived_at ? ' <span class="pill plain">Archived</span>' : !c.live ? ' <span class="pill plain">Hidden</span>' : '' }));
+    if (!filtered && n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
+    if (!filtered) for (const c of ch) cards.push(cgCard({ attrs: `data-select="${c.id}"`, name: c.name, meta: `${countText(c.asset_count)}${c.child_count ? ` · ${c.child_count} ${c.child_count === 1 ? 'subcategory' : 'subcategories'}` : ''}`, kind: c.live ? '' : 'off', extra: c.archived_at ? ' <span class="pill plain">Archived</span>' : !c.live ? ' <span class="pill plain">Hidden</span>' : '' }));
     const list = st.assets;
     const direct = list && n ? list.filter((a) => a.catalog_node_id === n.id) : [];
     let below = '';
-    if (n) {
+    if (filtered) {
+      below = `<div class="card-head" style="padding:0;margin:0 0 8px"><h3 class="ct-h" style="margin:0">${esc(filteredTitle())} <span class="muted">${list ? list.length : ''}</span></h3>${n ? '' : '<a class="small" href="/api/export/assets.csv">Export CSV</a>'}</div>
+        ${n ? `<p class="small muted" style="margin:0 0 8px">Within ${esc(crumbText(n.path))}</p>` : ''}
+        ${list === null ? '<div class="spinner"></div>' : list.length ? listCard(list, n) : `<div class="empty">${icon('box')}<p>No ${esc(statusLabel().toLowerCase())} assets${n ? ' here' : ''}.</p></div>`}`;
+    } else if (n) {
       const shown = inAll ? list : direct;
       const title = `${inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets'}${st.status ? ` · ${statusLabel()}` : ''}`;
       below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
         ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it. Pick a card above to narrow it.</p>` : ''}${listCard(shown, n)}`
         : `<p class="muted small ct-empty">${st.status ? `No ${esc(statusLabel().toLowerCase())} assets here.` : inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
-    } else { // the top: every asset (within the status chip), as the old All assets list
-      below = `<div class="card-head" style="padding:0;margin:24px 0 8px"><h3 class="ct-h" style="margin:0">${st.status ? esc(statusLabel()) : 'All assets'} <span class="muted">${list ? list.length : ''}</span></h3><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
-        ${list === null ? '<div class="spinner"></div>' : list.length ? listCard(list, null)
-          : `<div class="empty">${icon('box')}<p>${st.status ? `No ${esc(statusLabel().toLowerCase())} assets.` : 'No assets yet. Tap <strong>Add</strong>, scan a barcode, or create labels to get started.'}</p></div>`}`;
+    } else { // the top: the cards, then every asset in a section that starts collapsed (it is long; the cards are the way in)
+      const open = st.listOpen && !!list;
+      below = `<div class="card-head acc-head" style="padding:0;margin:24px 0 8px"><button type="button" class="acc-btn" id="allbtn" aria-expanded="${open}" aria-controls="allpanel"><span class="acc-title">All assets <span class="muted">${list ? `(${list.length})` : ''}</span></span>${icon('chev', 'acc-caret')}</button><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
+        <div id="allpanel" ${open ? '' : 'hidden'}>${list === null ? '<div class="spinner"></div>' : list.length ? listCard(list, null)
+          : `<div class="empty">${icon('box')}<p>No assets yet. Tap <strong>Add</strong>, scan a barcode, or create labels to get started.</p></div>`}</div>`;
     }
     // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
-    const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
+    const controls = n && !filtered ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
     // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
     $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n ? byId(n.parent_id) : null;
     $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : autoBack();
-    $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}<a href="#/new" class="btn primary mob-only">${icon('plus')} Add</a>${calendarLink({ node: n ? n.id : null })}`;
-    if (!n) $('#addroot').onclick = addRoot;
-    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
-      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+    paintHead({ cat: !n && !filtered, node: n ? n.id : null });
+    $('#archrow').classList.toggle('hidden', filtered);
+    $('#ct').innerHTML = `${n && !filtered ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
   };
   const loadAssets = async () => {
@@ -3097,7 +3223,7 @@ async function viewAdminAssets() {
     st.sel = byId(id) ? id : null;
     st.all = !!st.sel && p.get('all') === '1';
     st.status = ADMIN_STATUSES.some(([v]) => v && v === p.get('status')) ? p.get('status') : '';
-    markChips();
+    paintFilter();
     if ((p.get('node') && !st.sel) || (p.get('status') && !st.status)) history.replaceState(null, '', hashFor(st.sel, st.all)); // unknown/stale node or status: tidy the URL
     if (st.search && st.status !== prevStatus) runSearch();
     if (st.sel !== prev || st.status !== prevStatus) st.page = 1;
@@ -3170,6 +3296,8 @@ async function viewAdminAssets() {
   $('#ct').onclick = (e) => {
     const hit = e.target.closest('[data-found]');
     if (hit) { e.preventDefault(); st.search = ''; st.found = null; $('#cq').value = ''; go(hashFor(Number(hit.dataset.found))); window.scrollTo(0, 0); return; } // a search result opens that entry (the grid comes back)
+    const acc = e.target.closest('#allbtn');
+    if (acc) { st.listOpen = acc.getAttribute('aria-expanded') !== 'true'; acc.setAttribute('aria-expanded', String(st.listOpen)); $('#allpanel').hidden = !st.listOpen; return; } // no re-render, no reload
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
     const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
     const to = (h) => { go(h); window.scrollTo(0, 0); };
@@ -3185,7 +3313,7 @@ async function viewAdminAssets() {
     const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
   $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
-  $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (b) go(hashFor(st.sel, st.all, b.dataset.v)); };
+  $('#fchips').onclick = (e) => { if (e.target.closest('#fclear')) gotoStatus(''); };
   $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   S.soft = { base: '#/assets', fn: apply };
   await reload();
@@ -3206,7 +3334,11 @@ function viewAccount() {
   ];
   main().innerHTML = `<div class="page-head"><h1>Profile</h1></div>
     <div class="card"><ul class="list">${items.map(([h, i, t, sub]) => `<li><a class="item" href="${h}"><div class="thumb">${icon(i)}</div><div class="grow"><div class="title">${t}</div><div class="sub">${sub}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>
+    <div class="card pad" style="margin-top:16px"><div class="field"><span>Appearance</span>
+      <div class="seg seg-full" id="themeseg" role="radiogroup" aria-label="Appearance">${THEMES.map(([v, l]) => `<button type="button" role="radio" data-v="${v}" aria-checked="${v === getTheme()}" class="${v === getTheme() ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <span class="small muted">System follows your device’s light or dark setting.</span></div></div>
     <button class="btn block lg" style="margin-top:16px" id="out">${icon('logout')} Sign out</button>`;
+  $('#themeseg').onclick = (e) => { const b = e.target.closest('[data-v]'); if (!b) return; setTheme(b.dataset.v); $$('#themeseg button').forEach((x) => { const on = x === b; x.classList.toggle('on', on); x.setAttribute('aria-checked', String(on)); }); };
   $('#out').onclick = logout;
 }
 async function logout() { await api('POST', '/api/logout', {}).catch(() => {}); S.me = null; S.shell = false; usersCache = null; go('#/login'); }
