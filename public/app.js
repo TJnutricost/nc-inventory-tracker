@@ -284,7 +284,7 @@ function wireDropdowns(root, acts = {}) {
     $('.dd-menu', dd).onclick = (e) => {
       const it = e.target.closest('[role^=menuitem]'); if (!it) return;
       setDropdown(dd, false);
-      if (it.dataset.act && acts[it.dataset.act]) acts[it.dataset.act](it.dataset.v);
+      if (it.dataset.act && acts[it.dataset.act]) acts[it.dataset.act](it.dataset.v, { keyboard: e.detail === 0 });
     };
   });
   if (wireDropdowns.done) return;
@@ -509,7 +509,8 @@ function mountShell() {
   const paintTheme = () => {
     const cur = getTheme();
     $('#themeslot').innerHTML = ddMenu({ id: 'ddtheme', label: 'Appearance', ic: 'sun', cls: 'side-link', up: true, checked: cur, sub: (THEMES.find(([v]) => v === cur) || THEMES[0])[1], items: THEMES.map(([v, l]) => ({ act: 'theme', v, label: l })) });
-    wireDropdowns($('#themeslot'), { theme: (v) => { setTheme(v); paintTheme(); $('#ddtheme .dd-btn').focus(); } });
+    // focus goes back to the button only after a keyboard choice (a mouse choice would otherwise show the keyboard focus ring)
+    wireDropdowns($('#themeslot'), { theme: (v, how) => { setTheme(v); paintTheme(); if (how.keyboard) $('#ddtheme .dd-btn').focus(); } });
   };
   paintTheme();
   const setTopbarH = () => document.documentElement.style.setProperty('--topbar-h', $('.topbar').offsetHeight + 'px');

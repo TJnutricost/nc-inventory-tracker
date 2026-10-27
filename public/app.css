@@ -760,7 +760,8 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
 .side-link .dd-label { flex: 1; }
 .side-link .dd-caret { width: 16px; height: 16px; transform: rotate(-90deg); }
 .dd.open .side-link .dd-caret { transform: rotate(90deg); }
-.side-link:focus-visible, .seg button:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+.seg button:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+.side-link:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: -2px; } /* inside: the sidebar clips anything past its edge */
 .dd-sub { font-size: 13px; font-weight: 500; color: var(--muted); }
 .seg-full { display: flex; width: 100%; }
 .seg-full button { flex: 1; min-height: 44px; }
