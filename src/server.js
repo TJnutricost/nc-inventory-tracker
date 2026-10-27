@@ -433,7 +433,34 @@ app.get('/api/assets/lookup/:code', auth, async (req, res) => {
   // An employee only gets an id for assets they may open; for any other existing asset they learn just that it isn't
   // available (no id, no details), so the scanner can say so without exposing the record.
   if (a && !(await data.assetAccess.canViewAsset(req.user, await data.assetAccess.getAsset(a.id)))) return res.json({ found: false, unavailable: true, code });
-  res.json(a ? { found: true, id: a.id, archived: !!a.archived_at } : { found: false, code });
+  if (a) return res.json({ found: true, id: a.id, archived: !!a.archived_at });
+  // IT only: a label we printed before its asset existed (Create labels, the Add asset form's Print label) opens Add asset with it.
+  const issued = req.user.role === 'admin' ? await data.assetRecords.issuedTag(code) : null;
+  res.json(issued ? { found: false, code, issued } : { found: false, code });
+});
+
+// Create labels / the Add asset form's Print label (docs/briefs/labels-and-assets.md): claims the next `count` tags from the counter, so
+// the printed labels are never issued to another asset. Nothing else is written; the assets are added later by scanning the labels.
+app.post('/api/tags/claim', admin, async (req, res) => {
+  const count = Number(req.body.count);
+  if (!Number.isInteger(count) || count < 1 || count > 300) throw httpError(400, 'Choose between 1 and 300 labels');
+  const { tag_prefix } = await data.settings.getSettings();
+  res.json({ tags: await data.assetRecords.claimTags({ prefix: tag_prefix, count }) });
+});
+// Create labels, when the sheet did not print or is not wanted: the claimed tags go back, so the next claim issues them again. Refused
+// (409, nothing changed) once newer numbers were issued after them or one of them is on an asset: then the printed labels stay usable.
+const RELEASE_REFUSED = {
+  newer: 'Newer numbers were reserved after these, so they can no longer be given back. The printed labels still work: scan one to add its asset.',
+  used: 'One of these labels is already on an asset, so the numbers can no longer be given back.',
+  not_ours: 'These are not labels created here.',
+};
+app.post('/api/tags/release', admin, async (req, res) => {
+  const tags = req.body.tags;
+  if (!Array.isArray(tags) || !tags.length || tags.length > 300 || tags.some((t) => typeof t !== 'string')) throw httpError(400, 'Send the list of tags to give back');
+  const { tag_prefix } = await data.settings.getSettings();
+  const r = await data.assetRecords.releaseTags({ prefix: tag_prefix, tags });
+  if (!r.released) throw httpError(409, RELEASE_REFUSED[r.reason]);
+  res.json({ released: tags.length });
 });
 
 // Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.

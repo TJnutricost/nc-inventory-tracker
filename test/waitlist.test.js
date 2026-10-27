@@ -922,16 +922,17 @@ test('Edit dates emails only a current reserver the NEW range newly overlaps; th
 test('front end: contextual Back from Settings to the catalog, the Settings section layout, the Shorten calendar, the amber FIFO warning and the green toast', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.css'), 'utf8');
-  const catalog = src.slice(src.indexOf('async function viewCatalog()'), src.indexOf('async function viewCatalog()') + 12000);
+  // (the catalog is IT's All assets since docs/briefs/labels-and-assets.md)
+  const catalog = src.slice(src.indexOf('async function viewAdminAssets()'), src.indexOf('async function viewAdminAssets()') + 16000);
   // Settings stamps the source into the route; the sidebar does not
-  assert.match(src, /<a class="btn" href="#\/catalog\?from=\$\{encodeURIComponent\('#\/settings'\)\}">/);
-  assert.match(src, /key: 'catalog', href: '#\/catalog', label: 'Equipment catalog'/, 'the sidebar link is the plain root');
-  assert.doesNotMatch(src, /<a class="btn" href="#\/catalog">/);
+  assert.match(src, /<a class="btn" href="#\/assets\?from=\$\{encodeURIComponent\('#\/settings'\)\}">/);
+  assert.match(src, /key: 'assets', href: '#\/assets', label: isAdmin\(\) \? 'All assets'/, 'the sidebar link is the plain root');
+  assert.doesNotMatch(src, /<a class="btn" href="#\/(catalog|assets)">/);
   // the catalog keeps it on every URL it builds, and shows Back only when it is there
   assert.match(catalog, /const fromSettings = \(\) => qs\(\)\.get\('from'\) === '#\/settings'/);
   assert.match(catalog, /if \(fromSettings\(\)\) q\.push\(`from=\$\{encodeURIComponent\('#\/settings'\)\}`\)/);
-  assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : ''/);
-  assert.doesNotMatch(catalog, /history\.replaceState\(null, '', '#\/catalog'\)/, 'even the stale-node fallback keeps the source');
+  assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : autoBack\(\)/, 'from Settings: back to Settings; otherwise the previous page (every page has a Back)');
+  assert.doesNotMatch(catalog, /history\.replaceState\(null, '', '#\/(catalog|assets)'\)/, 'even the stale-node fallback keeps the source');
   // Settings layout: a header row (title + description, then the action), Locations kept
   assert.match(src, /<div class="set-head"><div class="field"><span>Categories &amp; equipment types<\/span>/);
   assert.match(src, /name="locations"/);
@@ -950,15 +951,15 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
 test('front end: an asset opened from a catalog that came from Settings carries `from=#/settings` out and back; no `from` means nothing is added', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   // out: the catalog's asset links stamp it (only when the catalog has it)
-  assert.match(src, /srcQ\('catalog', \{ node: node\.id, all: st\.all, from: fromSettings\(\) \? '#\/settings' : null \}\)/);
+  assert.match(src, /srcQ\('catalog', \{ node: node \? node\.id : null, all: st\.all, from: fromSettings\(\) \? '#\/settings' : null \}\)/);
   // context: read only for src=catalog and only the one whitelisted value; carried to the edit form and its Cancel/Save return
   assert.match(src, /fromSettings: src === 'catalog' && p\.get\('from'\) === '#\/settings'/);
   assert.match(src, /from: c\.fromSettings \? '#\/settings' : null \}\) : ''; \}?;?/);
   // back: the catalog root AND the exact node both get it appended, via one helper; employee Browse is untouched
   const back = src.slice(src.indexOf('async function assetBackTarget()'), src.indexOf('// ============================================================ router'));
   assert.match(back, /const catFrom = \(href\) => \(c\.fromSettings \? `\$\{href\}\$\{href\.includes\('\?'\) \? '&' : '\?'\}from=\$\{encodeURIComponent\('#\/settings'\)\}` : href\)/);
-  assert.match(back, /const root = c\.src === 'catalog' \? \{ href: catFrom\('#\/catalog'\)/);
-  assert.match(back, /c\.src === 'catalog' \? catFrom\(`#\/catalog\?node=\$\{n\.id\}\$\{c\.all \? '&all=1' : ''\}`\) : `#\/assets\?node=\$\{n\.id\}`/);
+  assert.match(back, /const root = c\.src === 'catalog' \? \{ href: catFrom\('#\/assets'\), label: 'All assets' \}/);
+  assert.match(back, /c\.src === 'catalog' \? catFrom\(`#\/assets\?node=\$\{n\.id\}\$\{c\.all \? '&all=1' : ''\}`\) : `#\/assets\?node=\$\{n\.id\}`/);
   // srcQ drops null extras, so a catalog without `from` produces exactly the old URL
   assert.match(src, /Object\.entries\(extra\)\.filter\(\(\[, v\]\) => v\)/);
 });

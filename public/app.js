@@ -354,17 +354,25 @@ function openScanner({ title = 'Scan a barcode', hint = 'Point the camera at the
 }
 
 // A scanned (or typed, or keyboard-wedge) code opens its asset: lookup matches the asset tag, then the serial number. Any value is
-// accepted; no tag format or prefix is assumed. A code no asset uses shows "No asset found for <code>" with Scan again, and for IT
-// Add asset, which opens the Add asset form with the code as the tag (nothing is saved until they submit it). A failed lookup is an
-// error, never "not found".
+// accepted; no tag format or prefix is assumed. One of our own labels printed before its asset opens Add asset with that tag (IT). Any
+// other code no asset uses shows "No asset found for <code>" with Scan again, and for IT Add asset with the code as the serial number or
+// as the tag (nothing is saved until they submit it). A failed lookup is an error, never "not found".
 async function handleScannedCode(code, ctx = '') { // ctx: where the asset page should say it came from (the Scan page passes srcQ('scan'))
   let r;
   try { r = await api('GET', '/api/assets/lookup/' + encodeURIComponent(code)); } catch (e) { return fail(e); }
   if (r.found) return go('#/asset/' + r.id + ctx);
   if (r.unavailable) return toast("That item isn't available right now. You can request something similar from IT.", true);
+  // IT: one of our labels printed before its asset (Create labels / Print label) goes straight to Add asset with that tag.
+  if (r.issued && isAdmin()) return go('#/new?tag=' + encodeURIComponent(r.issued));
+  // Anything else: "No asset found". For IT a maker's barcode is usually the serial number, so Add asset offers it as the serial first and
+  // as the tag second (docs/briefs/labels-and-assets.md).
   const { el, close } = sheet(`<h2 style="overflow-wrap:anywhere">No asset found for <span class="mono">${esc(code)}</span></h2>
-    <div class="stack" style="margin-top:16px">${isAdmin() ? `<button class="btn primary lg block" id="mk">${icon('plus')} Add asset</button>` : ''}
+    ${isAdmin() ? '<p class="muted" style="margin:6px 0 0">A maker\'s barcode is usually the serial number.</p>' : ''}
+    <div class="stack" style="margin-top:16px">${isAdmin() ? `<button class="btn primary lg block" id="mks">${icon('plus')} Add asset with this serial number</button>
+    <button class="btn block" id="mk">${icon('tag')} Add asset with this as its tag</button>` : ''}
     <button class="btn block" id="again">${icon('scan')} Scan again</button></div>`);
+  const mks = $('#mks', el);
+  if (mks) mks.onclick = () => { close(); go('#/new?serial=' + encodeURIComponent(code)); };
   const mk = $('#mk', el);
   if (mk) mk.onclick = () => { close(); go('#/new?tag=' + encodeURIComponent(code)); };
   $('#again', el).onclick = () => { close(); openScanner({ onResult: (c) => handleScannedCode(c, ctx) }); };
@@ -384,31 +392,30 @@ function navItems() {
     { key: 'home', href: '#/home', label: 'Home', icon: 'home' },
     ...(isAdmin() ? [] : [{ key: 'equipment', href: '#/equipment', label: 'My equipment', icon: 'laptop' }]),
     { key: 'assets', href: '#/assets', label: isAdmin() ? 'All assets' : 'Browse equipment', icon: 'box' },
+    // IT's labels live under All assets (docs/briefs/labels-and-assets.md): reprint for saved assets, or numbered blanks before them
+    ...(isAdmin() ? [{ key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer', sub: true }, { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus', sub: true }] : []),
     { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan' },
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
     ...(isAdmin() ? [] : [{ key: 'history', href: '#/history', label: 'History', icon: 'history' }]),
   ];
   if (isAdmin()) side.push({ sep: true },
     { key: 'people', href: '#/people', label: 'People', icon: 'users' },
-    { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
     { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
-    { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
     { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
-    { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
-    { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' });
-  side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' });
+    { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' });
+  side.push({ sep: true }, { key: 'profile', href: '#/profile', label: 'My profile', icon: 'user' },
+    ...(isAdmin() ? [{ key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' }] : [])); // Settings sits with My profile
   return { tabs: common, side };
 }
 // Mobile hamburger (admins only) = administering the system. The signed-in person's own destinations live under the Profile tab.
 const adminMenuItems = () => [
   { key: 'people', href: '#/people', label: 'People', icon: 'users' },
-  { key: 'catalog', href: '#/catalog', label: 'Equipment catalog', icon: 'tag' },
   { key: 'calendar', href: '#/calendar', label: 'Calendar', icon: 'calendar' },
   { key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer' },
+  { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus' },
   { key: 'import', href: '#/import', label: 'Import / export', icon: 'upload' },
   { key: 'activity', href: '#/activity', label: 'Activity log', icon: 'history' },
-  { key: 'settings', href: '#/settings', label: 'Settings', icon: 'settings' },
-];
+]; // (Settings is under the Profile tab and the avatar menu, with My profile)
 // The drawer lives in #sheet-root like every other overlay, so the router's existing "clear overlays on navigation" also closes it.
 function closeDrawer() {
   $('#sheet-root .drawer-backdrop')?.remove(); document.body.style.overflow = '';
@@ -435,10 +442,10 @@ function mountShell() {
       <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
       <div class="menu-wrap"><button type="button" class="avatar sm" id="avatar-btn" aria-haspopup="menu" aria-expanded="false" title="${esc(S.me.name)}" style="background:var(--brand-accent);border:0;cursor:pointer">${esc(initials(S.me.name))}</button>
         <div class="menu" id="avatar-menu" role="menu" hidden><div class="menu-who"><strong>${esc(S.me.name)}</strong><div class="small muted">${esc(S.me.email || '')}</div></div>
-          <a href="#/profile" role="menuitem">${icon('user')} My profile</a><button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
+          <a href="#/profile" role="menuitem">${icon('user')} My profile</a>${isAdmin() ? `<a href="#/settings" role="menuitem">${icon('settings')} Settings</a>` : ''}<button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
     </header>
     <div class="shell">
-      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
+      <nav class="sidebar">${side.map((i) => i.sep ? '<div class="sep"></div>' : `<a href="${i.href}" data-key="${i.key}"${i.sub ? ' class="sub"' : ''}${i.key === 'calendar' ? ' data-cal' : ''}>${icon(i.icon)}<span>${i.label}</span>${i.key === 'assets' && isAdmin() ? icon('chev', 'nav-caret') : ''}${i.badge ? `<span class="count">${i.badge}</span>` : ''}</a>`).join('')}</nav>
       <main id="main"></main>
     </div>
     <nav class="tabbar">${tabs.map((t) => `<a href="${t.href}" data-key="${t.key}" class="${t.scan ? 'scan-tab' : ''}">${t.scan ? `<span class="scan-bubble">${icon('scan')}</span>` : icon(t.icon)}<span>${t.label}</span>${t.badge ? `<span class="badge-dot">${t.badge}</span>` : ''}</a>`).join('')}</nav>`;
@@ -463,9 +470,10 @@ function mountShell() {
 const ACCOUNT_KEYS = ['account', 'profile', 'equipment', 'history'];
 function setActive(key) {
   S.activeKey = key;
-  const tabKey = ACCOUNT_KEYS.includes(key) ? 'account' : key; // the Profile tab covers the person's own pages
+  const tabKey = ACCOUNT_KEYS.includes(key) || key === 'settings' ? 'account' : key.startsWith('labels') ? 'assets' : key; // the Profile tab covers the person's own pages; the label pages sit under Assets
   $$('.tabbar a').forEach((a) => a.classList.toggle('active', a.dataset.key === tabKey));
   $$('.sidebar a').forEach((a) => a.classList.toggle('active', a.dataset.key === key));
+  $('.sidebar')?.classList.toggle('assets-open', ['assets', 'labels', 'labels-new'].includes(key)); // All assets' sub-items show while you are in it
 }
 async function refreshBadge() {
   try {
@@ -506,7 +514,7 @@ async function assetBackTarget() {
   if (!c) return fallback;
   // From the availability calendar: back to the same calendar (non-exact = browser Back, which also restores its month and day).
   if (c.src === 'calendar') return { href: `#/calendar${c.node ? '?node=' + c.node : ''}`, label: 'Calendar', exact: false };
-  const fixed = { assets: ['#/assets', 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'], scan: ['#/scan', 'Scan'], activity: ['#/activity', 'Activity log'] };
+  const fixed = { assets: ['#/assets', isAdmin() ? 'All assets' : 'Assets'], equipment: ['#/equipment', 'My equipment'], history: ['#/history', 'History'], home: ['#/home', 'Home'], scan: ['#/scan', 'Scan'], activity: ['#/activity', 'Activity log'] };
   if (fixed[c.src]) return { href: fixed[c.src][0], label: fixed[c.src][1], exact: true };
   if (c.src === 'requests') return { href: `#/requests${c.tab ? '?tab=' + c.tab : ''}`, label: 'Requests', exact: true };
   if (c.src === 'person') { // an admin's employee page: back to that person, labelled with their real name
@@ -515,7 +523,8 @@ async function assetBackTarget() {
   }
   // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
   const catFrom = (href) => (c.fromSettings ? `${href}${href.includes('?') ? '&' : '?'}from=${encodeURIComponent('#/settings')}` : href); // the catalog keeps its Settings source
-  const root = c.src === 'catalog' ? { href: catFrom('#/catalog'), label: 'Equipment catalog' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
+  // ('catalog' = IT's All assets page, which is the catalog drill-down since docs/briefs/labels-and-assets.md)
+  const root = c.src === 'catalog' ? { href: catFrom('#/assets'), label: 'All assets' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
   if (!c.node) return { ...root, exact: true };
   let rows = []; try { rows = await api('GET', '/api/catalog' + (c.src === 'catalog' ? '?include_archived=1' : '')); } catch { /* fall back to the root */ }
   const n = rows.find((r) => r.id === c.node);
@@ -523,7 +532,7 @@ async function assetBackTarget() {
   // Opened from a virtual "All in <name>" view (admin catalog &all=1; employee Browse, where an entry with children always shows its
   // whole branch): say so. The URL is the same real-entry route — "All in" is never a stored entry.
   const virtual = c.src === 'catalog' ? c.all : n.child_count > 0;
-  return { href: c.src === 'catalog' ? catFrom(`#/catalog?node=${n.id}${c.all ? '&all=1' : ''}`) : `#/assets?node=${n.id}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
+  return { href: c.src === 'catalog' ? catFrom(`#/assets?node=${n.id}${c.all ? '&all=1' : ''}`) : `#/assets?node=${n.id}`, label: virtual ? `All in ${n.name}` : n.name, exact: true };
 }
 
 // ============================================================ router
@@ -543,7 +552,9 @@ const ROUTES = [
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
-  [/^#\/catalog$/, viewCatalog, { key: 'catalog', admin: true }],
+  [/^#\/labels\/new$/, viewCreateLabels, { key: 'labels-new', admin: true }],
+  // The equipment catalog is All assets since docs/briefs/labels-and-assets.md: old links (bookmarks, Settings) land there, same entry
+  [/^#\/catalog$/, () => { history.replaceState(null, '', '#/assets' + (location.hash.split('?')[1] ? '?' + location.hash.split('?')[1] : '')); return route(true); }, { key: 'assets', admin: true }],
   [/^#\/import$/, viewImport, { key: 'import', admin: true }],
   [/^#\/activity$/, viewActivity, { key: 'activity', admin: true }],
   [/^#\/settings$/, viewSettings, { key: 'settings', admin: true }],
@@ -553,6 +564,46 @@ const ROUTES = [
   [/^#\/account$/, viewAccount, { key: 'account' }],
   [/^#\/more$/, () => go('#/account'), { key: 'account' }], // the old bottom-nav "More" page: bookmarks land on the Profile tab, which replaced its personal half
 ];
+// ---- "‹ Back" on every page (owner, 2026-10-27) ----
+// The trail of in-app pages: each entry is a page left for another one, with the title it showed (its h1), so "‹ Back" can say where it
+// goes ("‹ Monitor", "‹ Dell Latitude 5440"). Following it (or browser Back) to the page on top of the trail pops it. Pages with their own
+// contextual back link (an asset, a form, a catalog level) keep theirs; every other page gets this one (ensureBack, after its view).
+S.trail = [];
+// Top-level pages are named as in the menu (Home's h1 is a greeting); a page inside them (an asset, a person, a catalog level) by its title.
+const PAGE_NAMES = () => ({ '#/home': 'Home', '#/assets': isAdmin() ? 'All assets' : 'Browse equipment', '#/scan': 'Scan', '#/requests': 'Requests', '#/people': 'People', '#/calendar': 'Calendar',
+  '#/labels': 'Print labels', '#/labels/new': 'Create labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile',
+  '#/equipment': 'My equipment', '#/history': 'History', '#/account': 'Profile', '#/new': 'Add an asset' });
+function noteNavigation(next) {
+  const cur = S.cur;
+  S.cur = { hash: next };
+  if (!cur || cur.hash === next) return;
+  const top = S.trail.at(-1);
+  if (top && top.hash === next) { S.trail.pop(); return; }
+  const [base, query = ''] = cur.hash.split('?');
+  const title = (!/(^|&)node=/.test(query) && PAGE_NAMES()[base]) || ($('#main h1') && $('#main h1').textContent.trim()) || 'Back';
+  S.trail.push({ hash: cur.hash, label: title.length > 40 ? title.slice(0, 39) + '…' : title });
+  if (S.trail.length > 30) S.trail.shift();
+}
+// The back link for a page without its own: the previous page, else Home (nothing on Home itself).
+function autoBack() {
+  const t = S.trail.at(-1);
+  if (t) return backLink(t.hash, t.label, true);
+  return (location.hash || '#/home').split('?')[0] === '#/home' ? '' : backLink('#/home', 'Home', true);
+}
+function ensureBack() {
+  const m = main();
+  if (!m || m.querySelector('.back')) return;
+  const html = autoBack(); if (!html) return;
+  const slot = m.querySelector('#backslot');
+  if (slot) slot.innerHTML = html; else m.insertAdjacentHTML('afterbegin', `<div class="auto-back">${html}</div>`);
+}
+// A page that is opened fades in (a level / filter change on the same page: the lighter `soft` fade); nothing when the OS asks for
+// reduced motion (CSS). The class is removed and re-added so the animation runs again each time.
+function animateIn(el, kind = 'page') {
+  if (!el) return;
+  el.classList.remove('page-in', 'soft-in'); void el.offsetWidth; el.classList.add(kind === 'soft' ? 'soft-in' : 'page-in');
+}
+
 async function route(silent) {
   S.soft = null; // a route-backed screen registers itself again below
   const hash = (location.hash || '#/home').split('?')[0];
@@ -567,12 +618,14 @@ async function route(silent) {
     if (opt.admin && !isAdmin()) return go('#/home');
     if (opt.employee && isAdmin()) return go('#/home'); // the admin's own equipment stays on their Home
     if (!S.shell) { mountShell(); refreshBadge(); }
+    noteNavigation(location.hash || '#/home'); // (before the spinner replaces the page being left: its title names the way back)
     setActive(opt.key);
     if (!silent) { window.scrollTo(0, 0); loading(); }
-  } else S.shell = false;
+  } else { S.shell = false; S.trail = []; S.cur = null; } // signed out / sign-in screens: a fresh trail
   S.silent = !!silent;
   $('#sheet-root').innerHTML = ''; document.body.style.overflow = '';
   try { await view(...params); } catch (e) { if (main()) main().innerHTML = `<div class="empty">${icon('alert')}<p>${esc(e.message)}</p></div>`; else fail(e); }
+  if (!opt.pub) { ensureBack(); if (!silent) animateIn(main()); }
 }
 async function loadMe() {
   const r = await api('GET', '/api/me');
@@ -584,7 +637,11 @@ async function loadMe() {
 // button, browser Back/Forward and a refresh all land on the same state, and nothing stale can survive.
 window.addEventListener('hashchange', () => {
   const base = (location.hash || '').split('?')[0];
-  if (S.soft && S.soft.base === base && $('#main')) { $('#sheet-root').innerHTML = ''; document.body.style.overflow = ''; return S.soft.fn(); }
+  if (S.soft && S.soft.base === base && $('#main')) {
+    $('#sheet-root').innerHTML = ''; document.body.style.overflow = '';
+    noteNavigation(location.hash); // a level of the same page is a page of its own for "‹ Back"
+    const r = S.soft.fn(); animateIn($('#ct') || main(), 'soft'); return r;
+  }
   route();
 });
 
@@ -755,48 +812,7 @@ function activityList(rows, withAsset, src = '') {
 
 // ============================================================ assets list
 async function viewAssets() {
-  const p = qs();
-  if (!isAdmin()) return viewBrowse(); // employees get the catalog card-grid browser
-  const roots = await rootNames();
-  const state = { q: p.get('q') || '', status: p.get('status') || '', category: p.get('category') || '' };
-  const statuses = isAdmin()
-    ? [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']]
-    : null; // employees have no status filters: Browse is simply the equipment they can get (their own is under My equipment)
-  main().innerHTML = `<div class="page-head"><h1>${isAdmin() ? 'Assets' : 'Browse equipment'}</h1>${isAdmin() ? `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${calendarLink()}` : ''}</div>
-    <div class="stack">
-      <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="${isAdmin() ? 'Search name, brand, category, tag, serial, person…' : 'Search name, brand, category, tag, serial…'}" value="${esc(state.q)}" enterkeyhint="search"></div>
-        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
-      ${statuses ? `<div class="row" style="gap:8px"><div class="chips grow" id="chips">${statuses.map(([v, l]) => `<button class="chip ${state.status === v ? 'on' : ''}" data-v="${v}">${l}</button>`).join('')}</div></div>` : '<p class="small muted" style="margin:0">Equipment that is available to check out or request.</p>'}
-      <select id="cat"><option value="">All categories</option>${roots.map((c) => `<option ${state.category === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
-      <div class="card" id="results"><div class="spinner"></div></div>
-    </div>
-    ${isAdmin() ? `<a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>` : ''}`;
-  if (!isAdmin()) main().insertAdjacentHTML('beforeend', `<p class="small muted" style="margin-top:12px">Don't see what you need? <a href="#" id="reqlink">Send IT a request</a>.</p>`);
-  const load = async () => {
-    const u = new URLSearchParams();
-    if (state.q) u.set('q', state.q);
-    if (state.status && isAdmin()) u.set('status', state.status);
-    if (state.category) u.set('category', state.category);
-    history.replaceState(null, '', '#/assets' + (u.toString() && isAdmin() ? '?' + u.toString() : ''));
-    try {
-      const rows = await api('GET', '/api/assets?' + u.toString());
-      const res = $('#results'); if (!res) return;
-      res.innerHTML = rows.length ? `<div class="card-head"><span class="muted small">${rows.length} asset${rows.length === 1 ? '' : 's'}</span>${isAdmin() ? `<a class="small" href="/api/export/assets.csv">${'Export CSV'}</a>` : ''}</div><ul class="list">${rows.map((a) => {
-        const st = assetStatus(a);
-        const seats = a.license_seats > 1 ? ` · ${a.seats_used}/${a.license_seats} seats` : '';
-        return `<li><a class="item" href="#/asset/${a.id}${srcQ('assets')}">${thumbHtml(a.thumb, a.category)}
-          <div class="grow"><div class="title truncate">${esc(a.name)}</div>
-          <div class="sub truncate"><span class="mono">${esc(a.tag)}</span>${a.holder_names && isAdmin() ? ' · ' + esc(a.holder_names) : ''}${seats}${!a.holder_names && a.location ? ' · ' + esc(a.location) : ''}</div></div>
-          ${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
-      }).join('')}</ul>` : `<div class="empty">${icon('box')}<p>${state.q || state.status || state.category ? 'Nothing matches those filters.' : isAdmin() ? 'No assets yet. Tap <strong>Add</strong> or scan a barcode to get started.' : 'Nothing is available right now.'}</p></div>`;
-    } catch (e) { fail(e); }
-  };
-  $('#q').oninput = debounce((e) => { state.q = e.target.value.trim(); load(); });
-  $('#cat').onchange = (e) => { state.category = e.target.value; load(); };
-  if ($('#chips')) $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (!b) return; state.status = b.dataset.v; $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c === b)); load(); };
-  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
-  const rl = $('#reqlink'); if (rl) rl.onclick = (e) => { e.preventDefault(); requestEquipmentSheet(); };
-  load();
+  return isAdmin() ? viewAdminAssets() : viewBrowse(); // IT: the catalog-style All assets page; employees: the catalog card-grid browser
 }
 
 // ============================================================ catalog card grid (shared by Browse and the admin catalog)
@@ -843,7 +859,7 @@ async function viewBrowse() {
   const renderNav = () => {
     const bn = $('#bn');
     const up = byId.get((cur() || {}).parent_id); // Back is the app's usual "‹ <where it goes>" link above the title; none at the top
-    $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : '';
+    $('#backslot').innerHTML = st.path.length && !st.q ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'Browse equipment') : autoBack();
     $('#pagetitle').textContent = !st.q && cur() ? cur().name : 'Browse equipment'; // the screen IS the entry being viewed (same model as the admin catalog)
     // Availability for exactly what is on screen, but only once the catalog is narrowed: no calendar at the Browse root (or while searching,
     // which is global). A company-wide calendar is not useful to employees.
@@ -1494,7 +1510,8 @@ async function assetPickerSheet({ title, filterCategory, catalogNode, onPick }) 
 // ============================================================ asset form
 async function viewAssetForm(id) {
   const editing = !!id;
-  let a = { category: S.settings.categories[0] || 'Other', condition: 'Good', tag: qs().get('tag') || '' };
+  // #/new?tag=… (a scanned label) and #/new?serial=… (a scanned manufacturer barcode) fill those fields in
+  let a = { category: S.settings.categories[0] || 'Other', condition: 'Good', tag: qs().get('tag') || '', serial: qs().get('serial') || '' };
   if (editing) a = (await api('GET', '/api/assets/' + id)).asset;
   const nextTag = editing ? null : (await api('GET', '/api/next-tag')).tag;
   const rootList = await rootNames();
@@ -1512,6 +1529,8 @@ async function viewAssetForm(id) {
         ${editing
           ? `<label class="field"><span>Asset tag</span><input value="${esc(a.tag)}" class="mono" disabled title="Asset tags can't be changed once created"></label>`
           : `<label class="field"><span>Asset tag</span><div class="input-group"><input name="tag" value="${esc(a.tag || '')}" placeholder="${nextTag ? `Auto: ${esc(nextTag)}` : ''}" class="mono" autocapitalize="characters"><button type="button" class="btn" data-scan="tag" title="Scan barcode">${icon('scan')}</button></div></label>`}
+        ${!editing ? `<div class="field full"><span>Label</span><div class="row wrap" style="gap:14px;align-items:center"><div class="label-preview" id="lprev"></div>
+          <div class="grow" style="min-width:180px"><button type="button" class="btn" id="plabel">${icon('printer')} Print label</button><div class="small muted" id="lhint" style="margin-top:6px"></div></div></div></div>` : ''}
         ${!editing ? `<label class="field full"><span>Photos</span><label class="no-photo" style="aspect-ratio:auto;padding:18px"><div>${icon('camera')}<strong id="ph-label">Take or choose photos</strong></div><input type="file" name="photos" id="ph" accept="image/*" multiple hidden></label></label>` : ''}
       </fieldset></div>
       <div class="card pad"><fieldset class="form-grid cols"><legend>Details</legend>
@@ -1559,7 +1578,30 @@ async function viewAssetForm(id) {
     mountCatalogChooser($('#cc-mount', sh), rows, { value: Number($('#cnode').value) || null, onChange: (id, row) => { picked = row; $('#cuse', sh).disabled = !row; $('#rq-sel', sh).innerHTML = row ? `<span class="muted small">Selected</span> <strong>${esc(crumbText(row.path))}</strong>` : '<span class="muted small">Choose an entry</span>'; } });
     $('#cuse', sh).onclick = () => { if (picked) setCatalog(picked.id, picked.path); close(); };
   };
-  $$('[data-scan]').forEach((b) => b.onclick = () => openScanner({ title: b.dataset.scan === 'tag' ? 'Scan asset tag' : 'Scan serial number', onResult: (code) => { $(`[name=${b.dataset.scan}]`).value = code; toast('Scanned ' + code); } }));
+  $$('[data-scan]').forEach((b) => b.onclick = () => openScanner({ title: b.dataset.scan === 'tag' ? 'Scan asset tag' : 'Scan serial number', onResult: (code) => { const input = $(`[name=${b.dataset.scan}]`); input.value = code; input.dispatchEvent(new Event('input')); toast('Scanned ' + code); } }));
+  // The label (new assets): the tag in the field, else the next free number (a preview: nothing is reserved by opening the form, so a
+  // cancelled form gives the same number to the next one). Print label with an empty field reserves the next number for this asset first.
+  if (!editing) {
+    const tagIn = $('[name=tag]');
+    const drawLabel = () => {
+      const tag = tagIn.value.trim() || nextTag;
+      $('#lprev').innerHTML = labelHtml({ tag, category: catSel.value, name: $('[name=name]').value.trim() });
+      drawBarcodes($('#lprev'));
+      $('#lhint').textContent = tagIn.value.trim() ? 'Prints this tag.' : `${nextTag} is the next free number. Printing reserves it for this asset.`;
+    };
+    for (const el of [tagIn, $('[name=name]')]) el.addEventListener('input', debounce(drawLabel, 200));
+    catSel.addEventListener('change', drawLabel);
+    $('#plabel').onclick = () => busy($('#plabel'), async () => {
+      if (!tagIn.value.trim()) {
+        const [tag] = (await api('POST', '/api/tags/claim', { count: 1 })).tags;
+        if (tag !== nextTag) toast(`${nextTag} was just taken, so this asset gets ${tag}`);
+        tagIn.value = tag;
+      }
+      drawLabel();
+      printLabels([{ tag: tagIn.value.trim(), category: catSel.value, name: $('[name=name]').value.trim() }]);
+    });
+    drawLabel();
+  }
   const ph = $('#ph'); if (ph) ph.onchange = () => { $('#ph-label').textContent = ph.files.length ? `${ph.files.length} photo${ph.files.length > 1 ? 's' : ''} selected` : 'Take or choose photos'; };
   $('#f').onsubmit = (e) => {
     e.preventDefault();
@@ -2112,7 +2154,7 @@ document.addEventListener('click', (e) => {
 // or person's name), never from the URL text. Unknown routes still get a plain, working "Back".
 async function calBackTarget(from, sc) {
   const admin = isAdmin();
-  const fixed = { '#/home': 'Home', '#/assets': admin ? 'All assets' : 'Browse equipment', '#/catalog': 'Equipment catalog', '#/requests': 'Requests', '#/people': 'People', '#/labels': 'Print labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile', '#/equipment': 'My equipment', '#/history': 'History', '#/scan': 'Scan', '#/account': 'Profile', '#/new': 'Add an asset' };
+  const fixed = { '#/home': 'Home', '#/assets': admin ? 'All assets' : 'Browse equipment', '#/catalog': 'All assets', '#/labels/new': 'Create labels', '#/requests': 'Requests', '#/people': 'People', '#/labels': 'Print labels', '#/import': 'Import / export', '#/activity': 'Activity log', '#/settings': 'Settings', '#/profile': 'My profile', '#/equipment': 'My equipment', '#/history': 'History', '#/scan': 'Scan', '#/account': 'Profile', '#/new': 'Add an asset' };
   if (!from) return { href: '#/assets', label: admin ? 'All assets' : 'Browse equipment' }; // a typed / shared link: the role's list
   const [path, query = ''] = from.split('?'); const q = new URLSearchParams(query);
   const node = Number(q.get('node'));
@@ -2534,13 +2576,33 @@ async function viewPerson(id) {
 }
 
 // ============================================================ labels
+// One label (an Avery 5160 / 8160 cell, 2⅝" × 1"): the company line and category, the tag's Code 128 barcode, the name line (empty on a
+// blank label, which gets its name when the asset is added). Barcodes are drawn once JsBarcode (a deferred script) is there.
+const labelHtml = ({ tag, category = '', name = '' }) => `<div class="label"><div class="l-top"><span>NUTRICOST IT</span><span>${esc(category)}</span></div><svg data-code="${esc(tag)}"></svg><div class="l-name">${name ? esc(name) : '&nbsp;'}</div></div>`;
+function drawBarcodes(root) {
+  if (!window.JsBarcode) return setTimeout(() => drawBarcodes(root), 100);
+  $$('svg[data-code]', root).forEach((svg) => { try { window.JsBarcode(svg, svg.dataset.code, { format: 'CODE128', height: 40, width: 1.6, margin: 0, fontSize: 12, font: 'monospace', textMargin: 1, displayValue: true }); } catch { /* */ } });
+}
+// Prints just these labels from any page (the Add asset form's Print label): a temporary sheet is the only thing on paper, then removed.
+function printLabels(items) {
+  const sheetEl = document.createElement('div');
+  sheetEl.className = 'labels-sheet print-sheet';
+  sheetEl.innerHTML = items.map(labelHtml).join('');
+  document.body.appendChild(sheetEl);
+  document.body.classList.add('printing-labels');
+  const done = () => { sheetEl.remove(); document.body.classList.remove('printing-labels'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  const go_ = () => (window.JsBarcode ? (drawBarcodes(sheetEl), window.print()) : setTimeout(go_, 100));
+  go_();
+}
+
 async function viewLabels() {
   const pre = (qs().get('ids') || '').split(',').filter(Boolean).map(Number);
   const all = await api('GET', '/api/assets');
   const selected = new Set(pre);
   main().innerHTML = `<div class="no-print">${pre.length === 1 ? backLink('#/asset/' + pre[0], 'Back') : ''}
     <div class="page-head"><h1>Print labels</h1><button class="btn primary" id="print">${icon('printer')} Print</button></div>
-    <p class="muted small" style="margin-top:-6px">Sized for Avery 5160 / 8160 sheets (30 per page, 2⅝" × 1"). Works on most label printers too — set the paper size to your label.</p>
+    <p class="muted small" style="margin-top:-6px">Labels for assets already added. Sized for Avery 5160 / 8160 sheets (30 per page, 2⅝" × 1"). Works on most label printers too — set the paper size to your label. Labels for devices not added yet: <a href="#/labels/new">Create labels</a>.</p>
     <div class="card" style="margin-bottom:16px"><div class="card-head"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Find assets to add"></div></div>
       <div class="row spread card-body small" style="padding:10px 16px"><span id="count"></span><span class="row"><a href="#" id="all">Select all shown</a> · <a href="#" id="none">Clear</a></span></div>
       <div class="picker-list" id="pick" style="border:0;border-top:1px solid var(--line);border-radius:0;margin:0;max-height:260px"></div></div>
@@ -2553,8 +2615,8 @@ async function viewLabels() {
   };
   const renderSheet = () => {
     const list = all.filter((a) => selected.has(a.id));
-    $('#sheet').innerHTML = list.length ? list.map((a) => `<div class="label"><div class="l-top"><span>NUTRICOST IT</span><span>${esc(a.category)}</span></div><svg data-code="${esc(a.tag)}"></svg><div class="l-name">${esc(a.name)}</div></div>`).join('') : '<p class="muted no-print">Pick assets above to preview their labels.</p>';
-    $$('#sheet svg[data-code]').forEach((svg) => { try { window.JsBarcode(svg, svg.dataset.code, { format: 'CODE128', height: 40, width: 1.6, margin: 0, fontSize: 12, font: 'monospace', textMargin: 1, displayValue: true }); } catch { /* */ } });
+    $('#sheet').innerHTML = list.length ? list.map(labelHtml).join('') : '<p class="muted no-print">Pick assets above to preview their labels.</p>';
+    drawBarcodes($('#sheet'));
   };
   const update = () => { renderPick(); renderSheet(); };
   $('#q').oninput = debounce((e) => { const q = e.target.value.toLowerCase(); shown = all.filter((a) => !q || a.name.toLowerCase().includes(q) || a.tag.toLowerCase().includes(q) || (a.category || '').toLowerCase().includes(q)); renderPick(); }, 150);
@@ -2564,6 +2626,52 @@ async function viewLabels() {
   $('#print').onclick = () => { if (!selected.size) return toast('Pick at least one asset', true); window.print(); };
   const waitJsb = () => (window.JsBarcode ? update() : setTimeout(waitJsb, 100));
   waitJsb();
+}
+
+// Create labels (docs/briefs/labels-and-assets.md): numbered labels printed BEFORE the assets exist. The numbers are claimed from the tag
+// counter at once (POST /api/tags/claim), so none is ever given to another asset; stick one on each device and scan it: Add asset opens
+// with that tag. The claimed sheet stays on screen to print again (a jammed printer) until the page is left. A browser does not say whether
+// the print dialog printed or was cancelled, so after it closes the page asks; "Give the numbers back" (then or later on this page) returns
+// them (POST /api/tags/release) so the next Create labels issues the same numbers, as long as nothing newer was issued and none is in use.
+function viewCreateLabels() {
+  main().innerHTML = `<div class="no-print">${backLink('#/assets', 'All assets')}
+    <div class="page-head"><h1>Create labels</h1></div>
+    <p class="muted small" style="margin-top:-6px">Print numbered labels before the devices are in the system. Stick one on each device, then scan it: <strong>Add asset</strong> opens with that tag filled in. Each number is reserved as soon as the labels are created, so it is never given to another asset. If they don't print, give the numbers back and the next labels reuse them.</p>
+    <form class="card pad form-grid" id="f"><label class="field"><span>How many labels</span><input name="count" type="number" min="1" max="300" value="30" inputmode="numeric" required style="max-width:160px"></label>
+      <div class="small muted">30 fill one Avery 5160 / 8160 sheet (2⅝" × 1"). Up to 300 at a time.</div>
+      <button class="btn primary" id="go">${icon('printer')} Create &amp; print</button></form>
+    <div id="done" style="margin-top:16px"></div></div>
+    <div class="labels-sheet" id="sheet"></div>`;
+  $('#f').onsubmit = (e) => {
+    e.preventDefault();
+    const count = Number(new FormData(e.target).get('count'));
+    busy($('#go'), async () => {
+      const { tags } = await api('POST', '/api/tags/claim', { count });
+      const range = `<span class="mono">${esc(tags[0])}</span>${tags.length > 1 ? ` – <span class="mono">${esc(tags.at(-1))}</span>` : ''}`;
+      $('#sheet').innerHTML = tags.map((tag) => labelHtml({ tag })).join('');
+      $('#done').innerHTML = `<div class="banner info">${icon('check')}<div class="grow"><strong>${tags.length} label${tags.length === 1 ? '' : 's'} reserved: ${range}</strong><div class="small">They stay below until you leave this page, if you need to print them again. Not printed or not needed? Give the numbers back and the next labels reuse them.</div></div>
+        <div class="row wrap" style="gap:8px"><button type="button" class="btn" id="again">${icon('printer')} Print again</button><button type="button" class="btn" id="giveback">Give the numbers back</button></div></div>`;
+      const reset = () => { $('#sheet').innerHTML = ''; $('#done').innerHTML = ''; window.removeEventListener('afterprint', ask); };
+      const giveBack = async () => {
+        await api('POST', '/api/tags/release', { tags });
+        reset();
+        toast(`Gave back ${tags.length === 1 ? tags[0] : `${tags[0]} – ${tags.at(-1)}`}. The next labels will use these numbers again.`, false, 'ok');
+      };
+      // after the print dialog closes (printed or cancelled: the browser does not say which), ask once
+      const ask = () => {
+        window.removeEventListener('afterprint', ask);
+        const { el, close } = sheet(`<h2>Did the labels print?</h2><p class="muted">${tags.length} label${tags.length === 1 ? '' : 's'}: ${range}. If they did not print, or you don't need them, give the numbers back so the next labels reuse them.</p>
+          <div class="sheet-actions"><button type="button" class="btn" id="no">Give the numbers back</button><button type="button" class="btn primary" data-close>Yes, keep them</button></div>`);
+        $('#no', el).onclick = () => busy($('#no', el), async () => { await giveBack(); close(); });
+      };
+      $('#again').onclick = () => window.print();
+      $('#giveback').onclick = () => busy($('#giveback'), giveBack);
+      window.addEventListener('afterprint', ask);
+      window.addEventListener('hashchange', () => window.removeEventListener('afterprint', ask), { once: true }); // left the page: never ask elsewhere
+      const ready = () => (window.JsBarcode ? (drawBarcodes($('#sheet')), window.print()) : setTimeout(ready, 100));
+      ready();
+    });
+  };
 }
 
 // ============================================================ import / export
@@ -2613,7 +2721,7 @@ async function viewSettings() {
         <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
       <div class="card pad stack">
         <div class="set-head"><div class="field"><span>Categories &amp; equipment types</span><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
-          <a class="btn" href="#/catalog?from=${encodeURIComponent('#/settings')}">${icon('tag')} Manage the equipment catalog</a></div>
+          <a class="btn" href="#/assets?from=${encodeURIComponent('#/settings')}">${icon('tag')} Manage the equipment catalog</a></div>
         <label class="field"><span>Locations (one per line)</span><textarea name="locations" rows="6">${esc(s.locations.join('\n'))}</textarea></label></div>
       <div class="card pad"><h2 style="margin-bottom:4px">IT email</h2>
         <p class="small muted" style="margin:0 0 12px">How emails from this app identify IT (for example waitlist notices). Passwords, app passwords and API keys are never entered here; they stay in the server's environment.</p>
@@ -2653,56 +2761,95 @@ async function viewSettings() {
 // "Manage" and "+ Add subcategory" act on the category you are inside. Inside a category the first card is the virtual
 // "All in <name>" (browse-only: every non-archived asset in the branch, no management). Without it the page lists what is
 // filed directly in the category.
-async function viewCatalog() {
-  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: '', found: null, searchToken: 0 };
-  // The URL is the state: #/catalog (all categories), #/catalog?node=<id>, #/catalog?node=<id>&all=1 ("All in <name>", a browsing
-  // view of the real entry <id>). Cards, breadcrumbs and Back navigate to those URLs; hashchange (S.soft) repaints in place.
-  // Opened from Settings ("Manage the equipment catalog") the route carries `from=#/settings` (the same URL-backed `from` the calendar uses), and every
-  // catalog URL built below keeps it, so going deeper and coming back to the top still offers "‹ Settings". From the sidebar there is no `from`, so no such link.
+// IT's All assets (docs/briefs/labels-and-assets.md): the equipment catalog drill-down (it replaced the separate Equipment catalog page)
+// with the old All assets tools on top: one search box (assets by name, tag, serial, person, brand… and the catalog entries that match),
+// the status chips, Add asset, the label pages and the scanner. Every level lists its assets under the cards, filtered by the status.
+const ADMIN_STATUSES = [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']];
+async function viewAdminAssets() {
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1 };
+  // The URL is the state: #/assets (all categories), #/assets?node=<id>, #/assets?node=<id>&all=1 ("All in <name>", a browsing view of
+  // the real entry <id>), each optionally &status=<chip> (the Home stat cards link to #/assets?status=overdue …). Cards, breadcrumbs and
+  // Back navigate to those URLs; hashchange (S.soft) repaints in place. Opened from Settings ("Manage the equipment catalog") the route
+  // carries `from=#/settings`, and every URL built below keeps it, so coming back to the top still offers "‹ Settings".
   const fromSettings = () => qs().get('from') === '#/settings';
-  const hashFor = (id, all) => {
+  const hashFor = (id, all, status = st.status) => {
     const q = id ? [`node=${id}`, ...(all ? ['all=1'] : [])] : [];
+    if (status) q.push(`status=${status}`);
     if (fromSettings()) q.push(`from=${encodeURIComponent('#/settings')}`);
-    return '#/catalog' + (q.length ? '?' + q.join('&') : '');
+    return '#/assets' + (q.length ? '?' + q.join('&') : '');
   };
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Equipment catalog</h1><span id="headact" class="row" style="gap:8px"></span></div>
+  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">All assets</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
-      <p class="muted small" style="margin:0">What people can request, and how assets are grouped. Open a category to see what is inside it; <strong>Manage</strong> changes its structure. Archive an entry to hide it from new requests without losing history.</p>
-      <div class="search">${icon('search')}<input id="cq" type="search" placeholder="Search categories, brands, models, keywords…" enterkeyhint="search" autocomplete="off"></div>
-      <label class="check"><input type="checkbox" id="showarch"><span>Show archived entries</span></label>
+      <div class="row wrap" style="gap:8px"><a class="btn sm" href="#/labels/new">${icon('plus')} Create labels</a><a class="btn sm" href="#/labels">${icon('printer')} Print labels</a></div>
+      <div class="row"><div class="search grow">${icon('search')}<input id="cq" type="search" placeholder="Search name, tag, serial, person, brand, category…" value="${esc(st.search)}" enterkeyhint="search" autocomplete="off"></div>
+        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
+      <div class="chips" id="chips">${ADMIN_STATUSES.map(([v, l]) => `<button class="chip" data-v="${v}">${l}</button>`).join('')}</div>
+      <label class="check"><input type="checkbox" id="showarch"><span>Show archived catalog entries</span></label>
       <div id="ct"><div class="spinner"></div></div>
-    </div>`;
+    </div>
+    <a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>`;
+  const statusLabel = () => (ADMIN_STATUSES.find(([v]) => v === st.status) || ['', ''])[1];
+  const markChips = () => $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c.dataset.v === st.status));
+  // Lists show PAGE assets at a time (owner, 2026-10-27); the page resets whenever the entry, the status chip or the search changes.
+  const PAGE = 10;
+  const pageOf = (list) => { st.page = Math.min(Math.max(1, st.page), Math.max(1, Math.ceil(list.length / PAGE))); return list.slice((st.page - 1) * PAGE, st.page * PAGE); };
+  const pager = (total) => {
+    const pages = Math.ceil(total / PAGE);
+    if (pages <= 1) return '';
+    const nums = [...new Set([1, st.page - 1, st.page, st.page + 1, pages])].filter((x) => x >= 1 && x <= pages).sort((a, b) => a - b);
+    const btns = nums.map((x, i) => `${i && x - nums[i - 1] > 1 ? '<span class="muted">…</span>' : ''}<button type="button" class="chip ${x === st.page ? 'on' : ''}" data-page="${x}" ${x === st.page ? 'aria-current="page"' : ''}>${x}</button>`).join('');
+    return `<nav class="pager" aria-label="Pages"><button type="button" class="btn sm" data-page="${st.page - 1}" ${st.page <= 1 ? 'disabled' : ''}>‹ Previous</button>
+      <span class="pager-nums">${btns}</span><span class="small muted">${(st.page - 1) * PAGE + 1}–${Math.min(st.page * PAGE, total)} of ${total}</span>
+      <button type="button" class="btn sm" data-page="${st.page + 1}" ${st.page >= pages ? 'disabled' : ''}>Next ›</button></nav>`;
+  };
+  const listCard = (list, node) => `<div class="card"><ul class="list">${pageOf(list).map((a) => assetRow(a, node)).join('')}</ul></div>${pager(list.length)}`;
   const byId = (id) => st.rows.find((r) => r.id === id);
   const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
   const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : 'No assets');
+  // One asset in a list. `node`: the entry being viewed (its path is left out of each row's path), or null at the top / in search results.
   const assetRow = (a, node) => {
-    const rel = a.catalog_node_id !== node.id && a.catalog_path ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
-    const extra = [a.model && !a.name.includes(a.model) ? a.model : '', a.location, rel].filter(Boolean).map(esc).join(' · ');
-    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+    const rel = !a.catalog_path ? '' : !node ? crumbText(a.catalog_path) : a.catalog_node_id !== node.id ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
+    const seats = a.license_seats > 1 ? `${a.seats_used}/${a.license_seats} seats` : '';
+    const extra = [a.holder_names, seats, a.model && !a.name.includes(a.model) ? a.model : '', !a.holder_names ? a.location : '', rel].filter(Boolean).map(esc).join(' · ');
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node ? node.id : null, all: st.all, from: fromSettings() ? '#/settings' : null })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${extra ? ' · ' + extra : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
-  // Search (admin): while there is text in the box the card grid steps aside for a list of matching entries, each with its full path; empty = the grid, unchanged.
+  // Search: while there is text in the box the card grid steps aside for the matching assets (the old All assets search: name, tag, serial,
+  // person, brand… within the status chip) and the matching catalog entries, each with its full path; empty = the grid, unchanged.
   const renderFound = () => {
     const f = st.found;
-    $('#pagetitle').textContent = 'Equipment catalog'; $('#backslot').innerHTML = ''; $('#headact').innerHTML = '';
-    $('#ct').innerHTML = f === null ? '<div class="spinner"></div>' : f.results.length
-      ? `<p class="small muted" style="margin:0 0 8px">${f.total} match${f.total === 1 ? '' : 'es'}${f.total > f.results.length ? ` · showing the first ${f.results.length}, so add a word to narrow it` : ''}</p>
+    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>`;
+    if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
+    const assets = f.assets.length
+      ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
+      : `<div class="empty">${icon('box')}<p>No asset matches that${st.status ? ` among ${esc(statusLabel())}` : ''}.</p></div>`;
+    const entries = f.results.length
+      ? `<h3 class="ct-h">Catalog entries <span class="muted">${f.total}</span></h3>${f.total > f.results.length ? `<p class="small muted" style="margin:0 0 8px">Showing the first ${f.results.length}, so add a word to narrow it.</p>` : ''}
         <div class="card"><ul class="list">${f.results.map((r) => `<li><a class="item" href="${hashFor(r.id)}" data-found="${r.id}"><div class="grow" style="min-width:0"><div class="title">${esc(r.name)}${r.archived ? ' <span class="pill plain">Archived</span>' : ''}</div>
           <div class="sub" style="overflow-wrap:anywhere">${esc(crumbText(r.path))}</div>
           <div class="sub">${r.asset_count ? `${r.asset_count} asset${r.asset_count === 1 ? '' : 's'}` : 'No assets'}${r.search_keywords ? ` · keywords: ${esc(r.search_keywords)}` : ''}${r.via_keyword ? ' · matched by keyword' : ''}</div></div>${icon('chev', 'chev')}</a></li>`).join('')}</ul></div>`
-      : `<div class="empty">${icon('tag')}<p>No catalog entry matches that. Try a broader word, a brand or a model.</p></div>`;
+      : '';
+    $('#ct').innerHTML = `<h3 class="ct-h">Assets</h3>${assets}${entries}`;
   };
   const runSearch = async () => {
     const mine = ++st.searchToken; const q = st.search;
+    st.page = 1;
     if (!q) { st.found = null; render(); return; }
     st.found = null; renderFound();
-    try { const r = await api('GET', '/api/catalog/search?q=' + encodeURIComponent(q)); if (mine !== st.searchToken) return; st.found = r; } catch (e) { if (mine !== st.searchToken) return; st.found = { total: 0, results: [] }; fail(e); }
+    const u = new URLSearchParams({ q }); if (st.status) u.set('status', st.status);
+    try {
+      const [entries, assets] = await Promise.all([api('GET', '/api/catalog/search?q=' + encodeURIComponent(q)), api('GET', '/api/assets?' + u)]);
+      if (mine !== st.searchToken) return;
+      st.found = { ...entries, assets };
+    } catch (e) { if (mine !== st.searchToken) return; st.found = { total: 0, results: [], assets: [] }; fail(e); }
     renderFound();
   };
   const render = () => {
     if (st.search) return renderFound();
     const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
-    const inAll = !!n && st.all && ch.length > 0; // a category with nothing below it has no wider branch to show
+    // A category with entries below it lists its whole branch right under its cards (owner, 2026-10-27: no extra "All in" click);
+    // a subcategory card narrows it. A category with nothing below it lists what is filed in it.
+    const inAll = !!n && ch.length > 0;
     const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
     const cards = [];
     if (n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
@@ -2712,43 +2859,51 @@ async function viewCatalog() {
     let below = '';
     if (n) {
       const shown = inAll ? list : direct;
-      const title = inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets';
+      const title = `${inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets'}${st.status ? ` · ${statusLabel()}` : ''}`;
       below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
-        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
-        : `<p class="muted small ct-empty">${inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
+        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it. Pick a card above to narrow it.</p>` : ''}${listCard(shown, n)}`
+        : `<p class="muted small ct-empty">${st.status ? `No ${esc(statusLabel().toLowerCase())} assets here.` : inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
+    } else { // the top: every asset (within the status chip), as the old All assets list
+      below = `<div class="card-head" style="padding:0;margin:24px 0 8px"><h3 class="ct-h" style="margin:0">${st.status ? esc(statusLabel()) : 'All assets'} <span class="muted">${list ? list.length : ''}</span></h3><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
+        ${list === null ? '<div class="spinner"></div>' : list.length ? listCard(list, null)
+          : `<div class="empty">${icon('box')}<p>${st.status ? `No ${esc(statusLabel().toLowerCase())} assets.` : 'No assets yet. Tap <strong>Add</strong>, scan a barcode, or create labels to get started.'}</p></div>`}`;
     }
     // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
     const controls = n ? `<div class="row wrap" style="gap:8px;margin-bottom:12px"><button type="button" class="btn" data-manage="${n.id}">${icon('edit')} Manage</button><button type="button" class="btn primary" data-addsub="${n.id}" ${n.live ? '' : 'disabled'}>${icon('plus')} Add subcategory</button></div>` : '';
     // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
-    $('#pagetitle').textContent = n ? n.name : 'Equipment catalog'; // the title is the real entry being viewed (stored name, no pluralizing)
-    const up = n && !st.all ? byId(n.parent_id) : null;
-    $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'Equipment catalog') : fromSettings() ? backAnchor('#/settings', 'Settings') : '';
-    $('#headact').innerHTML = `${n ? '' : `<button class="btn primary" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
+    $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
+    const up = n ? byId(n.parent_id) : null;
+    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : autoBack();
+    $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
-    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
       ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
   };
   const loadAssets = async () => {
     const mine = ++st.token; const id = st.sel;
     st.assets = null; render();
-    if (!id) return;
+    const u = new URLSearchParams(); if (id) u.set('catalog_node', id); if (st.status) u.set('status', st.status);
     try {
-      const list = await api('GET', `/api/assets?catalog_node=${id}`);
+      const list = await api('GET', '/api/assets?' + u);
       if (mine !== st.token) return;
-      st.assets = list.sort((a, b) => String(a.catalog_path || '').localeCompare(String(b.catalog_path || '')) || a.name.localeCompare(b.name));
+      st.assets = id ? list.sort((a, b) => String(a.catalog_path || '').localeCompare(String(b.catalog_path || '')) || a.name.localeCompare(b.name)) : list;
     } catch (e) { if (mine !== st.token) return; st.assets = []; fail(e); }
     render();
   };
   // Read the URL into state; refetch the asset list only when the viewed entry changed.
   const apply = () => {
     if (!st.rows.length && !st.loaded) return;
-    const p = qs(); const id = Number(p.get('node')); const prev = st.sel;
+    const p = qs(); const id = Number(p.get('node')); const prev = st.sel; const prevStatus = st.status;
     st.sel = byId(id) ? id : null;
     st.all = !!st.sel && p.get('all') === '1';
-    if (p.get('node') && !st.sel) history.replaceState(null, '', hashFor(null)); // unknown/stale node in the URL: fall back to the root
-    if (st.sel !== prev || st.assets === null) loadAssets(); else render();
+    st.status = ADMIN_STATUSES.some(([v]) => v && v === p.get('status')) ? p.get('status') : '';
+    markChips();
+    if ((p.get('node') && !st.sel) || (p.get('status') && !st.status)) history.replaceState(null, '', hashFor(st.sel, st.all)); // unknown/stale node or status: tidy the URL
+    if (st.search && st.status !== prevStatus) runSearch();
+    if (st.sel !== prev || st.status !== prevStatus) st.page = 1;
+    if (st.sel !== prev || st.status !== prevStatus || st.assets === null) loadAssets(); else render();
   };
   const reload = async () => {
     const was = byId(st.sel);
@@ -2820,13 +2975,23 @@ async function viewCatalog() {
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
     const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
     const to = (h) => { go(h); window.scrollTo(0, 0); };
-    if (e.target.closest('[data-all]')) return to(hashFor(st.sel, !st.all));
+    const pg = e.target.closest('[data-page]');
+    if (pg) { // the next page starts at the top of the list (below the sticky top bar)
+      st.page = Number(pg.dataset.page); render();
+      const card = $('#ct .pager')?.previousElementSibling;
+      if (card) window.scrollTo({ top: card.getBoundingClientRect().top + window.scrollY - 120 });
+      return;
+    }
+    if (e.target.closest('[data-all]')) return to(hashFor(st.sel)); // (the branch is already listed; the card marks it)
     const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
     const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
   $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
-  S.soft = { base: '#/catalog', fn: apply };
+  $('#chips').onclick = (e) => { const b = e.target.closest('.chip'); if (b) go(hashFor(st.sel, st.all, b.dataset.v)); };
+  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
+  S.soft = { base: '#/assets', fn: apply };
   await reload();
+  if (st.search) runSearch(); // #/assets?q=… (an old All assets link)
 }
 
 // ============================================================ profile
@@ -2835,6 +3000,7 @@ function viewAccount() {
   if (window.matchMedia('(min-width: 900px)').matches) return go('#/profile'); // the desktop sidebar already lists these
   const items = isAdmin() ? [
     ['#/profile', 'user', 'My profile', 'Your details and password'],
+    ['#/settings', 'settings', 'Settings', 'Categories, locations, email and check-out rules'],
   ] : [
     ['#/equipment', 'laptop', 'My equipment', 'What is assigned or checked out to you'],
     ['#/history', 'history', 'History', 'Equipment you have had before'],
