@@ -997,8 +997,8 @@ async function viewAsset(id) {
       <div class="asset-id"><h1 class="truncate">${esc(a.name)}</h1><span class="mono muted">${esc(a.tag)}</span>${statusBadge}${multi ? `<span class="pill plain">${d.seats_used}/${d.capacity} seats</span>` : ''}</div></div>
     <div class="stack">
       ${photos.length ? `<div class="gallery">${photos.map((p, i) => `<div class="ph" data-ph="${p.id}"><img src="/uploads/${esc(p.thumb)}" data-full="/uploads/${esc(p.filename)}" alt="Photo of ${esc(a.name)}" loading="lazy">${i === 0 && photos.length > 1 ? '<span class="star">Cover</span>' : ''}</div>`).join('')}
-        ${canPhoto ? `<label class="add-ph">${icon('camera')}<span>Add photo</span><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}</div>`
-        : canPhoto ? `<label class="no-photo"><div>${icon('camera')}<strong>Add a photo</strong><div class="small">Snap the device, its label, or any damage</div></div><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}
+        ${canPhoto ? `<button type="button" class="add-ph" id="ph-cam">${icon('camera')}<span>Take photos</span></button><label class="add-ph">${icon('upload')}<span>Choose files</span><input type="file" accept="image/*" multiple hidden id="ph-in"></label>` : ''}</div>`
+        : canPhoto ? `<div class="no-photo"><div>${icon('camera')}<strong>Add photos</strong><div class="small">Snap the device, its label, or any damage</div><div class="ph-actions"><button type="button" class="btn primary" id="ph-cam">${icon('camera')} Take photos</button><label class="btn">${icon('upload')} Choose files<input type="file" accept="image/*" multiple hidden id="ph-in"></label></div></div></div>` : ''}
       ${myActivity}
       ${actions}
       ${resv.length ? `<div class="card"><div class="card-head"><h2>${admin ? 'Reservations' : 'Your reservations'}</h2><span class="muted small">${resv.length}</span></div><ul class="list">${resv.map((r) => reservationItem(r, { admin, showAsset: false })).join('')}</ul></div>` : ''}
@@ -1028,9 +1028,10 @@ async function viewAsset(id) {
 
   const reload = () => route(true);
   const phIn = $('#ph-in');
-  if (phIn) phIn.onchange = () => uploadPhotos(a.id, phIn.files).then(reload);
+  if (phIn) phIn.onchange = () => { const files = Array.from(phIn.files); phIn.value = ''; uploadPhotos(a.id, files).then(reload); };
   $$('[data-ph]').forEach((el) => el.onclick = () => lightbox(d.photos.find((p) => p.id === Number(el.dataset.ph)), a, reload));
   const on = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+  on('#ph-cam', () => openPhotoCapture({ onDone: (files) => uploadPhotos(a.id, files).then(reload) }));
   on('#act-out', () => checkoutSheet(a, reload));
   on('#act-in', () => checkinSheet(a, d.holders, reload));
   on('#act-ret', () => requestReturnSheet(a, d.holders, reload));
@@ -1058,13 +1059,97 @@ async function viewAsset(id) {
   });
 }
 
+// Uploads photos to an asset and says exactly what happened: how many were saved and which were not (an upload that partly or wholly
+// failed is never reported as saved). Resolves { saved, failed, error }; the toast is shown here.
 async function uploadPhotos(assetId, files) {
-  if (!files || !files.length) return;
+  const all = Array.from(files || []);
+  if (!all.length) return { saved: 0, failed: 0, error: null };
+  const send = all.slice(0, 10);
   const fd = new FormData();
-  Array.from(files).slice(0, 10).forEach((f) => fd.append('photos', f));
-  toast('Uploading photo…');
-  try { await api('POST', `/api/assets/${assetId}/photos`, fd); toast('Photo saved'); } catch (e) { fail(e); }
+  send.forEach((f) => fd.append('photos', f));
+  toast(`Uploading ${send.length} photo${send.length > 1 ? 's' : ''}…`);
+  try {
+    const r = await api('POST', `/api/assets/${assetId}/photos`, fd);
+    const failed = (r.failed || []).length + (all.length - send.length);
+    if (failed) toast(`${r.ids.length} of ${all.length} photo${all.length > 1 ? 's' : ''} saved. ${failed} not saved${(r.failed || []).length ? `: ${r.failed.join(', ')}` : ' (10 photos at a time)'}.`, true);
+    else toast(r.ids.length > 1 ? `${r.ids.length} photos saved` : 'Photo saved');
+    return { saved: r.ids.length, failed, error: null };
+  } catch (e) { fail(e); return { saved: 0, failed: all.length, error: e.message || 'Upload failed' }; }
 }
+
+// In-app camera for photos: the pictures are taken from the live camera feed into memory (JPEG blobs), never saved to the phone's photo
+// library. Several shots, each shown as a small preview that can be removed, then Done hands the files to onDone. The camera is released
+// on Done, Close, a page change and when the page goes to the background. Choosing files remains the fallback where there is no camera.
+let activeCapture = null;
+function openPhotoCapture({ title = 'Take photos', max = 10, onDone }) {
+  if (activeCapture) activeCapture.close();
+  const wrap = document.createElement('div');
+  wrap.className = 'pcap';
+  wrap.innerHTML = `<div class="pc-top"><button class="iconbtn" id="pc-close" aria-label="Close">${icon('x')}</button><strong>${esc(title)}</strong><button class="btn primary sm" id="pc-done" disabled>Done</button></div>
+    <div class="pc-view"><video playsinline muted autoplay></video><div class="pc-flash"></div><div class="pc-msg" hidden></div></div>
+    <div class="pc-strip" id="pc-strip"></div>
+    <div class="pc-bar"><span class="pc-count" id="pc-count"></span><button class="pc-shutter" id="pc-shot" aria-label="Take photo" disabled></button><span></span></div>`;
+  document.body.appendChild(wrap);
+  document.body.style.overflow = 'hidden';
+  const video = $('video', wrap);
+  let stream = null; let shots = []; let done = false; let closing = false; let busyShot = false; let failedMsg = null;
+  const update = () => {
+    $('#pc-count', wrap).textContent = `${shots.length} / ${max}`;
+    $('#pc-done', wrap).disabled = !shots.length;
+    $('#pc-done', wrap).textContent = shots.length ? `Done (${shots.length})` : 'Done';
+    $('#pc-shot', wrap).disabled = !stream || busyShot || shots.length >= max;
+    $('#pc-strip', wrap).innerHTML = shots.map((s, i) => `<div class="pc-th"><img src="${s.url}" alt="Photo ${i + 1}"><button type="button" data-rm="${i}" aria-label="Remove photo ${i + 1}">${icon('x')}</button></div>`).join('');
+  };
+  const showMsg = (text) => { const m = $('.pc-msg', wrap); m.hidden = false; m.innerHTML = `<div>${icon('camera')}<p>${esc(text)}</p><p class="small">You can still choose photos from your device.</p></div>`; };
+  const stopStream = () => { if (stream) { stream.getTracks().forEach((t) => { try { t.stop(); } catch { /* already stopped */ } }); stream = null; } video.srcObject = null; };
+  const start = async () => {
+    if (done || stream || failedMsg) return;
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { failedMsg = 'The camera needs a secure (https://) connection and a browser that supports it.'; return showMsg(failedMsg); }
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } }, audio: false });
+      if (done) { s.getTracks().forEach((t) => t.stop()); return; } // closed while the permission prompt was open
+      stream = s; video.srcObject = s; await video.play().catch(() => {});
+      update();
+    } catch (e) {
+      const n = e && e.name;
+      failedMsg = n === 'NotAllowedError' || n === 'SecurityError' ? 'Camera access was blocked. Allow camera access for this site in your browser settings.' : n === 'NotFoundError' || n === 'OverconstrainedError' ? 'No camera was found on this device.' : 'Could not open the camera.';
+      console.warn('Photo camera failed:', e); showMsg(failedMsg); update();
+    }
+  };
+  const release = () => { shots.forEach((s) => URL.revokeObjectURL(s.url)); shots = []; };
+  const close = () => {
+    if (closing) return; closing = true; done = true;
+    document.removeEventListener('visibilitychange', onVis); window.removeEventListener('hashchange', onRoute);
+    stopStream(); release(); wrap.remove(); if (activeCapture === handle) activeCapture = null;
+    if (!$('.scanner') && !$('.pcap')) document.body.style.overflow = '';
+  };
+  const route0 = location.hash.split('?')[0];
+  const onRoute = () => { if (location.hash.split('?')[0] !== route0) close(); };
+  const onVis = () => { if (done) return; if (document.hidden) stopStream(); else start().then(update); }; // iOS drops the camera in the background: take a fresh one on return
+  $('#pc-shot', wrap).onclick = () => {
+    if (!stream || busyShot || shots.length >= max || !video.videoWidth) return;
+    busyShot = true; update();
+    const scale = Math.min(1, 2048 / Math.max(video.videoWidth, video.videoHeight));
+    const c = document.createElement('canvas'); c.width = Math.round(video.videoWidth * scale); c.height = Math.round(video.videoHeight * scale);
+    c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+    try { navigator.vibrate && navigator.vibrate(30); } catch { /* */ }
+    const fl = $('.pc-flash', wrap); fl.classList.remove('on'); void fl.offsetWidth; fl.classList.add('on');
+    c.toBlob((blob) => {
+      busyShot = false;
+      if (blob && !done) shots.push({ file: new File([blob], `photo-${Date.now()}-${shots.length + 1}.jpg`, { type: 'image/jpeg' }), url: URL.createObjectURL(blob) });
+      else if (!blob) toast('Could not capture that photo. Try again.', true);
+      update();
+    }, 'image/jpeg', 0.9);
+  };
+  $('#pc-strip', wrap).onclick = (e) => { const b = e.target.closest('[data-rm]'); if (!b) return; const [s] = shots.splice(Number(b.dataset.rm), 1); if (s) URL.revokeObjectURL(s.url); update(); };
+  $('#pc-close', wrap).onclick = () => { if (shots.length && !confirm(`Discard ${shots.length} photo${shots.length > 1 ? 's' : ''}?`)) return; close(); };
+  $('#pc-done', wrap).onclick = () => { const files = shots.map((s) => s.file); close(); if (files.length) onDone(files); };
+  document.addEventListener('visibilitychange', onVis); window.addEventListener('hashchange', onRoute);
+  const handle = { close }; activeCapture = handle;
+  update(); start();
+  return handle;
+}
+
 function lightbox(p, asset, reload) {
   const el = document.createElement('div');
   el.className = 'lightbox';
@@ -1531,7 +1616,7 @@ async function viewAssetForm(id) {
           : `<label class="field"><span>Asset tag</span><div class="input-group"><input name="tag" value="${esc(a.tag || '')}" placeholder="${nextTag ? `Auto: ${esc(nextTag)}` : ''}" class="mono" autocapitalize="characters"><button type="button" class="btn" data-scan="tag" title="Scan barcode">${icon('scan')}</button></div></label>`}
         ${!editing ? `<div class="field full"><span>Label</span><div class="row wrap" style="gap:14px;align-items:center"><div class="label-preview" id="lprev"></div>
           <div class="grow" style="min-width:180px"><button type="button" class="btn" id="plabel">${icon('printer')} Print label</button><div class="small muted" id="lhint" style="margin-top:6px"></div></div></div></div>` : ''}
-        ${!editing ? `<label class="field full"><span>Photos</span><label class="no-photo" style="aspect-ratio:auto;padding:18px"><div>${icon('camera')}<strong id="ph-label">Take or choose photos</strong></div><input type="file" name="photos" id="ph" accept="image/*" multiple hidden></label></label>` : ''}
+        ${!editing ? `<div class="field full"><span>Photos</span><div class="ph-actions"><button type="button" class="btn" id="ph-cam">${icon('camera')} Take photos</button><label class="btn">${icon('upload')} Choose files<input type="file" accept="image/*" multiple hidden id="ph"></label></div><div class="ph-pending" id="ph-pending"></div></div>` : ''}
       </fieldset></div>
       <div class="card pad"><fieldset class="form-grid cols"><legend>Details</legend>
         ${f('brand', 'Brand', 'placeholder="Dell, Apple, Logitech…"')}${f('model', 'Model')}
@@ -1602,7 +1687,21 @@ async function viewAssetForm(id) {
     });
     drawLabel();
   }
-  const ph = $('#ph'); if (ph) ph.onchange = () => { $('#ph-label').textContent = ph.files.length ? `${ph.files.length} photo${ph.files.length > 1 ? 's' : ''} selected` : 'Take or choose photos'; };
+  // Photos for a NEW asset wait here (taken in the app or chosen from the device) and are uploaded once the asset exists.
+  const pending = [];
+  const drawPending = () => {
+    const box = $('#ph-pending'); if (!box) return;
+    box.innerHTML = pending.map((p, i) => `<div class="pc-th"><img src="${p.url}" alt="Photo ${i + 1}"><button type="button" data-rm="${i}" aria-label="Remove photo ${i + 1}">${icon('x')}</button></div>`).join('');
+  };
+  const addPending = (files) => {
+    const room = 10 - pending.length;
+    Array.from(files).slice(0, room).forEach((f) => pending.push({ file: f, url: URL.createObjectURL(f) }));
+    if (files.length > room) toast('Up to 10 photos at a time.', true);
+    drawPending();
+  };
+  const ph = $('#ph'); if (ph) ph.onchange = () => { addPending(ph.files); ph.value = ''; };
+  const phCam = $('#ph-cam'); if (phCam) phCam.onclick = () => openPhotoCapture({ max: 10 - pending.length, onDone: addPending });
+  const phBox = $('#ph-pending'); if (phBox) phBox.onclick = (e) => { const b = e.target.closest('[data-rm]'); if (!b) return; const [p] = pending.splice(Number(b.dataset.rm), 1); if (p) URL.revokeObjectURL(p.url); drawPending(); };
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
@@ -1610,8 +1709,10 @@ async function viewAssetForm(id) {
     body.available_to_request = $('#atr').checked; body.reservation_requires_approval = $('#rra').checked; // (a disabled checkbox is not in FormData, so read both directly)
     busy($('#save'), async () => {
       const saved = await api(editing ? 'PUT' : 'POST', editing ? '/api/assets/' + id : '/api/assets', body);
-      if (ph && ph.files.length) await uploadPhotos(saved.id, ph.files);
-      toast(editing ? 'Saved' : `Added ${saved.tag}`);
+      const up = pending.length ? await uploadPhotos(saved.id, pending.map((p) => p.file)) : null;
+      if (up && up.failed) toast(`Added ${saved.tag}, but ${up.failed} of ${pending.length} photo${pending.length > 1 ? 's were' : ' was'} NOT saved. Open the asset to add ${up.failed > 1 ? 'them' : 'it'} again.`, true);
+      else toast(editing ? 'Saved' : `Added ${saved.tag}`);
+      pending.forEach((p) => URL.revokeObjectURL(p.url));
       if (!editing) history.replaceState(null, '', '#/assets');
       go('#/asset/' + saved.id + (editing ? ctxQuery() : ''));
     });

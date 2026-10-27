@@ -307,7 +307,7 @@ test('ratchet (5B-4): server.js has no database access outside the seam (no db u
   // the only local modules: the env loader, the seam, src/db.js (above), the mailers (the SQLite mail adapter, or the PostgreSQL one),
   // the pure serial helpers, the Google sign-in client (no database access) and, since Slice 5D, the PostgreSQL pool and boot services (checked in the test above)
   const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).filter((m) => !m.startsWith('./pg/')).sort();
-  assert.deepEqual(locals, ['./dataSeam', './db', './env', './googleAuth', './mailer', './serial'], 'no data module is loaded by server.js (only the seam)');
+  assert.deepEqual(locals, ['./dataSeam', './db', './env', './googleAuth', './mailer', './photoStorage', './serial'], 'no data module is loaded by server.js (only the seam; ./photoStorage stores photo FILES and touches no database)');
   assert.doesNotMatch(allCode, /\.prepare\s*\(/, 'no prepared statement');
   assert.doesNotMatch(allCode, /\.transaction\s*\(/, 'no transaction');
   assert.doesNotMatch(allCode, /\b(db|database)\s*\.\s*(exec|pragma|prepare|transaction)\b/, 'no direct database call');

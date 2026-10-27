@@ -38,6 +38,8 @@ const data = dataSeam.open({ driver: DB_DRIVER, db, pool });
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+// Where photo files live: the volume (default) or a private S3 bucket when S3_BUCKET is set (src/photoStorage.js). Rows stay in the database.
+const photoFiles = require('./photoStorage').fromEnv(process.env, UPLOAD_DIR);
 const secureCookies = APP_URL.startsWith('https://');
 
 app.set('trust proxy', 1);
@@ -638,7 +640,7 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024, files: 10 },
   fileFilter: (req, file, cb) => cb(null, /^image\//.test(file.mimetype)),
 });
-// (Only the photo rows are in src/photoRecords.js, moved there verbatim in Slice 5B-2; the files stay here.)
+// (Only the photo rows are in src/photoRecords.js, moved there verbatim in Slice 5B-2; the files go through src/photoStorage.js.)
 app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async (req, res) => {
   const cleanup = () => (req.files || []).forEach((f) => fs.rm(f.path, () => {}));
   // multer has already stored the uploads in the temp directory: a NUL in a text field (the caption) is refused before anything permanent
@@ -649,26 +651,35 @@ app.post('/api/assets/:id/photos', auth, upload.array('photos', 10), wrap(async 
   const holder = await data.assetAccess.holdsAsset(asset.id, req.user.employee_id);
   if (req.user.role !== 'admin' && !holder) { cleanup(); throw httpError(403, 'Only IT or the person holding this asset can add photos'); }
   if (!req.files?.length) throw httpError(400, 'No image received');
-  const saved = [];
+  const saved = []; const unreadable = []; const notStored = [];
   for (const f of req.files) {
+    const label = f.originalname || 'photo';
     const base = `${asset.id}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+    let full; let thumb;
+    try { // the real image content is decoded here (the declared type is not trusted); rotate() applies the orientation, and no metadata is kept
+      full = await sharp(f.path).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toBuffer();
+      thumb = await sharp(f.path).rotate().resize({ width: 400, height: 400, fit: 'cover' }).jpeg({ quality: 75 }).toBuffer();
+    } catch (e) { unreadable.push(label); continue; } finally { fs.rm(f.path, () => {}); }
     try {
-      await sharp(f.path).rotate().resize({ width: 1600, height: 1600, fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 82 }).toFile(path.join(UPLOAD_DIR, base + '.jpg'));
-      await sharp(f.path).rotate().resize({ width: 400, height: 400, fit: 'cover' }).jpeg({ quality: 75 }).toFile(path.join(UPLOAD_DIR, base + '_t.jpg'));
-    } catch (e) { fs.rm(f.path, () => {}); continue; }
-    fs.rm(f.path, () => {});
-    saved.push(await data.photoRecords.addPhoto({ assetId: asset.id, filename: base + '.jpg', thumb: base + '_t.jpg', caption: clean(req.body.caption), uploadedBy: req.user.account_id }));
+      await photoFiles.put(base + '.jpg', full);
+      await photoFiles.put(base + '_t.jpg', thumb);
+      saved.push(await data.photoRecords.addPhoto({ assetId: asset.id, filename: base + '.jpg', thumb: base + '_t.jpg', caption: clean(req.body.caption), uploadedBy: req.user.account_id }));
+    } catch (e) { // no photo row without its files, and no files without their row
+      console.error(`[photos] could not store ${label} for asset ${asset.id}:`, e.message);
+      notStored.push(label);
+      await Promise.all([base + '.jpg', base + '_t.jpg'].map((n) => photoFiles.remove(n).catch(() => {})));
+    }
   }
-  if (!saved.length) throw httpError(400, "Couldn't read that image");
+  if (!saved.length) throw httpError(notStored.length ? 502 : 400, notStored.length ? 'Photo storage is unavailable right now, so nothing was saved. Please try again.' : "Couldn't read that image");
   await data.activityLog.log(asset.id, req.user.account_id, 'photo_added', `${saved.length} photo${saved.length > 1 ? 's' : ''}`);
   await data.photoRecords.touchAsset(asset.id);
-  res.json({ ok: true, ids: saved });
+  res.json({ ok: true, ids: saved, failed: [...unreadable, ...notStored] }); // a partly failed upload says which photos were not saved
 }));
 app.delete('/api/photos/:id', admin, async (req, res) => {
   const p = await data.photoRecords.getPhoto(Number(req.params.id));
   if (!p) throw httpError(404, 'Photo not found');
-  for (const f of [p.filename, p.thumb]) fs.rm(path.join(UPLOAD_DIR, f), () => {});
-  await data.photoRecords.deletePhoto(p.id); // the row, then any cover that pointed at it
+  await data.photoRecords.deletePhoto(p.id); // the row (and any cover that pointed at it) first: a failed file removal leaves an unlisted file, never a broken photo
+  for (const f of [p.filename, p.thumb]) photoFiles.remove(f).catch((e) => console.error(`[photos] could not remove ${f}:`, e.message));
   res.json({ ok: true });
 });
 app.put('/api/assets/:id/cover', admin, async (req, res) => {
@@ -687,16 +698,25 @@ app.put('/api/assets/:id/cover', admin, async (req, res) => {
   res.json({ ok: true });
 });
 // Photo files follow the asset's visibility: an employee can fetch a photo only if its asset is one they may see. (The signed-in
-// account comes from the session, read through the seam like the auth middleware since Slice 5B-3.)
-app.use('/uploads', async (req, res, next) => {
+// account comes from the session, read through the seam like the auth middleware since Slice 5B-3.) The file is then streamed from
+// the photo store: the bucket stays private and its address and credentials never reach the browser.
+app.use('/uploads', async (req, res) => {
   const u = await data.accounts.currentUser(req.session.uid);
   if (!u) return res.status(401).end();
-  if (u.role === 'admin') return next();
+  if (req.method !== 'GET' && req.method !== 'HEAD') return res.status(405).end();
   let file; try { file = path.basename(decodeURIComponent(req.path)); } catch { return res.status(404).end(); }
-  const photo = await data.photoRecords.photoByFile(file);
-  if (!photo || !(await data.assetAccess.canViewAsset(u, await data.assetAccess.getAsset(photo.asset_id)))) return res.status(404).end();
-  next();
-}, express.static(UPLOAD_DIR, { maxAge: '30d', immutable: true }));
+  if (u.role !== 'admin') {
+    const photo = await data.photoRecords.photoByFile(file);
+    if (!photo || !(await data.assetAccess.canViewAsset(u, await data.assetAccess.getAsset(photo.asset_id)))) return res.status(404).end();
+  }
+  let f;
+  try { f = await photoFiles.get(file); } catch (e) { console.error(`[photos] could not read ${file}:`, e.message); return res.status(502).end(); }
+  if (!f) return res.status(404).end();
+  res.set({ 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=2592000, immutable' });
+  if (f.length !== undefined) res.set('Content-Length', String(f.length));
+  f.body.on('error', () => res.destroy());
+  f.body.pipe(res);
+});
 
 // ---------- reservations (Phase 2, slice 7) ----------
 // Rules, transactions and conflict checks live in src/reservations.js. These routes only identify the caller and shape the answers.
@@ -1191,6 +1211,8 @@ function listen({ stop }) {
     if (DEV) console.log('Dev mode: this server restarts itself when backend files change; the browser caches nothing and no service worker is kept. Just refresh the page.');
     else if (process.env.npm_lifecycle_event === 'start' && process.env.NODE_ENV !== 'production') console.log('Note: `npm start` does NOT restart on code changes. For development use `npm run dev` (auto-restart, no stale browser cache).');
     console.log(mailConfigured() ? `Email: sending via ${process.env.SMTP_HOST || 'smtp.gmail.com'} as ${process.env.SMTP_USER}` : 'Email: NOT configured — messages are logged to the Outbox (Settings → Email).');
+    console.log(`Photos: stored on the ${photoFiles.label}`);
+    if (photoFiles.check) photoFiles.check().catch((e) => console.error(`Photos: the bucket check FAILED (${e.name}: ${e.message}); uploads and photo downloads will fail until it is fixed.`));
   });
   // Another server already owns this port: say so plainly. (Otherwise the browser keeps talking to the OLD process, which looks exactly like "my change didn't show up".)
   server.on('error', (err) => {
