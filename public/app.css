@@ -438,6 +438,9 @@ table.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .cg-card.on .cg-chev { color: var(--brand-accent); }
 .cg-card.off { opacity: .65; }
 .cg-top { margin-bottom: 12px; flex-wrap: wrap; }
+.pager { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; margin: 12px 0 4px; }
+.pager-nums { display: inline-flex; align-items: center; gap: 4px; }
+.pager .chip { min-width: 36px; justify-content: center; }
 .ct-h { margin: 18px 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 .ct-h .muted { font-weight: 500; }
 .ct-empty { margin: 4px 0 10px; }

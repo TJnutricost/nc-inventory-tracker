@@ -73,3 +73,6 @@ the nav and the routes. Full suite on both drivers.
 - Follow-ups (owner, 2026-10-27): more space between the category cards and the top-level list; All assets' sub-items (Print labels,
   Create labels) show in the sidebar only while you are in All assets or a label page (`.sidebar.assets-open`); Settings moved next to
   My profile (sidebar bottom, avatar menu, the phone's Profile tab) and out of the admin section / hamburger.
+- Follow-ups (owner, 2026-10-27): every asset list on All assets (top level, a category, search results) shows 10 per page with a pager
+  (page resets on a new entry, status or search); a category with entries below it lists its whole branch right under its cards (the
+  "All in" card is the marked default, a subcategory card narrows it; this closes the PROJECT_STATUS UX correction).

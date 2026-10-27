@@ -2654,7 +2654,7 @@ async function viewSettings() {
 // the status chips, Add asset, the label pages and the scanner. Every level lists its assets under the cards, filtered by the status.
 const ADMIN_STATUSES = [['', 'All'], ['available', 'Available'], ['checked_out', 'Checked out'], ['overdue', 'Overdue'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed']];
 async function viewAdminAssets() {
-  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '' };
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1 };
   // The URL is the state: #/assets (all categories), #/assets?node=<id>, #/assets?node=<id>&all=1 ("All in <name>", a browsing view of
   // the real entry <id>), each optionally &status=<chip> (the Home stat cards link to #/assets?status=overdue …). Cards, breadcrumbs and
   // Back navigate to those URLs; hashchange (S.soft) repaints in place. Opened from Settings ("Manage the equipment catalog") the route
@@ -2678,6 +2678,19 @@ async function viewAdminAssets() {
     <a href="#/new" class="btn primary lg fab">${icon('plus')} Add</a>`;
   const statusLabel = () => (ADMIN_STATUSES.find(([v]) => v === st.status) || ['', ''])[1];
   const markChips = () => $$('.chip', $('#chips')).forEach((c) => c.classList.toggle('on', c.dataset.v === st.status));
+  // Lists show PAGE assets at a time (owner, 2026-10-27); the page resets whenever the entry, the status chip or the search changes.
+  const PAGE = 10;
+  const pageOf = (list) => { st.page = Math.min(Math.max(1, st.page), Math.max(1, Math.ceil(list.length / PAGE))); return list.slice((st.page - 1) * PAGE, st.page * PAGE); };
+  const pager = (total) => {
+    const pages = Math.ceil(total / PAGE);
+    if (pages <= 1) return '';
+    const nums = [...new Set([1, st.page - 1, st.page, st.page + 1, pages])].filter((x) => x >= 1 && x <= pages).sort((a, b) => a - b);
+    const btns = nums.map((x, i) => `${i && x - nums[i - 1] > 1 ? '<span class="muted">…</span>' : ''}<button type="button" class="chip ${x === st.page ? 'on' : ''}" data-page="${x}" ${x === st.page ? 'aria-current="page"' : ''}>${x}</button>`).join('');
+    return `<nav class="pager" aria-label="Pages"><button type="button" class="btn sm" data-page="${st.page - 1}" ${st.page <= 1 ? 'disabled' : ''}>‹ Previous</button>
+      <span class="pager-nums">${btns}</span><span class="small muted">${(st.page - 1) * PAGE + 1}–${Math.min(st.page * PAGE, total)} of ${total}</span>
+      <button type="button" class="btn sm" data-page="${st.page + 1}" ${st.page >= pages ? 'disabled' : ''}>Next ›</button></nav>`;
+  };
+  const listCard = (list, node) => `<div class="card"><ul class="list">${pageOf(list).map((a) => assetRow(a, node)).join('')}</ul></div>${pager(list.length)}`;
   const byId = (id) => st.rows.find((r) => r.id === id);
   const kids = (id) => st.rows.filter((r) => r.parent_id === id && (st.archived || r.live));
   const countText = (n) => (n ? `${n} asset${n === 1 ? '' : 's'}` : 'No assets');
@@ -2696,7 +2709,7 @@ async function viewAdminAssets() {
     $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = ''; $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>`;
     if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
     const assets = f.assets.length
-      ? `<div class="card"><div class="card-head"><span class="muted small">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</span></div><ul class="list">${f.assets.map((a) => assetRow(a, null)).join('')}</ul></div>`
+      ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
       : `<div class="empty">${icon('box')}<p>No asset matches that${st.status ? ` among ${esc(statusLabel())}` : ''}.</p></div>`;
     const entries = f.results.length
       ? `<h3 class="ct-h">Catalog entries <span class="muted">${f.total}</span></h3>${f.total > f.results.length ? `<p class="small muted" style="margin:0 0 8px">Showing the first ${f.results.length}, so add a word to narrow it.</p>` : ''}
@@ -2708,6 +2721,7 @@ async function viewAdminAssets() {
   };
   const runSearch = async () => {
     const mine = ++st.searchToken; const q = st.search;
+    st.page = 1;
     if (!q) { st.found = null; render(); return; }
     st.found = null; renderFound();
     const u = new URLSearchParams({ q }); if (st.status) u.set('status', st.status);
@@ -2721,7 +2735,9 @@ async function viewAdminAssets() {
   const render = () => {
     if (st.search) return renderFound();
     const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
-    const inAll = !!n && st.all && ch.length > 0; // a category with nothing below it has no wider branch to show
+    // A category with entries below it lists its whole branch right under its cards (owner, 2026-10-27: no extra "All in" click);
+    // a subcategory card narrows it. A category with nothing below it lists what is filed in it.
+    const inAll = !!n && ch.length > 0;
     const chain = []; for (let x = n; x; x = byId(x.parent_id)) chain.unshift(x);
     const cards = [];
     if (n && ch.length) cards.push(cgCard({ attrs: 'data-all', name: `All in ${n.name}`, meta: countText(n.asset_count), kind: `all${inAll ? ' on' : ''}`, chev: false }));
@@ -2733,11 +2749,11 @@ async function viewAdminAssets() {
       const shown = inAll ? list : direct;
       const title = `${inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets'}${st.status ? ` · ${statusLabel()}` : ''}`;
       below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
-        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it.</p>` : ''}<div class="card"><ul class="list">${shown.map((a) => assetRow(a, n)).join('')}</ul></div>`
+        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it. Pick a card above to narrow it.</p>` : ''}${listCard(shown, n)}`
         : `<p class="muted small ct-empty">${st.status ? `No ${esc(statusLabel().toLowerCase())} assets here.` : inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
     } else { // the top: every asset (within the status chip), as the old All assets list
       below = `<div class="card-head" style="padding:0;margin:24px 0 8px"><h3 class="ct-h" style="margin:0">${st.status ? esc(statusLabel()) : 'All assets'} <span class="muted">${list ? list.length : ''}</span></h3><a class="small" href="/api/export/assets.csv">Export CSV</a></div>
-        ${list === null ? '<div class="spinner"></div>' : list.length ? `<div class="card"><ul class="list">${list.map((a) => assetRow(a, null)).join('')}</ul></div>`
+        ${list === null ? '<div class="spinner"></div>' : list.length ? listCard(list, null)
           : `<div class="empty">${icon('box')}<p>${st.status ? `No ${esc(statusLabel().toLowerCase())} assets.` : 'No assets yet. Tap <strong>Add</strong>, scan a barcode, or create labels to get started.'}</p></div>`}`;
     }
     // Structural actions always belong to the REAL entry being viewed (also while its virtual "All in" view is open).
@@ -2745,11 +2761,11 @@ async function viewAdminAssets() {
     // "Add category" only makes sense at the top; inside a category the contextual button is "+ Add subcategory" above.
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
     $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
-    const up = n && !st.all ? byId(n.parent_id) : null;
-    $('#backslot').innerHTML = n ? backAnchor(st.all ? hashFor(n.id) : hashFor(up ? up.id : null), st.all ? n.name : up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : '';
+    const up = n ? byId(n.parent_id) : null;
+    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : '';
     $('#headact').innerHTML = `<a href="#/new" class="btn primary desk-only">${icon('plus')} Add asset</a>${n ? '' : `<button class="btn" id="addroot">${icon('plus')} Add category</button>`}${calendarLink({ node: n ? n.id : null })}`;
     if (!n) $('#addroot').onclick = addRoot;
-    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: inAll }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+    $('#ct').innerHTML = `${n ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
       ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
   };
@@ -2774,6 +2790,7 @@ async function viewAdminAssets() {
     markChips();
     if ((p.get('node') && !st.sel) || (p.get('status') && !st.status)) history.replaceState(null, '', hashFor(st.sel, st.all)); // unknown/stale node or status: tidy the URL
     if (st.search && st.status !== prevStatus) runSearch();
+    if (st.sel !== prev || st.status !== prevStatus) st.page = 1;
     if (st.sel !== prev || st.status !== prevStatus || st.assets === null) loadAssets(); else render();
   };
   const reload = async () => {
@@ -2846,7 +2863,14 @@ async function viewAdminAssets() {
     const m = e.target.closest('[data-manage]'); if (m) return manage(Number(m.dataset.manage));
     const add = e.target.closest('[data-addsub]'); if (add) return addBelow(byId(Number(add.dataset.addsub)));
     const to = (h) => { go(h); window.scrollTo(0, 0); };
-    if (e.target.closest('[data-all]')) return to(hashFor(st.sel, !st.all));
+    const pg = e.target.closest('[data-page]');
+    if (pg) { // the next page starts at the top of the list (below the sticky top bar)
+      st.page = Number(pg.dataset.page); render();
+      const card = $('#ct .pager')?.previousElementSibling;
+      if (card) window.scrollTo({ top: card.getBoundingClientRect().top + window.scrollY - 120 });
+      return;
+    }
+    if (e.target.closest('[data-all]')) return to(hashFor(st.sel)); // (the branch is already listed; the card marks it)
     const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
     const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
