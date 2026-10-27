@@ -433,7 +433,19 @@ app.get('/api/assets/lookup/:code', auth, async (req, res) => {
   // An employee only gets an id for assets they may open; for any other existing asset they learn just that it isn't
   // available (no id, no details), so the scanner can say so without exposing the record.
   if (a && !(await data.assetAccess.canViewAsset(req.user, await data.assetAccess.getAsset(a.id)))) return res.json({ found: false, unavailable: true, code });
-  res.json(a ? { found: true, id: a.id, archived: !!a.archived_at } : { found: false, code });
+  if (a) return res.json({ found: true, id: a.id, archived: !!a.archived_at });
+  // IT only: a label we printed before its asset existed (Create labels, the Add asset form's Print label) opens Add asset with it.
+  const issued = req.user.role === 'admin' ? await data.assetRecords.issuedTag(code) : null;
+  res.json(issued ? { found: false, code, issued } : { found: false, code });
+});
+
+// Create labels / the Add asset form's Print label (docs/briefs/labels-and-assets.md): claims the next `count` tags from the counter, so
+// the printed labels are never issued to another asset. Nothing else is written; the assets are added later by scanning the labels.
+app.post('/api/tags/claim', admin, async (req, res) => {
+  const count = Number(req.body.count);
+  if (!Number.isInteger(count) || count < 1 || count > 300) throw httpError(400, 'Choose between 1 and 300 labels');
+  const { tag_prefix } = await data.settings.getSettings();
+  res.json({ tags: await data.assetRecords.claimTags({ prefix: tag_prefix, count }) });
 });
 
 // Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.

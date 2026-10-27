@@ -627,8 +627,9 @@ test('on a brand-new database migration 11 seeds the built-in category list as r
 test('front end: asset pages carry their origin (known sources only) and the catalog title is the current entry', () => {
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'public', 'app.js'), 'utf8');
   assert.match(src, /SRC_BY_ROLE = \{ admin: \['assets', 'catalog', 'requests', 'home', 'scan', 'person', 'activity', 'calendar'\], employee: \['browse', 'equipment', 'history', 'requests', 'home', 'scan', 'calendar'\] \}/, 'only known sources, per role');
-  for (const s of ["srcQ('assets')", "srcQ('catalog'", "srcQ('browse'", "srcQ('equipment')", "srcQ('history')", "srcQ('requests'", "srcQ('scan')", "srcQ('person'", "'activity')", "returnBanners(d.mine, 'home')", "returnBanners(d.mine, 'equipment')"]) assert.ok(src.includes(s), `a list that opens assets must tag its origin: ${s}`);
+  // (IT's All assets is the catalog drill-down since docs/briefs/labels-and-assets.md: its rows tag 'catalog'; 'assets' stays a known source for old links)
+  for (const s of ["srcQ('catalog'", "srcQ('browse'", "srcQ('equipment')", "srcQ('history')", "srcQ('requests'", "srcQ('scan')", "srcQ('person'", "'activity')", "returnBanners(d.mine, 'home')", "returnBanners(d.mine, 'equipment')"]) assert.ok(src.includes(s), `a list that opens assets must tag its origin: ${s}`);
   assert.ok(src.includes('label: virtual ? `All in ${n.name}` : n.name'), 'back from a virtual "All in" view says so');
-  assert.ok(src.includes("$('#pagetitle').textContent = n ? n.name : 'Equipment catalog'"), 'catalog title = the real current entry');
+  assert.ok(src.includes("$('#pagetitle').textContent = n ? n.name : 'All assets'"), 'All assets title = the real current entry');
   assert.ok(!/history\.back\(\)[^;]*assetBackTarget/.test(src), 'the asset Back target is not browser history');
 });

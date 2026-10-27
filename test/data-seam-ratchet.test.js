@@ -73,6 +73,8 @@ const MIGRATED = [
   'POST /api/reset',
   // Google sign-in (beside the password login): the callback looks the account up through the seam
   'GET /auth/google/callback',
+  // Labels before assets (docs/briefs/labels-and-assets.md)
+  'POST /api/tags/claim',
   'GET /api/users',
   'POST /api/users',
   'POST /api/users/:id/account',

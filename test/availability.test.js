@@ -561,7 +561,7 @@ test('front end: Back target for every way into the calendar — label says wher
   assert.deepEqual(await back(emp, '#/asset/5?src=browse&node=7', asset(5, 'Dell Latitude 5440')), ['Dell Latitude 5440', '#/asset/5?src=browse&node=7'], 'asset detail keeps its own context');
   assert.deepEqual(await back(emp, '', { type: 'global' }), ['Browse equipment', '#/assets'], 'direct link: employee fallback');
   // admin
-  assert.deepEqual(await back(adm, '#/catalog', { type: 'global' }), ['Equipment catalog', '#/catalog'], 'catalog root');
+  assert.deepEqual(await back(adm, '#/catalog', { type: 'global' }), ['All assets', '#/catalog'], 'an old catalog link: the catalog is All assets now');
   assert.deepEqual(await back(adm, '#/catalog?node=7', node(7, 'Appliance')), ['Appliance', '#/catalog?node=7'], 'catalog node');
   assert.deepEqual(await back(adm, '#/catalog?node=9&all=1', { type: 'global' }), ['A7 IV', '#/catalog?node=9&all=1'], 'catalog "All in" view is preserved');
   assert.deepEqual(await back(adm, '#/assets', { type: 'global' }), ['All assets', '#/assets'], 'All assets');
@@ -569,7 +569,7 @@ test('front end: Back target for every way into the calendar — label says wher
   assert.deepEqual(await back(adm, '#/asset/5?src=catalog&node=7', asset(5, 'Dell Latitude 5440')), ['Dell Latitude 5440', '#/asset/5?src=catalog&node=7'], 'asset detail');
   assert.deepEqual(await back(adm, '#/asset/5', { type: 'global' }), ['Dell Latitude 5440', '#/asset/5'], 'sidebar from an asset page: asset name looked up');
   assert.deepEqual(await back(adm, '#/person/3', { type: 'global' }), ['Casey Chen', '#/person/3'], 'sidebar from a person page');
-  for (const [from, label] of [['#/home', 'Home'], ['#/people', 'People'], ['#/requests', 'Requests'], ['#/settings', 'Settings'], ['#/activity', 'Activity log'], ['#/labels', 'Print labels'], ['#/import', 'Import / export']]) {
+  for (const [from, label] of [['#/home', 'Home'], ['#/people', 'People'], ['#/requests', 'Requests'], ['#/settings', 'Settings'], ['#/activity', 'Activity log'], ['#/labels', 'Print labels'], ['#/labels/new', 'Create labels'], ['#/import', 'Import / export']]) {
     assert.deepEqual(await back(adm, from, { type: 'global' }), [label, from], `sidebar from ${from}`);
   }
   assert.deepEqual(await back(adm, '', { type: 'global' }), ['All assets', '#/assets'], 'direct link: admin fallback');
@@ -607,12 +607,11 @@ test('front end: the calendar has one route for both roles, keeps month/day/sour
   assert.match(view, /<div id="backslot">\$\{backLink\(back\.href, back\.label, true\)\}<\/div><div class="page-head">/, 'the Back link sits above the title, as a plain link (not browser history)');
   assert.match(view, /const back = await calBackTarget\(want\.from, sc\)/);
   assert.match(view, /backLink\(eb\.href, eb\.label, true\)/, 'even the error screen has a Back');
-  // entry points: Browse (employee), catalog + All assets (admin), asset detail (both), admin sidebar + hamburger
+  // entry points: Browse (employee), All assets = the catalog drill-down (admin), asset detail (both), admin sidebar + hamburger
   assert.match(src, /\$\('#headact'\)\.innerHTML = !st\.q && cur\(\) \? calendarLink\(\{ node: cur\(\)\.id \}\) : ''/, 'employee Browse: calendar only inside a catalog entry');
   assert.match(src, /\$\{calendarLink\(\{ asset: a\.id \}\)\}/);
-  assert.match(src, /<a href="#\/new" class="btn primary desk-only">\$\{icon\('plus'\)\} Add asset<\/a>\$\{calendarLink\(\)\}/, 'admin All assets header');
-  // catalog header order: Add category first, then the calendar icon
-  assert.match(src, /\$\{n \? '' : `<button class="btn primary" id="addroot">\$\{icon\('plus'\)\} Add category<\/button>`\}\$\{calendarLink\(\{ node: n \? n\.id : null \}\)\}/);
+  // All assets header order: Add asset, Add category (top level only), then the calendar icon (scoped to the entry being viewed)
+  assert.match(src, /<a href="#\/new" class="btn primary desk-only">\$\{icon\('plus'\)\} Add asset<\/a>\$\{n \? '' : `<button class="btn" id="addroot">\$\{icon\('plus'\)\} Add category<\/button>`\}\$\{calendarLink\(\{ node: n \? n\.id : null \}\)\}/, 'admin All assets header');
   assert.equal((src.match(/key: 'calendar', href: '#\/calendar', label: 'Calendar', icon: 'calendar'/g) || []).length, 2, 'sidebar + hamburger');
   assert.match(src, /data-key="\$\{i\.key\}"\$\{i\.key === 'calendar' \? ' data-cal' : ''\}/, 'sidebar and hamburger links are stamped too');
   const tabs = src.slice(src.indexOf('const common = ['), src.indexOf('const side = ['));

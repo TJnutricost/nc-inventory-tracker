@@ -86,6 +86,32 @@ async function allocateTag(q, prefix) { // call only inside a transaction (the c
   }
 }
 
+// Labels printed before the asset exists (see src/assetRecords.js): `count` numbers claimed in ONE transaction (a caller's when given its
+// client); the counter row stays locked until it ends, so two claims (or a claim and a blank-tag create) never share a number.
+async function claimTags(q, { prefix, count }) {
+  return inTransaction(q, async (c) => {
+    const tags = [];
+    for (let i = 0; i < count; i++) tags.push(await allocateTag(c, prefix));
+    return tags;
+  });
+}
+// One of our claimed, still unused labels (see src/assetRecords.js): the tag as issued, else null. A plain read.
+async function issuedTag(q, code) {
+  const prefix = (await getSettings(q)).tag_prefix;
+  const n = issuedNumber(prefix, code);
+  if (n === null || n > (await q.query('SELECT last_number AS n FROM asset_tag_counter WHERE id = 1')).rows[0].n) return null;
+  const tag = formatTag(prefix, n);
+  return (await tagExists(q, tag)) ? null : tag;
+}
+// (pure; repeated from src/assetRecords.js like formatTag)
+function issuedNumber(prefix, code) {
+  const c = String(code ?? '').trim();
+  const digits = c.slice(prefix.length);
+  if (c.slice(0, prefix.length).toUpperCase() !== prefix.toUpperCase() || !/^\d{1,9}$/.test(digits)) return null;
+  const n = Number(digits);
+  return n >= 1 && formatTag(prefix, n).toUpperCase() === c.toUpperCase() ? n : null;
+}
+
 // Serials are unique across the whole inventory (archived assets included), ignoring surrounding whitespace and letter case
 // (src/serial.js: the key is computed in JS and stored, so both engines compare the same text exactly).
 async function assertSerialFree(q, serial, exceptAssetId = null) {
@@ -273,4 +299,4 @@ async function importAssets(q, { rows, actorAccountId }) {
   });
 }
 
-module.exports = { FLAGS, ASSET_FIELDS, formatTag, tagExists, allocateTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
+module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };

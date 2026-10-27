@@ -62,6 +62,10 @@ test('the pure exports equal the SQLite module\'s (FLAGS, ASSET_FIELDS, formatTa
   assert.deepEqual(pg.FLAGS, sq.FLAGS);
   assert.deepEqual(pg.ASSET_FIELDS, sq.ASSET_FIELDS);
   for (const [p, n] of [['NC-', 1], ['IT', 123456], ['', 0], ['x-', 99999]]) assert.equal(pg.formatTag(p, n), sq.formatTag(p, n));
+  for (const [p, c] of [['NC-', 'NC-00056'], ['NC-', ' nc-00056 '], ['NC-', 'NC-56'], ['NC-', 'NC-00000'], ['NC-', 'XX-00001'], ['NC-', 'NC-0005a'], ['IT', 'it123456'], ['NC-', '']]) {
+    assert.equal(pg.issuedNumber(p, c), sq.issuedNumber(p, c), `issuedNumber ${p} ${c}`);
+  }
+  assert.deepEqual([sq.issuedNumber('NC-', ' nc-00056 '), sq.issuedNumber('NC-', 'NC-56'), sq.issuedNumber('NC-', 'NC-00000')], [56, null, null]);
 });
 
 describe('PostgreSQL asset record checks and the next-tag preview (differential against src/assetRecords.js)', pgSuite(), () => {
@@ -95,6 +99,18 @@ describe('PostgreSQL asset record checks and the next-tag preview (differential 
     assert.equal((await tw.same('peek, prefix nc-', (q) => pg.peekTag(q), (db) => sq.peekTag(db))).ok, 'nc-00003');
     await pgSettings.setSetting(tw.pg, 'tag_prefix', 'NC-'); sqSettings.setSetting(tw.sqlite, 'tag_prefix', 'NC-');
     assert.deepEqual((await tw.pg.query('SELECT last_number FROM asset_tag_counter')).rows, [{ last_number: 0 }], 'nothing consumed');
+  });
+
+  test('claimTags and issuedTag: claimed numbers skip taken tags and are never issued again; only claimed, unused labels count', async () => {
+    const claimed = await tw.same('claim 3', (q) => pg.claimTags(q, { prefix: 'NC-', count: 3 }), (db) => sq.claimTags(db, { prefix: 'NC-', count: 3 }));
+    assert.deepEqual(claimed.ok, ['NC-00003', 'NC-00004', 'NC-00005'], 'NC-00001 / nc-00002 are taken by assets');
+    await tw.same('the counter', (q) => q.query('SELECT last_number FROM asset_tag_counter').then((r) => r.rows), (db) => db.prepare('SELECT last_number FROM asset_tag_counter').all());
+    assert.equal((await tw.same('peek after a claim', (q) => pg.peekTag(q), (db) => sq.peekTag(db))).ok, 'NC-00006', 'the claimed numbers are not offered again');
+    for (const code of ['NC-00003', 'nc-00004', ' NC-00005 ', 'NC-00001', 'nc-00002', 'NC-00006', 'NC-3', 'XX-00003', 'cam-Ünï', '']) {
+      await tw.same(`issuedTag ${JSON.stringify(code)}`, (q) => pg.issuedTag(q, code), (db) => sq.issuedTag(db, code));
+    }
+    assert.deepEqual([await pg.issuedTag(tw.pg, 'nc-00004'), await pg.issuedTag(tw.pg, 'NC-00001'), await pg.issuedTag(tw.pg, 'NC-00006')], ['NC-00004', null, null],
+      'claimed + unused: the issued tag; used by an asset or not yet claimed: null');
   });
 
   test('assertSerialFree: free, used (live / archived, any case and spacing), the asset itself, blank and N/A', async () => {
@@ -328,6 +344,15 @@ describe('PostgreSQL asset records: statement order, lock timeout and races', pg
       const sqls = await statements(fn);
       assert.deepEqual(sqls.slice(0, 2), ['BEGIN', 'SELECT * FROM assets WHERE id = $1 FOR UPDATE']);
     }
+  });
+
+  test('parallel label claims and blank-tag creates never share a number', async () => {
+    const c0 = await counter();
+    const claims = Array.from({ length: 4 }, () => pg.claimTags(pool, { prefix: 'NC-', count: 5 }));
+    const creates = Array.from({ length: 3 }, (_, i) => pg.createAsset(pool, createArgs({ name: `Beside claims ${i}` })));
+    const tags = [...(await Promise.all(claims)).flat(), ...await Promise.all((await Promise.all(creates)).map(tagOf))];
+    assert.equal(new Set(tags).size, 23);
+    assert.equal(await counter(), c0 + 23);
   });
 
   test('createAsset joins the caller\'s transaction: rolled back with it (no row, no counter movement)', async () => {

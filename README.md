@@ -16,7 +16,7 @@ It runs on phones, tablets and desktops. On a phone, users can add it to the hom
 | **Check in** | Scan the item, record its condition and where it goes, optionally mark it in repair | Tap "I'm returning this" |
 | **Return requests** | Ask a person to turn an item in by a date; they get an email and a banner in the app | Tap "I've dropped it off", which emails IT |
 | **Equipment requests** | Assign an asset to the request (checks it out), approve it, or decline it | Ask IT for equipment |
-| **Barcodes** | Scan to find an item. Scanning an unknown code offers to create a new asset with that tag. Print Code 128 label sheets. | Scan to find an item |
+| **Barcodes** | Scan to find an item. Scanning one of our own labels that has no asset yet opens Add asset with that tag; any other unknown code offers a new asset with it as the serial number (or the tag). Print Code 128 labels from the Add asset form, as numbered blank sheets (Create labels) or for saved assets (Print labels). | Scan to find an item |
 | **Software licenses** | Seat counts (for example 3 of 25 used), license key, renewal date | See the license key for seats assigned to them |
 | **People** | Invite people, set admin or user, deactivate, see each person's current and past equipment | Their own profile |
 | **Data** | CSV import (bulk onboarding) and export, full activity log per asset | |
@@ -28,7 +28,12 @@ It runs on phones, tablets and desktops. On a phone, users can add it to the hom
 2. **USB or Bluetooth handheld scanner.** On a desktop the Scan page's input box is focused automatically, so scanning there works right away.
 3. **Typing** the tag or serial number.
 
-You can put the app's own labels on devices (Print labels, sized for Avery 5160/8160 sheets or a label printer), or reuse barcodes that are already on the device. For the second option, scan the existing barcode when you add the asset and it becomes the tag.
+You can put the app's own labels on devices, or reuse barcodes that are already on the device. Own labels (Avery 5160/8160 sheets or a label printer), all under **All assets**:
+- **Add asset → Print label:** the form shows the next free tag and its label; printing reserves that number for the asset. Cancelling without printing reserves nothing.
+- **Create labels:** print a batch of numbered labels first (the numbers are reserved at once and never given to another asset), stick them on the devices, then scan each one: Add asset opens with that tag.
+- **Print labels:** labels for assets already added.
+
+To reuse a maker's barcode, scan it: the app offers a new asset with it as the serial number (scanning the serial finds the asset later), or as the tag.
 
 ---
 
@@ -46,7 +51,7 @@ Open http://localhost:3000. The first visit asks you to create the first **admin
 1. **Settings**: check the categories, locations and check-out rules.
 2. **People → Add person**: each person gets an email invite to set their password.
 3. **Add assets** one by one (scan, fill in, take photos) or **Import / export → Import CSV** for bulk onboarding. A template is available there.
-4. **Print labels** and stick them on the devices.
+4. **Labels:** print one from the Add asset form, or print numbered blanks first (**All assets → Create labels**), stick them on the devices and scan each one to add it.
 
 Emails are saved to **Settings → Outbox** until SMTP is configured, so everything can be tested without sending real mail.
 

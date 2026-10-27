@@ -244,9 +244,10 @@ test('front end: Browse rows keep their state and open the calendar when not ava
   assert.match(browse, /back \$\{fmtDate\(a\.expected_back\)\}/);
   // the request-this-item pickers still ask for what is available right now
   assert.equal((src.match(/available=1|available: '1'/g) || []).length, 3);
-  const cat = src.slice(src.indexOf('async function viewCatalog()'));
+  const cat = src.slice(src.indexOf('async function viewAdminAssets()')); // IT's All assets = the catalog (docs/briefs/labels-and-assets.md)
   assert.match(cat, /id="cq" type="search"/);
   assert.match(cat, /\/api\/catalog\/search\?q=/);
+  assert.match(cat, /api\('GET', '\/api\/assets\?' \+ u\)\]\)/, 'the same box searches the assets too');
   assert.match(cat, /data-act="keywords"/);
   assert.match(cat, /search_keywords: new FormData\(e\.target\)\.get\('kw'\)/);
   assert.match(cat, /if \(st\.search\) return renderFound\(\);/, 'an empty box leaves the card grid untouched');

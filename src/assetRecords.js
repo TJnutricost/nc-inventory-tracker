@@ -35,6 +35,29 @@ function allocateTag(db, prefix) { // call only inside a transaction
   }
 }
 
+// Labels printed before the asset exists (docs/briefs/labels-and-assets.md): Create labels, and Print label in the Add asset form.
+// `count` numbers are claimed from the same counter in ONE transaction (allocateTag: manually used tags skipped), so a printed label is
+// never issued to another asset. `prefix` is the `tag_prefix` setting, read by the caller. Returns the tags in order.
+function claimTags(db, { prefix, count }) {
+  return db.transaction(() => Array.from({ length: count }, () => allocateTag(db, prefix)))();
+}
+// `code` as one of our claimed, still unused labels: `<tag_prefix><the 5-digit number>` (any letter case), the number already issued by
+// the counter and no asset using it. Returns the tag as issued, else null. (A label printed under an earlier prefix is not recognised.)
+function issuedTag(db, code) {
+  const n = issuedNumber(getSettings(db).tag_prefix, code);
+  if (n === null || n > db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n) return null;
+  const tag = formatTag(getSettings(db).tag_prefix, n);
+  return tagExists(db, tag) ? null : tag;
+}
+// The number in `code` when it is exactly formatTag(prefix, n) ignoring letter case and surrounding spaces, else null (pure).
+function issuedNumber(prefix, code) {
+  const c = String(code ?? '').trim();
+  const digits = c.slice(prefix.length);
+  if (c.slice(0, prefix.length).toUpperCase() !== prefix.toUpperCase() || !/^\d{1,9}$/.test(digits)) return null;
+  const n = Number(digits);
+  return n >= 1 && formatTag(prefix, n).toUpperCase() === c.toUpperCase() ? n : null;
+}
+
 // Serials are unique across the whole inventory (archived assets included) ignoring surrounding whitespace and letter
 // case; see src/serial.js. The UNIQUE index on assets.serial_normalized is the backstop; this gives a readable 400.
 function assertSerialFree(db, serial, exceptAssetId = null) {
@@ -165,4 +188,4 @@ function importAssets(db, { rows, actorAccountId }) {
   return { created, updated, errors };
 }
 
-module.exports = { FLAGS, ASSET_FIELDS, formatTag, tagExists, allocateTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
+module.exports = { FLAGS, ASSET_FIELDS, formatTag, issuedNumber, tagExists, allocateTag, claimTags, issuedTag, assertSerialFree, resolveAssetNode, createAsset, updateAsset, archiveAsset, peekTag, importAssets };
