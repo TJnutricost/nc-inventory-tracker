@@ -459,15 +459,19 @@ const RELEASE_REFUSED = {
 app.post('/api/tags/release', admin, async (req, res) => {
   const tags = req.body.tags;
   if (!Array.isArray(tags) || !tags.length || tags.length > 300 || tags.some((t) => typeof t !== 'string')) throw httpError(400, 'Send the list of tags to give back');
-  const { tag_prefix } = await data.settings.getSettings();
-  const r = await data.assetRecords.releaseTags({ prefix: tag_prefix, tags });
+  // Which prefix each tag was issued under is the claim's own record, not the current setting (the prefix may have changed since).
+  const r = await data.assetRecords.releaseTags({ tags });
   if (!r.released) throw httpError(409, RELEASE_REFUSED[r.reason]);
   res.json({ released: tags.length });
 });
 
 // Preview only: creating an asset with a blank tag claims a number server-side, which may differ if others create first.
 // (The `tag_prefix` setting, the counter and the taken-tag check: src/assetRecords.js peekTag, moved there verbatim in Slice 5B-4.)
-app.get('/api/next-tag', admin, async (req, res) => res.json({ tag: await data.assetRecords.peekTag() }));
+// `?prefix=` previews an unsaved prefix (Create labels' draft) and changes nothing.
+app.get('/api/next-tag', admin, async (req, res) => {
+  const draft = typeof req.query.prefix === 'string' ? req.query.prefix.trim().slice(0, 10) : '';
+  res.json({ tag: await data.assetRecords.peekTag(...(draft ? [draft] : [])) });
+});
 
 // The asset page: holders, photos, live requests and reservations, the employee's own waitlist places, IT's activity (src/assetViews.js
 // assetDetail), for an asset this user may see (a 404 otherwise: src/assetAccess.js visibleAsset).

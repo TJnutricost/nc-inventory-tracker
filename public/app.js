@@ -2925,15 +2925,46 @@ async function viewLabels() {
 // with that tag. The claimed sheet stays on screen to print again (a jammed printer) until the page is left. A browser does not say whether
 // the print dialog printed or was cancelled, so after it closes the page asks; "Give the numbers back" (then or later on this page) returns
 // them (POST /api/tags/release) so the next Create labels issues the same numbers, as long as nothing newer was issued and none is in use.
-function viewCreateLabels() {
+async function viewCreateLabels() {
+  const saved = (await api('GET', '/api/settings')).tag_prefix;
   main().innerHTML = `<div class="no-print">${backLink('#/assets', 'All assets')}
     <div class="page-head"><h1>Create labels</h1></div>
     <p class="muted small" style="margin-top:-6px">Print numbered labels before the devices are in the system. Stick one on each device, then scan it: <strong>Add asset</strong> opens with that tag filled in. Each number is reserved as soon as the labels are created, so it is never given to another asset. If they don't print, give the numbers back and the next labels reuse them.</p>
-    <form class="card pad form-grid" id="f"><label class="field"><span>How many labels</span><input name="count" type="number" min="1" max="300" value="30" inputmode="numeric" required style="max-width:160px"></label>
+    <form class="card pad form-grid" id="pf" novalidate><h2 style="margin:0">Asset tag prefix</h2>
+      <div class="input-group" style="max-width:320px"><input name="prefix" value="${esc(saved)}" class="mono" maxlength="10" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Asset tag prefix"><button class="btn" id="saveprefix" disabled>Save prefix</button></div>
+      <div class="small" id="pnext" aria-live="polite"></div>
+      <div class="small muted">Every new tag is this prefix plus the next number, for these labels and for Add asset's automatic numbering alike. Examples: <span class="mono">NC-</span>, <span class="mono">IT-</span>, <span class="mono">LAP-</span>, <span class="mono">MON-</span>. Numbers keep counting up in one sequence whatever the prefix. Changing it affects future tags only: tags on existing assets and labels already printed never change, and printed labels keep working. The example is a preview and reserves nothing.</div></form>
+    <form class="card pad form-grid" id="f" style="margin-top:12px"><label class="field"><span>How many labels</span><input name="count" type="number" min="1" max="300" value="30" inputmode="numeric" required style="max-width:160px"></label>
       <div class="small muted">30 fill one Avery 5160 / 8160 sheet (2⅝" × 1"). Up to 300 at a time.</div>
       <button class="btn primary" id="go">${icon('printer')} Create &amp; print</button></form>
     <div id="done" style="margin-top:16px"></div></div>
     <div class="labels-sheet" id="sheet"></div>`;
+  // The prefix: a draft is previewed (GET /api/next-tag?prefix=, which consumes nothing) and only a Save changes it. Create & print always
+  // uses the saved prefix, so it waits while the draft differs.
+  let current = saved, seq = 0;
+  const draft = () => $('#pf').elements.prefix.value.trim().toUpperCase();
+  const draftOk = () => /^[A-Z0-9._-]{1,10}$/.test(draft());
+  const refresh = async () => {
+    const mine = ++seq, d = draft(), dirty = d !== current;
+    $('#saveprefix').disabled = !dirty || !draftOk();
+    $('#go').disabled = dirty;
+    if (!draftOk()) { $('#pnext').innerHTML = '<span class="muted">Use 1–10 letters, digits, dashes, dots or underscores.</span>'; return; }
+    const { tag } = await api('GET', `/api/next-tag?prefix=${encodeURIComponent(d)}`);
+    if (mine !== seq) return;
+    $('#pnext').innerHTML = `Next tag: <strong class="mono">${esc(tag)}</strong>${dirty ? ' <span class="muted">· not saved yet. Save the prefix to use it; labels are created with the saved one.</span>' : ''}`;
+  };
+  $('#pf').elements.prefix.oninput = () => refresh().catch(() => {});
+  $('#pf').onsubmit = (e) => {
+    e.preventDefault();
+    if ($('#saveprefix').disabled) return;
+    busy($('#saveprefix'), async () => {
+      const r = await api('PUT', '/api/settings', { tag_prefix: draft() });
+      S.settings = r; current = r.tag_prefix; $('#pf').elements.prefix.value = current;
+      await refresh();
+      toast(`Asset tag prefix saved: ${current}. New tags use it; existing tags and printed labels are unchanged.`, false, 'ok');
+    });
+  };
+  refresh().catch(() => {});
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const count = Number(new FormData(e.target).get('count'));
@@ -3009,8 +3040,7 @@ async function viewSettings() {
     <form id="f" class="stack">
       <div class="card pad"><h2 style="margin-bottom:12px">Check-out rules</h2><div class="form-grid">
         <label class="check"><input type="checkbox" name="overdue_reminders" ${s.overdue_reminders ? 'checked' : ''}><span><strong>Email overdue reminders</strong><br><span class="small muted">Sent when an item passes its due date, then every 3 days.</span></span></label>
-        <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label>
-        <label class="field"><span>Asset tag prefix</span><input name="tag_prefix" value="${esc(s.tag_prefix)}" class="mono"></label></div></div></div>
+        <div class="form-grid cols"><label class="field"><span>Default loan length (days, 0 = none)</span><input name="default_loan_days" type="number" min="0" value="${s.default_loan_days}"></label></div></div></div>
       <div class="card pad stack">
         <div class="set-head"><div class="field"><span>Categories &amp; equipment types</span><span class="small muted">Categories now live in the catalog, where each one can have brands, models and more below it.</span></div>
           <a class="btn" href="#/assets?from=${encodeURIComponent('#/settings')}">${icon('tag')} Manage the equipment catalog</a></div>
@@ -3037,7 +3067,7 @@ async function viewSettings() {
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'), tag_prefix: fd.get('tag_prefix'),
+    const body = { overdue_reminders: fd.has('overdue_reminders'), default_loan_days: fd.get('default_loan_days'),
       locations: fd.get('locations').split('\n'), it_email_name: fd.get('it_email_name'), it_contact_email: fd.get('it_contact_email') };
     busy($('#save'), async () => { S.settings = await api('PUT', '/api/settings', body); toast('Settings saved'); route(true); });
   };
@@ -3076,6 +3106,7 @@ async function viewAdminAssets() {
         <div class="atools-row">${ddMenu({ id: 'ddlabels', label: 'Labels', ic: 'tag', items: [{ href: '#/labels/new', label: 'Create labels', ic: 'plus' }, { href: '#/labels', label: 'Print labels', ic: 'printer' }] })}<div id="ddfilter-slot"></div></div>
         <div class="atools-row atools-find"><div class="search grow">${icon('search')}<input id="cq" type="search" aria-label="Search assets" placeholder="Search name, tag, serial, person, brand, category…" value="${esc(st.search)}" enterkeyhint="search" autocomplete="off"></div>
           <button class="btn" id="scanbtn" title="Scan" aria-label="Scan a barcode">${icon('scan')}</button></div>
+        <div class="atools-act" id="toolact"></div>
       </div>
       <div class="fchips" id="fchips"></div>
       <label class="check" id="archrow"><input type="checkbox" id="showarch"><span>Show archived catalog entries</span></label>
@@ -3105,8 +3136,11 @@ async function viewAdminAssets() {
   // The header's blue Add menu. "Add category" is only offered at the top of the catalog (and not while searching); inside a category the
   // contextual button is "+ Add subcategory".
   const paintHead = ({ cat, node }) => {
-    $('#headact').innerHTML = `${ddMenu({ id: 'ddadd', label: 'Add', ic: 'plus', cls: 'btn primary', align: 'right', items: [{ href: '#/new', label: 'Add asset', ic: 'box' }, ...(cat ? [{ act: 'addroot', label: 'Add category', ic: 'tag' }] : [])] })}${node === undefined ? '' : calendarLink({ node })}`;
-    wireDropdowns($('#headact'), { addroot: () => addRoot() });
+    // Phones: in the header row. Desktop (>= 900px): the same Add menu and calendar link in the toolbar (CSS shows one of the two).
+    const add = (id) => `${ddMenu({ id, label: 'Add', ic: 'plus', cls: 'btn primary', align: 'right', items: [{ href: '#/new', label: 'Add asset', ic: 'box' }, ...(cat ? [{ act: 'addroot', label: 'Add category', ic: 'tag' }] : [])] })}${node === undefined ? '' : calendarLink({ node })}`;
+    $('#headact').innerHTML = add('ddadd');
+    $('#toolact').innerHTML = add('ddadd2');
+    for (const slot of ['#headact', '#toolact']) wireDropdowns($(slot), { addroot: () => addRoot() });
   };
   // Lists show PAGE assets at a time (owner, 2026-10-27); the page resets whenever the entry, the status chip or the search changes.
   const PAGE = 10;

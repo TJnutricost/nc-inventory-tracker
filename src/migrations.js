@@ -844,5 +844,31 @@ module.exports = [
       }
     },
   },
+  {
+    // Asset tag prefix moved to Create labels (docs/briefs/labels-and-assets.md). The counter is one global sequence, but a printed, still
+    // unassigned label is `<prefix><number>` and the prefix can now change, so each claim (Create labels, Print label) records which
+    // numbers it issued under which prefix: [first_number, last_number] per claim (a number inside it taken by a manual tag is simply
+    // never offered, because it is used). Recognising a label and Give Back read this instead of the CURRENT prefix.
+    // History before this migration was not recorded: the numbers up to the counter are recorded under the prefix in force now, which is
+    // exactly what the old check accepted. A label printed under an EARLIER prefix cannot be told apart from any other code and is not
+    // recorded (it still scans, once its asset exists). One range row, not one row per number: the counter can be seeded high (migration 4).
+    id: 18,
+    name: 'issued_tag_ranges: which prefix each claimed tag number was issued under',
+    up: (db) => {
+      db.exec(`CREATE TABLE issued_tag_ranges (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        prefix TEXT NOT NULL,
+        first_number INTEGER NOT NULL CHECK (first_number >= 1),
+        last_number INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        CHECK (last_number >= first_number)
+      )`);
+      const last = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n;
+      if (last >= 1) {
+        const row = db.prepare("SELECT value FROM settings WHERE key = 'tag_prefix'").get();
+        db.prepare('INSERT INTO issued_tag_ranges (prefix, first_number, last_number) VALUES (?, 1, ?)').run((row && row.value) || 'NC-', last);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

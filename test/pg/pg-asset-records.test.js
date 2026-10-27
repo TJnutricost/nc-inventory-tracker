@@ -125,6 +125,31 @@ describe('PostgreSQL asset record checks and the next-tag preview (differential 
     assert.deepEqual((await tw.same('claim again', (q) => pg.claimTags(q, { prefix: 'NC-', count: 2 }), (db) => sq.claimTags(db, { prefix: 'NC-', count: 2 }))).ok, sheet);
   });
 
+  test('a prefix change: a printed batch stays recognised, give-back follows the prefix a batch was issued under, and no number is issued twice', async () => {
+    const same = (label, fn) => tw.same(label, (q) => fn(pg, q), (db) => fn(sq, db));
+    const num = (t) => t.slice(-5);
+    const a = (await same('claim NC-', (m, c) => m.claimTags(c, { prefix: 'NC-', count: 2 }))).ok;
+    const b = (await same('claim IT-', (m, c) => m.claimTags(c, { prefix: 'IT-', count: 2 }))).ok;
+    const crossed = [`IT-${num(a[0])}`, `NC-${num(b[0])}`, 'NC-99999', 'IT-99999'];
+    for (const code of [...a, ...b, ...crossed]) await same(`issuedTag ${code}`, (m, c) => m.issuedTag(c, code));
+    assert.deepEqual([await pg.issuedTag(tw.pg, a[0]), await pg.issuedTag(tw.pg, b[1].toLowerCase())], [a[0], b[1]], 'both prefixes are recognised');
+    for (const code of crossed) assert.equal(await pg.issuedTag(tw.pg, code), null, `${code} was never issued`);
+    const release = (label, tags) => same(label, (m, c) => m.releaseTags(c, { tags }));
+    assert.deepEqual((await release('older batch while a newer one exists', a)).ok, { released: false, reason: 'newer' });
+    assert.deepEqual((await release('a code issued under no prefix', crossed.slice(0, 1))).ok, { released: false, reason: 'not_ours' });
+    assert.deepEqual((await release('the newest batch (IT-)', b)).ok, { released: true });
+    assert.equal(await pg.issuedTag(tw.pg, b[0]), null, 'a given-back batch is no longer issued');
+    assert.deepEqual(await pg.issuedTag(tw.pg, a[1]), a[1], 'the older batch is untouched');
+    assert.deepEqual((await release('the NC- batch, now the newest, under a different current prefix', a)).ok, { released: true });
+    const again = (await same('claim IT- again', (m, c) => m.claimTags(c, { prefix: 'IT-', count: 2 }))).ok;
+    assert.deepEqual(again.map(num), a.map(num), 'the freed numbers are reused, under the prefix of the new claim');
+    assert.equal(await pg.issuedTag(tw.pg, a[0]), null, 'the old NC- label for a reused number is no longer issued');
+    assert.equal(await pg.issuedTag(tw.pg, again[0]), again[0]);
+    await same('ranges', (_m, c) => (c.query ? c.query('SELECT prefix, first_number, last_number FROM issued_tag_ranges ORDER BY id').then((r) => r.rows) : c.prepare('SELECT prefix, first_number, last_number FROM issued_tag_ranges ORDER BY id').all()));
+    // peekTag previews a draft prefix without consuming anything
+    assert.equal((await same('peek a draft', (m, c) => m.peekTag(c, 'LAP-'))).ok.slice(0, 4), 'LAP-');
+  });
+
   test('assertSerialFree: free, used (live / archived, any case and spacing), the asset itself, blank and N/A', async () => {
     const cases = [['SN-2', null], [' sn-1 ', null], ['SN-1', w.a1.id], ['SN-1', w.a2.id], ['ARCH-SN', null], ['', null], [null, null], ['n/a', null]];
     for (const [serial, except] of cases) {

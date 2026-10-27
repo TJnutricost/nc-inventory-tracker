@@ -89,6 +89,89 @@ test('give back: bad input is a 400, tags that are not ours a 409, employees a 4
   assert.equal((await employee.post('/api/tags/release', { tags: ['NC-00001'] })).status, 403);
 });
 
+test('prefix change NC- to IT-: previews, new labels and automatic numbers use IT-; old labels, old assets and manual tags are untouched', async () => {
+  const num = (t) => t.slice(-5);
+  const put = (body) => admin.put('/api/settings', body);
+  assert.equal((await put({ tag_prefix: 'NC-' })).body.tag_prefix, 'NC-');
+  const old = { custom: 'CAM-77', held: (await admin.post('/api/tags/claim', { count: 2 })).body.tags, unused: (await admin.post('/api/tags/claim', { count: 3 })).body.tags };
+  assert.ok(old.held.every((t) => t.startsWith('NC-')));
+  const oldAsset = (await admin.post('/api/assets', { tag: old.held[0], name: 'Labelled under NC-', category: 'Other' })).body;
+  const manual = (await admin.post('/api/assets', { tag: old.custom, name: 'Manual tag', category: 'Other' })).body;
+  assert.equal(manual.tag, old.custom);
+
+  // a draft prefix is only previewed: nothing is claimed and the saved prefix does not move
+  const c0 = counter();
+  const next = Number(num((await admin.get('/api/next-tag')).body.tag));
+  assert.equal((await admin.get('/api/next-tag?prefix=' + encodeURIComponent('LAP-'))).body.tag, `LAP-${String(next).padStart(5, '0')}`);
+  assert.equal((await admin.get('/api/next-tag?prefix=' + encodeURIComponent('  MON-  '))).body.tag, `MON-${String(next).padStart(5, '0')}`);
+  assert.equal((await admin.get('/api/next-tag?prefix=')).body.tag, `NC-${String(next).padStart(5, '0')}`, 'a blank draft previews the saved prefix');
+  assert.equal(counter(), c0);
+  assert.equal((await admin.get('/api/settings')).body.tag_prefix, 'NC-');
+  assert.equal((await employee.get('/api/next-tag?prefix=IT-')).status, 403);
+
+  // save IT-: saving alone claims nothing; checkout settings saved without a prefix leave it alone
+  assert.equal((await put({ tag_prefix: 'IT-' })).body.tag_prefix, 'IT-');
+  assert.equal(counter(), c0, 'changing the prefix claims no number');
+  assert.equal((await put({ default_loan_days: 7, overdue_reminders: true })).body.tag_prefix, 'IT-', 'the checkout settings form no longer sends a prefix');
+  assert.equal((await admin.get('/api/next-tag')).body.tag, `IT-${String(next).padStart(5, '0')}`, 'Add asset previews the IT- tag');
+  assert.equal((await admin.get('/api/assets/lookup/' + encodeURIComponent(oldAsset.tag))).body.id, oldAsset.id, 'an old NC- asset still scans');
+  assert.equal((await lookup(admin, old.custom)).body.found, true, 'a manual tag still scans');
+
+  // new labels and automatic numbers use IT-
+  const fresh = (await admin.post('/api/tags/claim', { count: 2 })).body.tags;
+  assert.deepEqual(fresh, [`IT-${String(next).padStart(5, '0')}`, `IT-${String(next + 1).padStart(5, '0')}`]);
+  const auto = (await admin.post('/api/assets', { name: 'Auto after the change', category: 'Other' })).body;
+  assert.equal(auto.tag, `IT-${String(next + 2).padStart(5, '0')}`);
+
+  // previously issued NC- labels (printed, no asset yet) still open Add asset; look-alikes that were never issued do not
+  for (const tag of old.unused) assert.deepEqual((await lookup(admin, tag.toLowerCase())).body, { found: false, code: tag.toLowerCase(), issued: tag }, tag);
+  assert.equal((await admin.post('/api/assets', { tag: old.unused[0], name: 'Scanned old label', category: 'Other' })).status, 200);
+  for (const tag of fresh) assert.equal((await lookup(admin, tag)).body.issued, tag);
+  for (const code of [`IT-${num(old.unused[1])}`, `NC-${num(fresh[0])}`, `IT-${String(next + 3).padStart(5, '0')}`, 'IT-00001']) assert.equal((await lookup(admin, code)).body.issued, undefined, code);
+
+  // Give Back across the change: the old batch is not the newest, so it is refused and nothing moves; the new batch goes back alone
+  const c1 = counter();
+  const refused = await admin.post('/api/tags/release', { tags: old.unused.slice(1) });
+  assert.equal(refused.status, 409);
+  assert.match(refused.body.error, /Newer numbers were reserved after these/);
+  assert.equal(counter(), c1);
+  assert.equal((await lookup(admin, old.unused[1])).body.issued, old.unused[1], 'the refused batch is still usable');
+  assert.equal((await admin.post('/api/tags/release', { tags: ['NC-' + num(fresh[0]), 'NC-' + num(fresh[1])] })).status, 409, 'a prefix the batch was not issued under');
+  assert.equal(counter(), c1);
+
+  // a batch claimed under NC- and given back after the switch (nothing newer): works, and the numbers are reissued as IT-, never twice
+  assert.equal((await put({ tag_prefix: 'NC-' })).body.tag_prefix, 'NC-');
+  const sheet = (await admin.post('/api/tags/claim', { count: 2 })).body.tags;
+  assert.ok(sheet.every((t) => t.startsWith('NC-')));
+  assert.equal((await put({ tag_prefix: 'IT-' })).body.tag_prefix, 'IT-');
+  assert.deepEqual((await admin.post('/api/tags/release', { tags: sheet })).body, { released: 2 });
+  assert.equal((await lookup(admin, sheet[0])).body.issued, undefined, 'a given-back label is no longer issued');
+  const again = (await admin.post('/api/tags/claim', { count: 2 })).body.tags;
+  assert.deepEqual(again.map(num), sheet.map(num));
+  assert.ok(again.every((t) => t.startsWith('IT-')));
+  const tags = (await admin.get('/api/assets?include_archived=1')).body.map((a) => a.tag.toLowerCase());
+  assert.equal(new Set(tags).size, tags.length, 'every asset tag is still unique');
+  await put({ tag_prefix: 'NC-' });
+});
+
+test('front end: the asset tag prefix lives in Create labels (explicit save, live example) and is gone from Settings > Check-out rules', () => {
+  const fs = require('fs');
+  const path = require('path');
+  const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
+  const settings = src.slice(src.indexOf('async function viewSettings('), src.indexOf("$('#test').onclick"));
+  assert.doesNotMatch(settings, /tag_prefix|Asset tag prefix/, 'Settings no longer shows or sends the prefix');
+  assert.match(settings, /default_loan_days: fd\.get\('default_loan_days'\),\s+locations:/, 'the checkout settings body is otherwise unchanged');
+  const labels = src.slice(src.indexOf('async function viewCreateLabels('), src.indexOf('// ============================================================ import / export'));
+  assert.match(labels, /Asset tag prefix/);
+  assert.match(labels, /Save prefix/);
+  assert.match(labels, /Add asset's automatic numbering/);
+  assert.match(labels, /existing assets and labels already printed never change/);
+  assert.match(labels, /\/api\/next-tag\?prefix=/, 'the live example previews the draft');
+  assert.match(labels, /api\('PUT', '\/api\/settings', \{ tag_prefix: draft\(\) \}\)/, 'only the explicit Save writes the prefix');
+  assert.match(labels, /\$\('#go'\)\.disabled = dirty/, 'Create & print waits for the draft to be saved');
+  assert.match(labels, /id="giveback"/, 'Give Back is kept');
+});
+
 // Front-end wiring (a string-level guard like the other front-end tests; the screens are checked in a real browser).
 test('front end: label pages under All assets, the catalog folded into All assets, the form label, and scans of our labels', () => {
   const fs = require('fs');

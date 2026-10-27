@@ -37,32 +37,57 @@ function allocateTag(db, prefix) { // call only inside a transaction
 
 // Labels printed before the asset exists (docs/briefs/labels-and-assets.md): Create labels, and Print label in the Add asset form.
 // `count` numbers are claimed from the same counter in ONE transaction (allocateTag: manually used tags skipped), so a printed label is
-// never issued to another asset. `prefix` is the `tag_prefix` setting, read by the caller. Returns the tags in order.
+// never issued to another asset. `prefix` is the `tag_prefix` setting, read by the caller. Returns the tags in order. The claim also
+// records the numbers it issued and the prefix they were issued under (issued_tag_ranges), because the prefix can change later while
+// the printed labels cannot: recognising a label (issuedTag) and giving a sheet back (releaseTags) read that record, never the current prefix.
 function claimTags(db, { prefix, count }) {
-  return db.transaction(() => Array.from({ length: count }, () => allocateTag(db, prefix)))();
+  return db.transaction(() => {
+    const tags = Array.from({ length: count }, () => allocateTag(db, prefix));
+    const nums = tags.map((t) => issuedNumber(prefix, t));
+    db.prepare('INSERT INTO issued_tag_ranges (prefix, first_number, last_number) VALUES (?, ?, ?)').run(prefix, Math.min(...nums), Math.max(...nums));
+    return tags;
+  })();
 }
+// The issued number `tag` stands for: its number when some claim issued exactly `<its prefix><number>` (any letter case), else null.
+const claimedNumber = (db, tag) => {
+  for (const r of db.prepare('SELECT prefix, first_number, last_number FROM issued_tag_ranges ORDER BY id DESC').all()) {
+    const n = issuedNumber(r.prefix, tag);
+    if (n !== null && n >= r.first_number && n <= r.last_number) return n;
+  }
+  return null;
+};
 // Create labels changed its mind (the sheet did not print, or is not wanted): give the numbers back so the next claim issues them again.
 // Only safe while they are the newest numbers and still unused, so ONE transaction checks that the counter still ends at the highest of
-// `tags`, that every tag parses as `<prefix><number>` and that no asset uses one, then lowers the counter to just below the lowest.
+// `tags`, that every tag was issued by a claim (under whatever prefix it had then, which may not be the current one) and that no asset
+// uses one, then lowers the counter to just below the lowest and trims the record to match. Claims never interleave (one transaction
+// each), so when the highest is still the counter's last, every number from the lowest up belongs to this sheet or to nobody.
 // Returns { released: true } or { released: false, reason }; nothing changes when refused.
-function releaseTags(db, { prefix, tags }) {
+function releaseTags(db, { tags }) {
   return db.transaction(() => {
-    const nums = tags.map((t) => issuedNumber(prefix, t));
+    const nums = tags.map((t) => claimedNumber(db, t));
     if (!nums.length || nums.includes(null)) return { released: false, reason: 'not_ours' };
     const last = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n;
     if (Math.max(...nums) !== last) return { released: false, reason: 'newer' };
-    if (tags.some((t) => tagExists(db, formatTag(prefix, issuedNumber(prefix, t))))) return { released: false, reason: 'used' };
-    db.prepare('UPDATE asset_tag_counter SET last_number = ? WHERE id = 1').run(Math.min(...nums) - 1);
+    if (tags.some((t) => tagExists(db, String(t).trim()))) return { released: false, reason: 'used' };
+    const low = Math.min(...nums);
+    db.prepare('UPDATE asset_tag_counter SET last_number = ? WHERE id = 1').run(low - 1);
+    db.prepare('DELETE FROM issued_tag_ranges WHERE first_number >= ?').run(low);
+    db.prepare('UPDATE issued_tag_ranges SET last_number = ? WHERE last_number >= ?').run(low - 1, low);
     return { released: true };
   })();
 }
-// `code` as one of our claimed, still unused labels: `<tag_prefix><the 5-digit number>` (any letter case), the number already issued by
-// the counter and no asset using it. Returns the tag as issued, else null. (A label printed under an earlier prefix is not recognised.)
+// `code` as one of our claimed, still unused labels: `<the prefix it was claimed under><the 5-digit number>` (any letter case), the
+// number recorded as issued by a claim and no asset using it. Returns the tag as printed, else null. Not the current prefix: a batch
+// printed before a prefix change stays recognised, and a code that only looks like one of ours (another prefix, or a number no claim
+// issued) is not.
 function issuedTag(db, code) {
-  const n = issuedNumber(getSettings(db).tag_prefix, code);
-  if (n === null || n > db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n) return null;
-  const tag = formatTag(getSettings(db).tag_prefix, n);
-  return tagExists(db, tag) ? null : tag;
+  for (const r of db.prepare('SELECT prefix, first_number, last_number FROM issued_tag_ranges ORDER BY id DESC').all()) {
+    const n = issuedNumber(r.prefix, code);
+    if (n === null || n < r.first_number || n > r.last_number) continue;
+    const tag = formatTag(r.prefix, n);
+    return tagExists(db, tag) ? null : tag;
+  }
+  return null;
 }
 // The number in `code` when it is exactly formatTag(prefix, n) ignoring letter case and surrounding spaces, else null (pure).
 function issuedNumber(prefix, code) {
@@ -139,9 +164,9 @@ function archiveAsset(db, id, { actorAccountId, reason }) {
 // ---- Slice 5B-4: the tag preview and the CSV import (extracted verbatim from server.js) ----
 
 // GET /api/next-tag. Preview only: consumes nothing (a blank-tag create claims a number inside its transaction, which may differ if others
-// create first). The `tag_prefix` setting is read here, as server.js `peekTag()` did.
-function peekTag(db) {
-  const prefix = getSettings(db).tag_prefix;
+// create first). The `tag_prefix` setting is read here, as server.js `peekTag()` did; `prefix` (Create labels' unsaved draft) previews that
+// prefix instead and still consumes nothing.
+function peekTag(db, prefix = getSettings(db).tag_prefix) {
   let n = db.prepare('SELECT last_number n FROM asset_tag_counter WHERE id = 1').get().n + 1;
   while (tagExists(db, formatTag(prefix, n))) n++;
   return formatTag(prefix, n);

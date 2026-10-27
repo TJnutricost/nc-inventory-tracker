@@ -686,6 +686,7 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
 .atools-row .dd { flex: 1 1 0; }
 .atools-row .dd > .btn { width: 100%; justify-content: space-between; }
 .atools-find .search { min-width: 0; }
+.atools-act { display: none; }
 .fchips { display: flex; gap: 8px; flex-wrap: wrap; }
 .fchips:empty { display: none; }
 .fchip { display: inline-flex; align-items: center; gap: 6px; background: var(--brand-accent-soft); border-color: var(--brand-accent); color: var(--brand-accent); }
@@ -699,6 +700,13 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
   #ddfilter-slot { order: 4; flex: none; }
   .atools-row .dd { flex: none; }
   .atools-row .dd > .btn { width: auto; justify-content: center; }
+  /* Add and the calendar move from the header row into the toolbar, after Filter; every control is the .btn height (44px) */
+  #headact { display: none; }
+  .atools-act { order: 5; display: flex; align-items: center; gap: 8px; flex: none; }
+  .atools-act .dd { flex: none; }
+  .atools-act .dd > .btn { min-height: 44px; }
+  .atools-find .search input { min-height: 44px; height: 44px; }
+  .atools-act .cal-btn { width: 44px; height: 44px; margin: 0; }
 }
 .fsheet { display: grid; gap: 6px; margin-top: 10px; }
 .fopt { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 48px; padding: 0 14px; border: 1px solid var(--line); border-radius: 11px; background: var(--surface); color: var(--text); font: inherit; font-weight: 600; cursor: pointer; text-align: left; }

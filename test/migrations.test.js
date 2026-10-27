@@ -153,3 +153,22 @@ test('a disableForeignKeys migration runs with enforcement off, is rejected if i
   assert.equal(db.prepare('SELECT COUNT(*) c FROM c').get().c, 0);
   assert.deepEqual(applied(db), [1]);
 });
+
+test('migration 18: the numbers issued so far are recorded under the prefix in force; a fresh database records nothing', () => {
+  const fresh = memDb();
+  runMigrations(fresh, migrations);
+  assert.equal(fresh.prepare('SELECT COUNT(*) c FROM issued_tag_ranges').get().c, 0);
+  const old = memDb();
+  runMigrations(old, migrations.filter((m) => m.id <= 17));
+  old.prepare("INSERT INTO settings (key, value) VALUES ('tag_prefix', 'IT-')").run();
+  old.prepare('UPDATE asset_tag_counter SET last_number = 120 WHERE id = 1').run();
+  runMigrations(old, migrations);
+  assert.deepEqual(old.prepare('SELECT prefix, first_number, last_number FROM issued_tag_ranges').all(), [{ prefix: 'IT-', first_number: 1, last_number: 120 }], 'one range, however high the counter is');
+  assert.equal(require('../src/assetRecords').issuedTag(old, 'it-00120'), 'IT-00120');
+  assert.equal(require('../src/assetRecords').issuedTag(old, 'IT-00121'), null, 'beyond the counter: never issued');
+  assert.equal(require('../src/assetRecords').issuedTag(old, 'NC-00005'), null, 'another prefix: not recorded, so not guessed');
+  const none = memDb();
+  runMigrations(none, migrations.filter((m) => m.id <= 17));
+  runMigrations(none, migrations);
+  assert.equal(none.prepare('SELECT COUNT(*) c FROM issued_tag_ranges').get().c, 0, 'a counter at 0 has issued nothing');
+});

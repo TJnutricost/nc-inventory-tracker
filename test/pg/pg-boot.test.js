@@ -93,8 +93,8 @@ describe('Slice 5D-1: the app on DB_DRIVER=pg', pgSuite(), () => {
 
   test('boot migrates the empty database before listening; SQLite is never opened', async () => {
     const { rows } = await tdb.pool.query('SELECT id FROM schema_migrations ORDER BY id');
-    assert.deepEqual(rows.map((r) => r.id), [1]);
-    assert.match(app.output(), /PostgreSQL: applied schema migration\(s\) 1/);
+    assert.deepEqual(rows.map((r) => r.id), [1, 2]);
+    assert.match(app.output(), /PostgreSQL: applied schema migration\(s\) 1, 2/);
     assert.match(app.output(), /database: PostgreSQL/);
     assert.equal(fs.existsSync(path.join(dataDir, 'assets.db')), false, 'no SQLite database file');
     assert.equal((await admin.get('/health')).status, 200);
