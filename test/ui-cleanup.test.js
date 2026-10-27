@@ -76,7 +76,9 @@ test('the service worker cache and asset versions were bumped', () => {
 
 test('appearance: System / Light / Dark through data-theme, stored in localStorage only, set before first paint', () => {
   const html = read('index.html');
-  assert.ok(html.indexOf("localStorage.getItem('nc-theme')") > 0 && html.indexOf("localStorage.getItem('nc-theme')") < html.indexOf('app.css'), 'the theme is applied before the stylesheet loads (no flash)');
+  // (a file, not inline, since the Content-Security-Policy allows no inline script)
+  assert.ok(html.indexOf('<script src="/theme.js"></script>') > 0 && html.indexOf('/theme.js') < html.indexOf('app.css'), 'the theme is applied before the stylesheet loads (no flash)');
+  assert.match(read('theme.js'), /localStorage\.getItem\('nc-theme'\)/);
   assert.match(src, /const THEMES = \[\['system', 'System'\], \['light', 'Light'\], \['dark', 'Dark'\]\];/);
   assert.match(src, /t === 'light' \|\| t === 'dark' \? t : 'system'/, 'System is the default');
   assert.doesNotMatch(src.slice(src.indexOf('const THEME_KEY'), src.indexOf('async function api(')), /fetch|api\(/, 'no API or database involved');

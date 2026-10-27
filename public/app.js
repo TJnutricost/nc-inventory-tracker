@@ -554,7 +554,17 @@ async function refreshBadge() {
 }
 const main = () => $('#main');
 const loading = () => { main().innerHTML = '<div class="spinner"></div>'; };
-const backLink = (href, label = 'Back', exact = false) => `<a class="back" href="${href}"${exact ? '' : ' onclick="if(history.length>1){history.back();return false}"'}>${icon('back')}${esc(label)}</a>`;
+const backLink = (href, label = 'Back', exact = false) => `<a class="back" href="${esc(href)}"${exact ? '' : ' data-hist'}>${icon('back')}${esc(label)}</a>`;
+// A non-exact Back goes back in the browser history when there is one, else follows its href. (A listener, not an inline onclick:
+// the Content-Security-Policy allows no inline script.)
+document.addEventListener('click', (e) => {
+  const a = e.target.closest && e.target.closest('a.back[data-hist]');
+  if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || history.length <= 1) return;
+  e.preventDefault();
+  history.back();
+});
+// A read-only link field selects all of itself on click, ready to copy.
+document.addEventListener('click', (e) => { const f = e.target.closest && e.target.closest('input[data-select-all]'); if (f) f.select(); });
 
 // ---- where an asset page was opened from ----
 // Every link to an asset page from a list that matters carries its origin in the hash (#/asset/44?src=catalog&node=11), so the
@@ -724,7 +734,7 @@ const GOOGLE_ERRORS = {
   too_many: 'Too many attempts. Try again in 15 minutes.',
 };
 async function viewLogin() {
-  try { const s = await api('GET', '/api/setup-needed'); if (s.needed) return go('#/setup'); } catch { /* */ }
+  try { const s = await api('GET', '/api/setup-needed'); if (s.needed && s.rule !== 'closed') return go('#/setup'); } catch { /* */ } // closed: the login page (Google can make the first admin)
   let google = false;
   try { google = (await api('GET', '/api/auth-options')).google; } catch { /* the password form still works */ }
   const code = new URLSearchParams((location.hash.split('?')[1] || '')).get('error');
@@ -769,7 +779,9 @@ function viewReset(token) {
 async function viewSetup() {
   const s = await api('GET', '/api/setup-needed');
   if (!s.needed) return go('#/login');
+  if (s.rule === 'closed') return authPanel(`<div><h2>Setup is turned off</h2><p class="muted small" style="margin:6px 0 0">This server has no accounts yet, and its first-run setup is off. Sign in with Google if your address is set up as an admin, or ask whoever runs the server for a setup code.</p></div><a class="btn primary lg block" href="#/login" style="margin-top:16px">Go to sign in</a>`);
   authPanel(`<form class="form-grid" id="f"><div><h2>Welcome! Let's get set up.</h2><p class="muted small" style="margin:6px 0 0">Create the first administrator account. You can invite everyone else afterwards.</p></div>
+    ${s.rule === 'code' ? '<label class="field"><span>Setup code</span><input name="setup_code" required autocomplete="off"></label>' : ''}
     <label class="field"><span>Your name</span><input name="name" required autocomplete="name"></label>
     <label class="field"><span>Work email</span><input name="email" type="email" required autocomplete="username"></label>
     <label class="field"><span>Password (8+ characters)</span><input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
@@ -2852,7 +2864,7 @@ async function viewPerson(id) {
   const inv = $('#invite');
   if (inv) inv.onclick = (e) => busy(e.currentTarget, async () => {
     const r = await api('POST', `/api/users/${u.id}/invite`, {});
-    if (r.link) sheet(`<h2>Email isn't set up yet</h2><p class="muted">Send this link to ${esc(u.name)} yourself. It expires in 7 days.</p><input readonly value="${esc(r.link)}" onclick="this.select()"><div class="sheet-actions"><button class="btn primary" data-close>Done</button></div>`);
+    if (r.link) sheet(`<h2>Email isn't set up yet</h2><p class="muted">Send this link to ${esc(u.name)} yourself. It expires in 7 days.</p><input readonly value="${esc(r.link)}" data-select-all><div class="sheet-actions"><button class="btn primary" data-close>Done</button></div>`);
     else toast('Email sent');
   });
   const t = $('#toggle');

@@ -144,7 +144,7 @@ test('an expired session is refused, and the purge deletes only expired sessions
   assert.equal((await me(live)).status, 200);
 });
 
-test('password change: a wrong current password changes nothing; afterwards only the new password signs in', async () => {
+test('password change: a wrong current password changes nothing; afterwards only the new password signs in, on a new session', async () => {
   const a = account(51);
   const cookie = await login(a.email);
   const wrong = await call('POST', '/api/me/password', { cookie, body: { current: 'not-it', password: 'brand-new-password-51' } });
@@ -155,10 +155,13 @@ test('password change: a wrong current password changes nothing; afterwards only
   assert.equal(ok.status, 200);
   assert.equal((await call('POST', '/api/login', { body: { email: a.email, password: PW } })).status, 401, 'the old password is dead');
   await login(a.email, { password: 'brand-new-password-51' });
-  assert.equal((await me(cookie)).status, 200, 'unchanged behavior: the session that changed the password stays signed in');
+  // (security hardening 2026-10-27) the browser that changed it stays signed in on a NEW session id; the old id and every other session are gone
+  assert.ok(ok.cookie && ok.cookie !== cookie);
+  assert.equal((await me(ok.cookie)).status, 200);
+  assert.equal((await me(cookie)).status, 401);
 });
 
-test('reset / invite tokens: a new one replaces the last, a reset uses up every token of the account, expired ones do nothing', async () => {
+test('reset / invite tokens: a new one replaces the last of its kind, a forgot link never replaces an invite, a reset uses up every token of the account, expired ones do nothing', async () => {
   const a = account(52);
   const tokens = () => db.prepare('SELECT token, purpose, expires_at FROM tokens WHERE user_id = ? ORDER BY token').all(a.id);
   assert.equal((await admin.post(`/api/users/${a.employeeId}/invite`, {})).status, 200);
@@ -169,13 +172,15 @@ test('reset / invite tokens: a new one replaces the last, a reset uses up every 
   assert.notEqual(invite2.token, invite1.token);
   assert.ok(Math.abs(Date.parse(invite2.expires_at) - (Date.now() + 7 * 864e5)) < 60e3, 'an invite lasts 7 days');
   assert.deepEqual((await call('POST', '/api/forgot', { body: { email: a.email } })).body, { ok: true });
-  const [reset] = tokens();
-  assert.equal(tokens().length, 1);
+  // (security hardening 2026-10-27) the forgot link has its own purpose: the pending invite stays valid beside it
+  const reset = tokens().find((t) => t.purpose === 'forgot');
+  assert.deepEqual(tokens().map((t) => t.purpose).sort(), ['forgot', 'reset']);
+  assert.ok(tokens().some((t) => t.token === invite2.token), 'the invite survives');
   assert.ok(Math.abs(Date.parse(reset.expires_at) - (Date.now() + 3600e3)) < 60e3, 'a reset link lasts 1 hour');
   db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('other-purpose-52', ?, 'other', ?)").run(a.id, reset.expires_at);
 
   const expiredLink = { error: 'This link has expired. Ask for a new one.' };
-  for (const t of [invite1.token, invite2.token]) assert.deepEqual((await call('POST', '/api/reset', { body: { token: t, password: 'replaced-password-52' } })).body, expiredLink, 'a replaced token is dead');
+  assert.deepEqual((await call('POST', '/api/reset', { body: { token: invite1.token, password: 'replaced-password-52' } })).body, expiredLink, 'a replaced token is dead');
   const used = await call('POST', '/api/reset', { body: { token: reset.token, password: 'reset-password-52' } });
   assert.equal(used.status, 200);
   assert.equal(JSON.parse(row(sidOf(used.cookie)).sess).uid, a.id, 'the reset signs the account in (stored before the answer)');
