@@ -108,10 +108,14 @@ async function createTestDatabase({ migrate = true, env = process.env } = {}) {
       if (dropped) return;
       dropped = true;
       // pool.end() waits for checked-out clients, so a test that leaked one would hang teardown. Start the ends, drop
-      // WITH (FORCE) (which terminates any remaining connection), then give the pools a moment to finish closing.
+      // WITH (FORCE) (which terminates any remaining connection), then give the pools a moment to finish closing. The timer
+      // is not unref'd: a pool still waiting on a terminated client holds nothing open, and an unref'd timer would let the
+      // event loop empty while drop() is pending (the test runner then cancels the test).
       const ending = Promise.all(pools.splice(0).map((p) => p.end().catch(() => {})));
       await dropTestDatabase(name, env);
-      await Promise.race([ending, new Promise((r) => setTimeout(r, 1000).unref())]);
+      let timer;
+      await Promise.race([ending, new Promise((r) => { timer = setTimeout(r, 1000); })]);
+      clearTimeout(timer);
     },
   };
   tdb.pool = tdb.newPool();

@@ -16,6 +16,21 @@ const pgTime = require('../src/pg/time');
 const FIXED = '2026-01-01 00:00:00';
 const STAMPED = ['created_at', 'updated_at', 'checked_out_at'];
 
+// A module that stamps "now" reads each engine's clock a moment apart, so the two stamps can straddle a second boundary.
+// Returns sq with every timestamp string that is within 2 s of its PostgreSQL counterpart replaced by that counterpart;
+// anything else (a different day, a missing stamp, any other value) is left as is for deepEqual to report.
+const STAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$/;
+function alignStamps(pg, sq) {
+  if (typeof pg === 'string' && typeof sq === 'string' && pg !== sq && STAMP.test(pg) && STAMP.test(sq)) {
+    return Math.abs(Date.parse(pg.replace(' ', 'T') + 'Z') - Date.parse(sq.replace(' ', 'T') + 'Z')) <= 2000 ? pg : sq;
+  }
+  if (Array.isArray(pg) && Array.isArray(sq)) return sq.map((v, i) => alignStamps(pg[i], v));
+  if (pg && sq && typeof pg === 'object' && typeof sq === 'object' && !Array.isArray(pg) && !Array.isArray(sq) && Object.getPrototypeOf(sq) === Object.prototype) {
+    return Object.fromEntries(Object.entries(sq).map(([k, v]) => [k, alignStamps(pg[k], v)]));
+  }
+  return sq;
+}
+
 // An outcome either way: { ok: value } or { error: { status, message } } (a non-HTTP error is rethrown: that is a bug).
 async function outcome(fn) {
   try {
@@ -93,7 +108,7 @@ async function createTwin(pool, { firstId = 100000 } = {}) {
         const pgOut = await outcome(() => pgFn(pool));
         const sqOut = await outcome(() => sqFn(sqlite));
         if (before !== await pgTime.today(pool) && attempt === 0) continue;
-        assert.deepEqual(pgOut, sqOut, label);
+        assert.deepEqual(pgOut, alignStamps(pgOut, sqOut), label);
         return pgOut;
       }
     },
