@@ -9,6 +9,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const bcrypt = require('bcryptjs');
 const { bootApp, startServer, stopServer, setupAdmin } = require('./helpers');
+const { hashToken } = require('../src/tokenHash');
 
 let server, db, base, admin, data;
 before(async () => {
@@ -174,24 +175,25 @@ test('reset / invite tokens: a new one replaces the last of its kind, a forgot l
   assert.deepEqual((await call('POST', '/api/forgot', { body: { email: a.email } })).body, { ok: true });
   // (security hardening 2026-10-27) the forgot link has its own purpose: the pending invite stays valid beside it
   const reset = tokens().find((t) => t.purpose === 'forgot');
+  const resetRaw = require('./helpers').inviteToken(db, a.id, 'forgot').token; // (tokens are stored hashed: swap in one the test knows)
   assert.deepEqual(tokens().map((t) => t.purpose).sort(), ['forgot', 'reset']);
   assert.ok(tokens().some((t) => t.token === invite2.token), 'the invite survives');
   assert.ok(Math.abs(Date.parse(reset.expires_at) - (Date.now() + 3600e3)) < 60e3, 'a reset link lasts 1 hour');
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('other-purpose-52', ?, 'other', ?)").run(a.id, reset.expires_at);
+  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'other', ?)").run(hashToken('other-purpose-52'), a.id, reset.expires_at);
 
   const expiredLink = { error: 'This link has expired. Ask for a new one.' };
   assert.deepEqual((await call('POST', '/api/reset', { body: { token: invite1.token, password: 'replaced-password-52' } })).body, expiredLink, 'a replaced token is dead');
-  const used = await call('POST', '/api/reset', { body: { token: reset.token, password: 'reset-password-52' } });
+  const used = await call('POST', '/api/reset', { body: { token: resetRaw, password: 'reset-password-52' } });
   assert.equal(used.status, 200);
   assert.equal(JSON.parse(row(sidOf(used.cookie)).sess).uid, a.id, 'the reset signs the account in (stored before the answer)');
   assert.deepEqual(tokens(), [], 'every token of the account is gone');
-  const again = await call('POST', '/api/reset', { body: { token: reset.token, password: 'second-use-password' } });
+  const again = await call('POST', '/api/reset', { body: { token: resetRaw, password: 'second-use-password' } });
   assert.equal(again.status, 400);
   assert.deepEqual(again.body, expiredLink, 'single use');
   await login(a.email, { password: 'reset-password-52' });
   assert.equal((await call('POST', '/api/login', { body: { email: a.email, password: PW } })).status, 401);
 
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('expired-52', ?, 'reset', ?)").run(a.id, new Date(Date.now() - 1000).toISOString());
+  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(hashToken('expired-52'), a.id, new Date(Date.now() - 1000).toISOString());
   const expired = await call('POST', '/api/reset', { body: { token: 'expired-52', password: 'never-applied-52' } });
   assert.deepEqual([expired.status, expired.body, expired.cookie], [400, expiredLink, undefined]);
   await login(a.email, { password: 'reset-password-52' }); // unchanged

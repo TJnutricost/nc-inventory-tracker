@@ -35,7 +35,7 @@ async function newAsset(extra = {}) {
 async function makeLogin(name) {
   const email = `seam${++seq}@nutricost.com`;
   const created = await admin.post('/api/users', { name, email, invite: true });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
+  const tok = require('./helpers').inviteToken(db, created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   const me = (await client.get('/api/me')).body;

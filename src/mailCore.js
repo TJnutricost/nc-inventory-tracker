@@ -16,6 +16,7 @@
 // templates.<name>(...) -> { to, subject, html }; the IT-wide notices (selfCheckoutToAdmins, droppedOff, equipmentRequested)
 // take the admin address list as their FIRST argument (the mailer reads it from the adapter, at call time).
 const T = require('./timeRange');
+const { redactTokenLinks } = require('./tokenHash');
 
 // nodemailer is loaded only when it is needed (an SMTP transport from the environment, or parsing MAIL_FROM), so loading the
 // PostgreSQL modules never loads a mail transport.
@@ -223,7 +224,7 @@ function createMailer(adapter, { awaitable = false } = {}) {
   // The envelope from the adapter's settings (a promise when the adapter is asynchronous).
   const mailEnvelope = () => { const s = adapter.getSettings(); return isThenable(s) ? s.then(envelopeFrom) : envelopeFrom(s); };
   // One outbox row through the adapter; awaited only when the adapter is asynchronous (a synchronous adapter records in step).
-  const record = (to_addr, subject, body, status, error, delivered_to) => adapter.record({ to_addr, subject, body, status, error, delivered_to });
+  const record = (to_addr, subject, body, status, error, delivered_to) => adapter.record({ to_addr, subject, body: redactTokenLinks(body), status, error, delivered_to });
 
   async function send(to, subject, html) {
     if (isThenable(to)) to = await to;

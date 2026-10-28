@@ -21,7 +21,7 @@ const mk = async (name, extra = {}) => { const r = await admin.post('/api/assets
 async function login(name) {
   const email = `sr${++seq}@nutricost.com`;
   const created = await admin.post('/api/users', { name, email, invite: true, department: 'Marketing' });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
+  const tok = require('./helpers').inviteToken(db, created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   return { client, id: created.body.id, name, email };

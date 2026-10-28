@@ -20,7 +20,7 @@ const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { 
 const DUE = '2099-01-01';
 async function makeLogin(name, { on = true } = {}) { // (the permission is turned on here, since new people start without it; `on: false` keeps the real default)
   const created = (await admin.post('/api/users', { name, email: `sc${++seq}@nutricost.com` })).body;
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.account_id);
+  const tok = require('./helpers').inviteToken(db, created.account_id);
   const c = makeClient(server);
   assert.equal((await c.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   if (on) await admin.put(`/api/users/${created.id}/self-checkout`, { enabled: true });

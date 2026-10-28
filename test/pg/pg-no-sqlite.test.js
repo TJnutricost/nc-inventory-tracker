@@ -56,7 +56,7 @@ test('src/pg/effects.js imports nothing but the transaction helpers (no mailer, 
 test('src/mailCore.js imports no database module: only the time helpers, and nodemailer lazily', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src', 'mailCore.js'), 'utf8');
   const required = [...src.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((m) => m[1]);
-  assert.deepEqual(required, ['./timeRange', 'nodemailer', 'nodemailer/lib/addressparser']);
+  assert.deepEqual(required, ['./timeRange', './tokenHash', 'nodemailer', 'nodemailer/lib/addressparser']);
   assert.match(src, /const nodemailer = \(\) => require\('nodemailer'\)/, 'nodemailer is required inside a function, not at load');
 });
 
@@ -77,7 +77,7 @@ const TWIN_REQUIRES = {
   'dashboard.js': ['./requests', './activityLog', './time'],
   'people.js': ['./reservations', '../people', './transaction'], // (./transaction: the 5C-3 writes)
   // Slice 5C-3
-  'accounts.js': ['./reservations', './transaction', './time'],
+  'accounts.js': ['./reservations', './transaction', './time', '../tokenHash'],
   'sessions.js': [],
   // Slice 5C-4
   'requestRecords.js': ['./requests', './assignments', './requestAccess', './transaction', './reservations', './activityLog'],

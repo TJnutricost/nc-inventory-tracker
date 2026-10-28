@@ -145,4 +145,14 @@ const asReservation = (res) => (res.status === 200 && res.body && res.body.reser
 // For tests that exercise SQLite itself (its modules called with the better-sqlite3 handle, its triggers, files, error text): `test(name, { skip: skipOnPg }, fn)`.
 const skipOnPg = isPg ? 'SQLite-specific: the PostgreSQL twin of this behaviour is covered by test/pg' : false;
 
-module.exports = { isPg, skipOnPg, bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation };
+// Reset / invitation tokens are stored hashed (src/tokenHash.js), so a test cannot read the raw token the app emailed: it swaps the account's
+// pending token for one it knows (same row: expiry and purpose are kept) and returns { token } like the old SELECT did.
+function inviteToken(db, accountId, purpose = 'reset') {
+  const { hashToken } = require('../src/tokenHash');
+  const token = require('crypto').randomBytes(24).toString('base64url');
+  const r = db.prepare('UPDATE tokens SET token = ? WHERE user_id = ? AND purpose = ?').run(hashToken(token), accountId, purpose);
+  if (r.changes !== 1) throw new Error(`no ${purpose} token pending for account ${accountId}`);
+  return { token };
+}
+
+module.exports = { isPg, skipOnPg, inviteToken, bootApp, startServer, stopServer, makeClient, setupAdmin, asReservation };

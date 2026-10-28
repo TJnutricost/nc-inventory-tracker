@@ -27,7 +27,7 @@ async function loginAs(email, password) {
 }
 async function withLogin(name, email, role = 'employee') {
   const created = (await admin.post('/api/users', { name, email, role, invite: true })).body;
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.account_id);
+  const tok = require('./helpers').inviteToken(db, created.account_id);
   const c = makeClient(server);
   await c.post('/api/reset', { token: tok.token, password: 'employee-password-1' });
   return { c, person: created };
@@ -238,7 +238,8 @@ test('pre-1D database: every user becomes one employee + one linked account with
   assert.equal(d.prepare('SELECT uploaded_by FROM photos').get().uploaded_by, 2);
   assert.deepEqual({ ...d.prepare('SELECT user_id, created_by, resolved_by FROM requests').get() }, { user_id: 2, created_by: 2, resolved_by: 1 });
   assert.deepEqual({ ...d.prepare('SELECT actor_id, subject_user_id FROM activity').get() }, { actor_id: 1, subject_user_id: 2 });
-  assert.equal(d.prepare("SELECT user_id FROM tokens WHERE token = 'tok123'").get().user_id, 2);
+  assert.equal(d.prepare('SELECT user_id FROM tokens WHERE token = ?').get(require('../src/tokenHash').hashToken('tok123')).user_id, 2, 'an outstanding token survives, now stored as its hash');
+  assert.equal(d.prepare("SELECT COUNT(*) c FROM tokens WHERE token = 'tok123'").get().c, 0, 'the raw token is no longer stored');
   assert.equal(d.prepare('SELECT sess FROM sessions').get().sess, '{"uid":2}', 'existing sessions untouched, and uid still names the same account');
   assert.equal(d.pragma('foreign_key_check').length, 0);
   assert.equal(d.pragma('foreign_keys', { simple: true }), 1);
