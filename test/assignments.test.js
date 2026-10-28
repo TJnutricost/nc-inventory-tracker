@@ -92,6 +92,7 @@ test('an unknown assignment type is rejected and nothing is assigned', async () 
 
 async function makeLogin(name, email) {
   const created = (await admin.post('/api/users', { name, email })).body;
+  await admin.put(`/api/users/${created.id}/self-checkout`, { enabled: true }); // (new people start with self-checkout OFF)
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.account_id);
   const c = makeClient(server);
   assert.equal((await c.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);

@@ -55,7 +55,7 @@ async function currentUser(q, uid) {
   if (!uid) return null;
   return (await one(q, `
     SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
-      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
+      COALESCE(e.name, a.login_email) AS name, e.first_name, e.last_name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
     FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.id = $1 AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`, [toId(uid)])) || null;
 }
@@ -64,10 +64,10 @@ async function currentUser(q, uid) {
 const accountCount = async (q) => (await one(q, 'SELECT COUNT(*) AS c FROM accounts')).c;
 // The first admin: one employee (department IT) and its admin account, one transaction, serialized against any other setup (above).
 // Returns the account id (the new session's uid).
-const createFirstAdmin = async (q, { name, mail, hash }) => inTransaction(q, async (c) => {
+const createFirstAdmin = async (q, { name, firstName = null, lastName = null, mail, hash }) => inTransaction(q, async (c) => {
   await c.query('SELECT pg_advisory_xact_lock($1)', [SETUP_LOCK_KEY]);
   if ((await accountCount(c)) > 0) throw httpError(400, SETUP_DONE);
-  const emp = (await one(c, "INSERT INTO employees (name, work_email, department) VALUES ($1, $2, 'IT') RETURNING id", [name, mail])).id;
+  const emp = (await one(c, "INSERT INTO employees (name, first_name, last_name, work_email, department) VALUES ($1, $2, $3, $4, 'IT') RETURNING id", [name, firstName, lastName, mail])).id;
   return (await one(c, "INSERT INTO accounts (employee_id, login_email, password_hash, role) VALUES ($1, $2, $3, 'admin') RETURNING id", [emp, mail, hash])).id;
 });
 
@@ -90,7 +90,7 @@ async function provisionGoogleAccount(q, { email, name }) {
         WHERE lower(e.work_email) = lower($1 COLLATE "C") FOR UPDATE OF e`, [email]);
       if (e && e.account_id) return e.status === 'active' && e.active === 1 ? e.account_id : null;
       if ((e && e.status !== 'active') || await one(c, 'SELECT 1 FROM accounts WHERE lower(login_email) = lower($1 COLLATE "C")', [email])) return null;
-      const emp = e ? e.id : (await one(c, 'INSERT INTO employees (name, work_email) VALUES ($1, $2) RETURNING id', [name, email])).id;
+      const emp = e ? e.id : (await one(c, 'INSERT INTO employees (name, work_email, can_self_checkout) VALUES ($1, $2, 0) RETURNING id', [name, email])).id;
       return (await one(c, "INSERT INTO accounts (employee_id, login_email, role) VALUES ($1, $2, 'employee') RETURNING id", [emp, email])).id;
     });
   } catch (err) {

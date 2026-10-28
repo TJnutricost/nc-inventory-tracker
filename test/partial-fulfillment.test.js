@@ -26,6 +26,7 @@ const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/
 async function makeLogin(name) {
   const email = `pf${++seq}@nutricost.com`;
   const created = await admin.post('/api/users', { name, email, invite: true, department: 'Marketing' });
+  await admin.put(`/api/users/${created.body.id}/self-checkout`, { enabled: true }); // (new people start with self-checkout OFF)
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);

@@ -10,7 +10,7 @@ function currentUser(db, uid) {
   if (!uid) return null;
   return db.prepare(`
     SELECT a.id AS account_id, a.employee_id, a.role, a.login_email AS email, a.password_hash, a.last_login_at,
-      COALESCE(e.name, a.login_email) AS name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
+      COALESCE(e.name, a.login_email) AS name, e.first_name, e.last_name, e.department, e.title, e.phone, e.building, e.created_at, COALESCE(e.can_self_checkout, 0) AS can_self_checkout
     FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(uid) || null;
 }
@@ -19,9 +19,9 @@ function currentUser(db, uid) {
 const accountCount = (db) => db.prepare('SELECT COUNT(*) c FROM accounts').get().c;
 // The first admin: one employee (department IT) and its admin account, one transaction. `name` is cleaned and `email` normalized by the
 // route; `hash` is the bcrypt hash. Returns the account id (the new session's uid).
-function createFirstAdmin(db, { name, mail, hash }) {
+function createFirstAdmin(db, { name, firstName = null, lastName = null, mail, hash }) {
   return db.transaction(() => {
-    const emp = db.prepare("INSERT INTO employees (name, work_email, department) VALUES (?, ?, 'IT')").run(name, mail).lastInsertRowid;
+    const emp = db.prepare("INSERT INTO employees (name, first_name, last_name, work_email, department) VALUES (?, ?, ?, ?, 'IT')").run(name, firstName, lastName, mail).lastInsertRowid;
     return db.prepare("INSERT INTO accounts (employee_id, login_email, password_hash, role) VALUES (?, ?, ?, 'admin')").run(emp, mail, hash).lastInsertRowid;
   })();
 }
@@ -45,7 +45,7 @@ function provisionGoogleAccount(db, { email, name }) {
       WHERE e.work_email = ?`).get(email);
     if (e && e.account_id) return e.status === 'active' && e.active === 1 ? e.account_id : null;
     if ((e && e.status !== 'active') || db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) return null;
-    const emp = e ? e.id : db.prepare('INSERT INTO employees (name, work_email) VALUES (?, ?)').run(name, email).lastInsertRowid;
+    const emp = e ? e.id : db.prepare('INSERT INTO employees (name, work_email, can_self_checkout) VALUES (?, ?, 0)').run(name, email).lastInsertRowid; // (self-checkout, and so the scanner, is never granted by signing in)
     return db.prepare("INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, 'employee')").run(emp, email).lastInsertRowid;
   })();
 }

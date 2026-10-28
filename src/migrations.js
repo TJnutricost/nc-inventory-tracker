@@ -870,5 +870,42 @@ module.exports = [
       }
     },
   },
+  {
+    // Real first / last names, and a safe self-checkout default (owner decisions 2026-10-28).
+    //   first_name, last_name  nullable, additive. `name` stays (the display name every consumer still reads). Existing rows keep both
+    //                          NULL: full names are never split automatically; a person gets them when IT edits them or an import supplies them.
+    //   can_self_checkout      the column DEFAULT becomes 0: a person created by any path that does not say otherwise starts without
+    //                          self-checkout (and so without the scanner). Existing rows keep the value they have.
+    // SQLite cannot change a column default in place, so employees is rebuilt (ids, AUTOINCREMENT mark, index and every value kept).
+    id: 19,
+    name: 'employees: first_name and last_name; can_self_checkout defaults to 0',
+    disableForeignKeys: true,
+    up: (db) => {
+      const seq = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'employees'").get();
+      db.exec(`
+        CREATE TABLE employees_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          work_email TEXT COLLATE NOCASE,
+          department TEXT,
+          title TEXT,
+          phone TEXT,
+          status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','inactive')),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          can_self_checkout INTEGER NOT NULL DEFAULT 0 CHECK (can_self_checkout IN (0,1)),
+          building TEXT,
+          first_name TEXT,
+          last_name TEXT
+        );
+        INSERT INTO employees_new (id, name, work_email, department, title, phone, status, created_at, can_self_checkout, building)
+          SELECT id, name, work_email, department, title, phone, status, created_at, can_self_checkout, building FROM employees;
+        DROP TABLE employees;
+        ALTER TABLE employees_new RENAME TO employees;
+        CREATE UNIQUE INDEX idx_employees_work_email ON employees(work_email) WHERE work_email IS NOT NULL;`);
+      if (seq && !db.prepare("UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'employees'").run(seq.seq).changes) {
+        db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('employees', ?)").run(seq.seq);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

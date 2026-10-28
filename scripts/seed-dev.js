@@ -19,20 +19,20 @@ const DEV_DATA_DIR = path.join(ROOT, 'data-dev');
 const DEV_PASSWORD = 'DevPass!2026';
 const DEV_APP_URL = 'http://localhost:3179';
 
-const ADMIN = { name: 'Dana Ito', email: 'dana.ito@example.com', department: 'IT', title: 'IT Manager' };
+const ADMIN = { name: 'Dana Ito', first_name: 'Dana', last_name: 'Ito', email: 'dana.ito@example.com', department: 'IT', title: 'IT Manager' };
 
 const USERS = [
-  { name: 'Bailey Brooks', email: 'bailey.brooks@example.com', department: 'Marketing', title: 'Content Manager', building: 'Building 4' },
-  { name: 'Casey Chen', email: 'casey.chen@example.com', department: 'Sales', title: 'Account Executive' },
-  { name: 'Dakota Diaz', email: 'dakota.diaz@example.com', department: 'Engineering', title: 'Software Engineer' },
-  { name: 'Emerson Ellis', email: 'emerson.ellis@example.com', department: 'Finance', title: 'Staff Accountant' },
-  { name: 'Finley Flores', email: 'finley.flores@example.com', department: 'Customer Support', title: 'Support Specialist' },
-  { name: 'Gray Garcia', email: 'gray.garcia@example.com', department: 'Engineering', title: 'QA Engineer' },
-  { name: 'Harper Hughes', email: 'harper.hughes@example.com', department: 'Operations', title: 'Warehouse Lead', building: 'Warehouse 2' },
-  { name: 'Indigo Ibarra', email: 'indigo.ibarra@example.com', department: 'Marketing', title: 'Designer' },
+  { name: 'Bailey Brooks', first_name: 'Bailey', last_name: 'Brooks', email: 'bailey.brooks@example.com', department: 'Marketing', title: 'Content Manager', building: 'Building 4' },
+  { name: 'Casey Chen', first_name: 'Casey', last_name: 'Chen', email: 'casey.chen@example.com', department: 'Sales', title: 'Account Executive' },
+  { name: 'Dakota Diaz', first_name: 'Dakota', last_name: 'Diaz', email: 'dakota.diaz@example.com', department: 'Engineering', title: 'Software Engineer' },
+  { name: 'Emerson Ellis', first_name: 'Emerson', last_name: 'Ellis', email: 'emerson.ellis@example.com', department: 'Finance', title: 'Staff Accountant' },
+  { name: 'Finley Flores', first_name: 'Finley', last_name: 'Flores', email: 'finley.flores@example.com', department: 'Customer Support', title: 'Support Specialist' },
+  { name: 'Gray Garcia', first_name: 'Gray', last_name: 'Garcia', email: 'gray.garcia@example.com', department: 'Engineering', title: 'QA Engineer' },
+  { name: 'Harper Hughes', first_name: 'Harper', last_name: 'Hughes', email: 'harper.hughes@example.com', department: 'Operations', title: 'Warehouse Lead', building: 'Warehouse 2' },
+  { name: 'Indigo Ibarra', first_name: 'Indigo', last_name: 'Ibarra', email: 'indigo.ibarra@example.com', department: 'Marketing', title: 'Designer' },
 ];
 // An employee who exists only as an equipment assignee: no login account is ever created for them.
-const NO_LOGIN_EMPLOYEE = { name: 'Jules Jaramillo', email: 'jules.jaramillo@example.com', department: 'Warehouse', title: 'Forklift Operator', login: false };
+const NO_LOGIN_EMPLOYEE = { name: 'Jules Jaramillo', first_name: 'Jules', last_name: 'Jaramillo', email: 'jules.jaramillo@example.com', department: 'Warehouse', title: 'Forklift Operator', login: false };
 
 const LOCATIONS = ['HQ - IT Room', 'HQ - Office', 'Warehouse', 'Remote'];
 const CONDITIONS = ['New', 'Excellent', 'Good', 'Fair', 'Poor', 'Broken'];
@@ -281,11 +281,12 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     const admin = makeClient(server);
     const resetClient = makeClient(server);
 
-    await admin.post('/api/setup', { name: ADMIN.name, email: ADMIN.email, password: DEV_PASSWORD });
+    await admin.post('/api/setup', { first_name: ADMIN.first_name, last_name: ADMIN.last_name, email: ADMIN.email, password: DEV_PASSWORD });
 
     const createdUsers = [];
     for (const u of USERS) {
       createdUsers.push(await admin.post('/api/users', u));
+      await admin.put(`/api/users/${createdUsers[createdUsers.length - 1].id}/self-checkout`, { enabled: true }); // (new people start with it OFF; the dev data turns it on, Harper's off again below)
     }
     for (const u of createdUsers) {
       const invite = await admin.post(`/api/users/${u.id}/invite`, {});
@@ -294,6 +295,7 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     }
 
     const jules = await admin.post('/api/users', NO_LOGIN_EMPLOYEE);
+    await admin.put(`/api/users/${jules.id}/self-checkout`, { enabled: true });
 
     // Catalog: walk CATALOG, creating nodes below the (migration-created) roots, and remember the node for each model key.
     const existing = await admin.get('/api/catalog');
@@ -338,7 +340,7 @@ async function seedDatabase({ dataDir = DEV_DATA_DIR, quiet = false } = {}) {
     const [bailey, casey, dakota, emerson, finley, , harper, indigo] = createdUsers;
     const gray = createdUsers[5];
 
-    // Self-checkout is per employee and defaults ON; Harper's is revoked so both behaviors are testable without touching Settings.
+    // Self-checkout is per employee and starts OFF and the dev data turns it on; Harper's is revoked again so both behaviors are testable without touching Settings.
     await admin.put(`/api/users/${harper.id}/self-checkout`, { enabled: false });
 
     // Permanent everyday equipment (bailey: laptop + monitor + a software seat below) and temporary checkouts

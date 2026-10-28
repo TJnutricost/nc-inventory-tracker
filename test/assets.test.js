@@ -16,6 +16,7 @@ after(() => stopServer(server));
 // by reading the invite token straight out of the DB (no email transport in tests).
 async function makeEmployee(name, email) {
   const created = await admin.post('/api/users', { name, email, role: 'user', invite: true });
+  await admin.put(`/api/users/${created.body.id}/self-checkout`, { enabled: true }); // (new people start with self-checkout OFF)
   assert.equal(created.status, 200, JSON.stringify(created.body));
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.id);
   const c = makeClient(server);
