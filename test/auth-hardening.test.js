@@ -10,6 +10,8 @@ let server; let db;
 const base = () => `http://127.0.0.1:${server.address().port}`;
 const sid = (res) => (res.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).find((c) => c.startsWith('nc_assets=')) || null;
 // GET /api/me with a given cookie (a browser that kept an old session id)
+// express-session holds back the last byte of a response until the session is saved, and fetch() resolves on the headers: read the whole
+// body (`await r.text()`) before using a new cookie, or the next request can overtake the (asynchronous, PostgreSQL) session write.
 const meWith = async (cookie) => (await fetch(base() + '/api/me', { headers: { Cookie: cookie } })).status;
 const signIn = async (email, password) => {
   const c = makeClient(server);
@@ -30,6 +32,7 @@ test('setup signs the first admin in on a session id the browser did not choose'
   const r = await fetch(base() + '/api/setup', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch', Cookie: pre },
     body: JSON.stringify({ name: 'Ada Admin', email: 'ada@nutricost.com', password: 'correct-horse-1' }) });
   assert.equal(r.status, 200);
+  await r.text();
   const got = sid(r);
   assert.ok(got && got !== pre);
   assert.equal(await meWith(got), 200);
@@ -60,6 +63,7 @@ test('a reset signs in on a new session id and signs out every other session of 
   const r = await fetch(base() + '/api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch', Cookie: pre },
     body: JSON.stringify({ token, password: 'reset-horse-4' }) });
   assert.equal(r.status, 200);
+  await r.text();
   assert.ok(sid(r) && sid(r) !== pre);
   assert.equal(await meWith(sid(r)), 200, 'signed in by the reset');
   assert.equal(await meWith(other.cookie), 401, 'the other session is signed out');
