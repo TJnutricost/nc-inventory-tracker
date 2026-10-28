@@ -25,10 +25,10 @@ const loginEmailTakenByOther = (db, email, exceptAccountId) => db.prepare('SELEC
 
 // POST /api/users: the employee and, when `wantsLogin`, its linked account (no password: the invite sets it), one transaction. The
 // fields are cleaned by the route. Returns the new employee id.
-function createPerson(db, { name, email, department, title, phone, building, wantsLogin, role }) {
+function createPerson(db, { name, firstName = null, lastName = null, email, department, title, phone, building, wantsLogin, role }) {
   return db.transaction(() => {
-    const empId = db.prepare('INSERT INTO employees (name, work_email, department, title, phone, building) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(name, email, department, title, phone, building).lastInsertRowid;
+    const empId = db.prepare('INSERT INTO employees (name, first_name, last_name, work_email, department, title, phone, building, can_self_checkout) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)')
+      .run(name, firstName, lastName, email, department, title, phone, building).lastInsertRowid;
     if (wantsLogin) db.prepare('INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, ?)').run(empId, email, role);
     return empId;
   })();
@@ -57,10 +57,10 @@ function personAssignments(db, id) {
 
 // PUT /api/users/:id: the person and, when they have one (`accountId`), their account, one transaction. The values are worked out and
 // validated by the route (`active` is a boolean). Nothing here deletes a person; signing a deactivated account out is sessions.js.
-function updatePerson(db, { id, name, workEmail, department, title, phone, building, active, accountId, loginEmail, role }) {
+function updatePerson(db, { id, name, firstName = null, lastName = null, workEmail, department, title, phone, building, active, accountId, loginEmail, role }) {
   db.transaction(() => {
-    db.prepare('UPDATE employees SET name = ?, work_email = ?, department = ?, title = ?, phone = ?, building = ?, status = ? WHERE id = ?')
-      .run(name, workEmail, department, title, phone, building, active ? 'active' : 'inactive', id);
+    db.prepare('UPDATE employees SET name = ?, first_name = ?, last_name = ?, work_email = ?, department = ?, title = ?, phone = ?, building = ?, status = ? WHERE id = ?')
+      .run(name, firstName, lastName, workEmail, department, title, phone, building, active ? 'active' : 'inactive', id);
     if (accountId) db.prepare('UPDATE accounts SET login_email = ?, role = ?, active = ? WHERE id = ?').run(loginEmail, role, active ? 1 : 0, accountId);
   })();
 }
@@ -70,9 +70,9 @@ function setSelfCheckout(db, id, enabled) { db.prepare('UPDATE employees SET can
 
 // PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the fields are cleaned
 // by the route.
-function updateOwnProfile(db, employeeId, { name, phone, department, title, building }) {
-  db.prepare('UPDATE employees SET name = COALESCE(?, name), phone = ?, department = ?, title = ?, building = ? WHERE id = ?')
-    .run(name, phone, department, title, building, employeeId);
+function updateOwnProfile(db, employeeId, { name, firstName = null, lastName = null, phone, department, title, building }) {
+  db.prepare('UPDATE employees SET name = COALESCE(?, name), first_name = COALESCE(?, first_name), last_name = COALESCE(?, last_name), phone = ?, department = ?, title = ?, building = ? WHERE id = ?')
+    .run(name, firstName, lastName, phone, department, title, building, employeeId);
 }
 
 // POST /api/requests: the status of the person a request is for ({ status }, or undefined when there is no such employee).

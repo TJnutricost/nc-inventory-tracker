@@ -7,6 +7,8 @@ const $$ = (s, el = document) => Array.from(el.querySelectorAll(s));
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const S = { me: null, settings: null, mailConfigured: false, shell: false };
 const isAdmin = () => S.me && S.me.role === 'admin';
+// The scanner (and its camera) is for IT and for employees with the self-checkout permission; the server enforces it too (403).
+const canScan = () => !!S.me && (S.me.role === 'admin' || !!S.me.can_self_checkout);
 const localToday = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
 const addDays = (n) => { const d = new Date(Date.now() + n * 864e5); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
 const parseDT = (s) => (!s ? null : s.length === 10 ? new Date(s + 'T12:00:00') : new Date(s.replace(' ', 'T') + 'Z'));
@@ -319,6 +321,7 @@ let activeScanner = null;
 let scanChain = Promise.resolve(); // every scanner's start / stop, one after another: a new camera never starts while the previous one is still being released
 let scanSeq = 0;
 function openScanner({ title = 'Scan a barcode', hint = 'Point the camera at the barcode or QR code', onResult }) {
+  if (!canScan()) return; // never start the camera for someone without scanner access
   if (activeScanner) activeScanner.close();
   const readerId = 'qr-reader-' + (++scanSeq); // unique per overlay: the old one may still be on screen while it is released
   const wrap = document.createElement('div');
@@ -441,7 +444,7 @@ function navItems() {
   const common = [
     { key: 'home', href: '#/home', label: 'Home', icon: 'home' },
     { key: 'assets', href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse', icon: 'box' },
-    { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan', scan: true },
+    ...(canScan() ? [{ key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan', scan: true }] : []),
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
     { key: 'account', href: '#/account', label: 'Profile', icon: 'user' }, // the signed-in person (My equipment / History / My profile / Sign out)
   ];
@@ -452,7 +455,7 @@ function navItems() {
     // IT's labels live under All assets (docs/briefs/labels-and-assets.md): reprint for saved assets, or numbered blanks before them
     ...(isAdmin() ? [{ key: 'labels', href: '#/labels', label: 'Print labels', icon: 'printer', sub: true }, { key: 'labels-new', href: '#/labels/new', label: 'Create labels', icon: 'plus', sub: true },
       { key: 'locations', href: '#/locations', label: 'Locations', icon: 'pin', sub: true }] : []),
-    { key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan' },
+    ...(canScan() ? [{ key: 'scan', href: '#/scan', label: 'Scan', icon: 'scan' }] : []),
     { key: 'requests', href: '#/requests', label: 'Requests', icon: 'inbox', badge: req },
     ...(isAdmin() ? [] : [{ key: 'history', href: '#/history', label: 'History', icon: 'history' }]),
   ];
@@ -499,7 +502,7 @@ function mountShell() {
       ${isAdmin() ? `<button type="button" class="iconbtn nav-toggle" id="nav-toggle" aria-label="Open administration menu" aria-haspopup="dialog">${icon('menu')}</button>` : ''}
       <a href="#/home" class="row" style="gap:10px"><img src="/logo-white.png" alt="Nutricost" class="logo"><span class="app-name">${isAdmin() ? 'IT Admin' : 'Employee Portal'}</span></a>
       <span class="spacer"></span>
-      <a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>
+      ${canScan() ? `<a href="#/scan" class="iconbtn desk-only" title="Scan">${icon('scan')}</a>` : ''}
       <div class="menu-wrap"><button type="button" class="avatar sm" id="avatar-btn" aria-haspopup="menu" aria-expanded="false" title="${esc(S.me.name)}" style="background:var(--brand-accent);border:0;cursor:pointer">${esc(initials(S.me.name))}</button>
         <div class="menu" id="avatar-menu" role="menu" hidden><div class="menu-who"><strong>${esc(S.me.name)}</strong><div class="small muted">${esc(S.me.email || '')}</div></div>
           <a href="#/profile" role="menuitem">${icon('user')} My profile</a>${isAdmin() ? `<a href="#/settings" role="menuitem">${icon('settings')} Settings</a>` : ''}<button type="button" role="menuitem" id="signout">${icon('logout')} Sign out</button></div></div>
@@ -624,7 +627,7 @@ const ROUTES = [
   [/^#\/asset\/(\d+)$/, viewAsset, { key: 'assets' }],
   [/^#\/asset\/(\d+)\/edit$/, viewAssetForm, { key: 'assets', admin: true }],
   [/^#\/new$/, viewAssetForm, { key: 'assets', admin: true }],
-  [/^#\/scan$/, viewScan, { key: 'scan' }],
+  [/^#\/scan$/, viewScan, { key: 'scan', scan: true }],
   [/^#\/requests$/, viewRequests, { key: 'requests' }],
   [/^#\/calendar$/, viewCalendar, { key: 'calendar' }],
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
@@ -696,6 +699,7 @@ async function route(silent) {
     }
     if (opt.admin && !isAdmin()) return go('#/home');
     if (opt.employee && isAdmin()) return go('#/home'); // the admin's own equipment stays on their Home
+    if (opt.scan && !canScan()) return go('#/home'); // direct navigation to the scanner without access
     if (!S.shell) { mountShell(); refreshBadge(); }
     noteNavigation(location.hash || '#/home'); // (before the spinner replaces the page being left: its title names the way back)
     setActive(opt.key);
@@ -787,7 +791,7 @@ async function viewSetup() {
   if (s.rule === 'closed') return authPanel(`<div><h2>Setup is turned off</h2><p class="muted small" style="margin:6px 0 0">This server has no accounts yet, and its first-run setup is off. Sign in with Google if your address is set up as an admin, or ask whoever runs the server for a setup code.</p></div><a class="btn primary lg block" href="#/login" style="margin-top:16px">Go to sign in</a>`);
   authPanel(`<form class="form-grid" id="f"><div><h2>Welcome! Let's get set up.</h2><p class="muted small" style="margin:6px 0 0">Create the first administrator account. You can invite everyone else afterwards.</p></div>
     ${s.rule === 'code' ? '<label class="field"><span>Setup code</span><input name="setup_code" required autocomplete="off"></label>' : ''}
-    <label class="field"><span>Your name</span><input name="name" required autocomplete="name"></label>
+    <div class="form-grid cols"><label class="field"><span>First name</span><input name="first_name" required autocomplete="given-name"></label><label class="field"><span>Last name</span><input name="last_name" required autocomplete="family-name"></label></div>
     <label class="field"><span>Work email</span><input name="email" type="email" required autocomplete="username"></label>
     <label class="field"><span>Password (8+ characters)</span><input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
     <button class="btn primary lg block">Create admin account</button></form>`);
@@ -842,7 +846,7 @@ async function viewHome() {
   if (!isAdmin()) {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
       <div class="stack">${returnBanners(d.mine, 'home')}
-      <div class="actions"><a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a><button class="btn lg" id="req">${icon('plus')} Request</button></div>
+      <div class="actions">${canScan() ? `<a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a>` : ''}<button class="btn ${canScan() ? '' : 'primary '}lg" id="req">${icon('plus')} Request</button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
       ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('box')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${reqPill(r)}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
@@ -929,7 +933,7 @@ async function viewBrowse() {
   main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">Browse equipment</h1><span id="headact"></span></div>
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search camera, laptop, brand, model, tag…" value="${esc(st.q)}" enterkeyhint="search"></div>
-        <button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button></div>
+        ${canScan() ? `<button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button>` : ''}</div>
       <p class="small muted" style="margin:0">Shared equipment. Something checked out or reserved right now is still listed: open it to see when it is free.</p>
       <div id="bn"></div>
       <div class="card" id="results" hidden></div>
@@ -1001,7 +1005,7 @@ async function viewBrowse() {
   $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
   S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
   $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
-  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
+  if ($('#scanbtn')) $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   $('#reqfoot [data-reqit]').onclick = () => requestEquipmentSheet(); // the same request flow as before (the empty-state button is wired when the list renders)
   fromHash(); go2();
 }
@@ -2789,7 +2793,7 @@ async function viewCalendar() {
 async function viewPeople() {
   const users = await api('GET', '/api/users');
   usersCache = users.filter((u) => u.active);
-  main().innerHTML = `<div class="page-head"><h1>People</h1><button class="btn primary" id="add">${icon('plus')} Add person</button></div>
+  main().innerHTML = `<div class="page-head"><h1>People</h1><div class="row" style="gap:8px"><button class="btn" id="imp">${icon('upload')} Import CSV</button><button class="btn primary" id="add">${icon('plus')} Add person</button></div></div>
     <div class="stack"><div class="search">${icon('search')}<input id="q" type="search" placeholder="Search by name, email or department"></div>
     <div class="card" id="list"></div></div>`;
   const render = (q = '') => {
@@ -2803,12 +2807,70 @@ async function viewPeople() {
   render();
   $('#q').oninput = (e) => render(e.target.value.trim());
   $('#add').onclick = () => personSheet(null, (u) => go('#/person/' + u.id));
+  $('#imp').onclick = () => employeeImportSheet(() => go('#/people'));
+}
+
+// Employee CSV import (docs/briefs/employee-csv-import.md): choose a file, see what would change, confirm. The server recomputes the plan when
+// importing, so the file is simply sent again; nothing is kept between the two steps.
+const IMPORT_ACTION = { create: 'New', update: 'Update', unchanged: 'Unchanged', invalid: 'Left out', duplicate: 'Left out', conflict: 'Left out' };
+const IMPORT_FIELD = { first_name: 'First name', last_name: 'Last name', name: 'Display name', department: 'Department', title: 'Job title', phone: 'Phone', building: 'Location' };
+function csvDownload(name, rows) { // (a cell that starts like a formula is neutralized, as in the asset export)
+  const cellText = (v) => { const t = String(v ?? ''); const safe = /^[=+\-@]/.test(t) ? "'" + t : t; return /[",\n\r]/.test(safe) ? '"' + safe.replace(/"/g, '""') + '"' : safe; };
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([rows.map((r) => r.map(cellText).join(',')).join('\r\n')], { type: 'text/csv' })); a.download = name; a.click();
+}
+function employeeImportSheet(done) {
+  const { el, close } = sheet(`<h2>Import employees from CSV</h2>
+    <div id="imp-body" class="stack" style="margin-top:12px">
+      <p class="muted" style="margin:0">Add or update many people at once. <strong>first_name</strong>, <strong>last_name</strong> and <strong>work_email</strong> are required (first and last name are always separate columns; a combined name column is refused); department, job_title, location and phone are optional. Any other column is refused. People already in the system are matched by work email and only get blank-safe updates.</p>
+      <p class="small muted" style="margin:0">Imported people can sign in with their Google work account (no invite needed) and request equipment. They start <strong>without</strong> self-checkout or scanner access; turn it on per person under People. Importing never grants admin, never deactivates anyone, and never changes assignments or history.</p>
+      <div class="row wrap"><a class="btn" href="/api/import/employees/template.csv" download>${icon('download')} Download template</a>
+        <label class="btn primary">${icon('upload')} Choose CSV file<input type="file" accept=".csv,text/csv" id="imp-file" hidden></label></div>
+    </div>`, { wide: true });
+  const body = $('#imp-body', el);
+  let text = '';
+  const rowsTable = (rows) => `<div style="overflow:auto;max-height:320px;border:1px solid var(--line);border-radius:10px"><table class="small" style="width:100%;border-collapse:collapse">
+    <thead><tr style="text-align:left"><th style="padding:6px 8px">Row</th><th>Action</th><th>First name</th><th>Last name</th><th>Work email</th><th>Details</th></tr></thead><tbody>${rows.map((r) => `<tr style="border-top:1px solid var(--line)">
+      <td style="padding:6px 8px">${r.line}</td><td>${IMPORT_ACTION[r.action]}</td><td>${esc(r.first_name || '')}</td><td>${esc(r.last_name || '')}</td><td>${esc(r.work_email || '')}</td>
+      <td>${r.message ? esc(r.message) : esc(Object.entries(r.changes).filter(([f]) => f !== 'name').map(([f, [a, b]]) => r.action === 'update' ? `${IMPORT_FIELD[f]}: ${a || '(blank)'} → ${b}` : `${IMPORT_FIELD[f]}: ${b}`).join('; '))}</td></tr>`).join('')}</tbody></table></div>`;
+  const resultsCsv = (p, file) => csvDownload(file, [['Row', 'Result', 'First name', 'Last name', 'Work email', 'Details']].concat(p.rows.map((r) => [r.line, IMPORT_ACTION[r.action] + (r.action === 'unchanged' || r.action === 'create' || r.action === 'update' ? '' : ' (' + r.action + ')'), r.first_name, r.last_name, r.work_email, r.message || Object.entries(r.changes).filter(([f]) => f !== 'name').map(([f, [a, b]]) => `${IMPORT_FIELD[f]}: ${a || ''} -> ${b}`).join('; ')])));
+  const showPreview = (p) => {
+    const c = p.counts; const shown = p.rows.filter((r) => r.action !== 'unchanged'); const cap = 300;
+    body.innerHTML = `<div class="row wrap" style="gap:8px"><span class="pill plain"><strong>${c.create}</strong> new</span><span class="pill plain"><strong>${c.update}</strong> updates</span><span class="pill plain"><strong>${c.unchanged}</strong> unchanged</span><span class="pill ${c.excluded ? 'checked_out' : 'plain'}"><strong>${c.excluded}</strong> left out</span></div>
+      ${shown.length ? rowsTable(shown.slice(0, cap)) : '<p class="muted" style="margin:0">Nothing to change: everyone in this file is already up to date.</p>'}
+      ${shown.length > cap ? `<p class="small muted" style="margin:0">Showing the first ${cap} of ${shown.length} rows; download the full results below.</p>` : ''}
+      ${c.excluded ? `<label class="check"><input type="checkbox" id="imp-ack"><span>I've reviewed the ${c.excluded} row${c.excluded === 1 ? '' : 's'} that will be left out. Import the rest.</span></label>` : ''}
+      <div class="sheet-actions"><button type="button" class="btn" id="imp-dl">${icon('download')} Download preview</button><button type="button" class="btn" data-close>Cancel</button>
+        <button type="button" class="btn primary" id="imp-go" ${c.create + c.update === 0 || c.excluded ? 'disabled' : ''}>Import ${c.create + c.update} ${c.create + c.update === 1 ? 'person' : 'people'}</button></div>`;
+    const go_ = $('#imp-go', el); const ack = $('#imp-ack', el);
+    if (ack) ack.onchange = () => { go_.disabled = !(ack.checked && c.create + c.update > 0); };
+    $('#imp-dl', el).onclick = () => resultsCsv(p, 'employee-import-preview.csv');
+    go_.onclick = () => busy(go_, async () => {
+      const q = `?create=${c.create}&update=${c.update}${c.excluded ? '&acknowledge=1' : ''}`;
+      let r; try { r = await api('POST', '/api/import/employees' + q, text); } catch (e) { return fail(e); }
+      usersCache = null;
+      body.innerHTML = `<div class="banner info">${icon('check')}<div><strong>${r.counts.create} added, ${r.counts.update} updated, ${r.counts.unchanged} unchanged${r.counts.excluded ? `, ${r.counts.excluded} left out` : ''}.</strong>
+        <div class="small muted">People added can now sign in with Google. Importing the same file again changes nothing.</div></div></div>
+        <div class="sheet-actions"><button type="button" class="btn" id="imp-res">${icon('download')} Download results</button><button type="button" class="btn primary" id="imp-done">Done</button></div>`;
+      $('#imp-res', el).onclick = () => resultsCsv(r, 'employee-import-results.csv');
+      $('#imp-done', el).onclick = () => { close(); done && done(); };
+    });
+  };
+  $('#imp-file', el).onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 2 * 1024 * 1024) { e.target.value = ''; return fail(new Error('That file is too large (2 MB at most).')); }
+    text = await f.text();
+    body.innerHTML = '<div class="spinner" style="margin:10px 0"></div>';
+    try { showPreview(await api('POST', '/api/import/employees/preview', text)); } catch (err) { fail(err); close(); }
+  };
 }
 function personSheet(u, done) {
   const editing = !!u; u = u || { role: 'employee', has_account: true };
+  const legacyName = editing && !u.first_name && !u.last_name; // a record from before separate names: never split, editable as it is
   const { el, close } = sheet(`<h2>${editing ? 'Edit person' : 'Add a person'}</h2>
     <form class="form-grid" id="f" style="margin-top:12px">
-      <label class="field"><span>Full name *</span><input name="name" required value="${esc(u.name || '')}" autocomplete="off"></label>
+      <div class="form-grid cols"><label class="field"><span>First name ${legacyName ? '' : '*'}</span><input name="first_name" ${legacyName ? '' : 'required'} value="${esc(u.first_name || '')}" autocomplete="off"></label>
+      <label class="field"><span>Last name ${legacyName ? '' : '*'}</span><input name="last_name" ${legacyName ? '' : 'required'} value="${esc(u.last_name || '')}" autocomplete="off"></label></div>
+      ${legacyName ? `<div class="small muted" style="margin-top:-6px">Name on file: <strong>${esc(u.name)}</strong> (entered before first and last names were kept separately). Fill in both fields to replace it; leave them empty to keep it.</div>` : ''}
       <label class="field"><span>Work email <span id="em-req">*</span></span><input name="email" type="email" ${editing && !u.has_account ? '' : 'required'} value="${esc(u.email || '')}" autocomplete="off"></label>
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}" list="depts"></label>
       <label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
@@ -3414,7 +3476,7 @@ async function viewAdminAssets() {
   };
   $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
   $('#fchips').onclick = (e) => { if (e.target.closest('#fclear')) gotoStatus(''); };
-  $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
+  if ($('#scanbtn')) $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
   S.soft = { base: '#/assets', fn: apply };
   await reload();
   if (st.search) runSearch(); // #/assets?q=… (an old All assets link)
@@ -3492,7 +3554,8 @@ function viewProfile() {
   const who = `<div class="row"><div class="avatar" style="width:52px;height:52px;font-size:18px;background:var(--brand-accent)">${esc(initials(u.name))}</div><div><strong>${esc(u.email)}</strong><div class="small muted">${u.role === 'admin' ? 'Administrator' : 'Employee'}</div></div></div>`;
   // Everyone edits their own name, department, job title, phone and building (PUT /api/me); the email is IT's (People).
   const details = `<form class="card pad form-grid" id="p">${who}
-      <label class="field"><span>Name</span><input name="name" value="${esc(u.name)}" required></label>
+      <div class="form-grid cols"><label class="field"><span>First name</span><input name="first_name" value="${esc(u.first_name || '')}" ${u.first_name ? 'required' : ''} autocomplete="given-name"></label><label class="field"><span>Last name</span><input name="last_name" value="${esc(u.last_name || '')}" ${u.last_name ? 'required' : ''} autocomplete="family-name"></label></div>
+      ${u.first_name ? '' : `<div class="small muted" style="margin-top:-6px">Name on file: ${esc(u.name)}. Enter your first and last name to replace it.</div>`}
       <div class="form-grid cols"><label class="field"><span>Department</span><input name="department" value="${esc(u.department || '')}"></label><label class="field"><span>Job title</span><input name="title" value="${esc(u.title || '')}"></label></div>
       <label class="field"><span>Phone</span><input name="phone" type="tel" value="${esc(u.phone || '')}"></label>
       <label class="field"><span>Building <span class="muted">(optional)</span></span><input name="building" value="${esc(u.building || '')}" autocomplete="off"></label>

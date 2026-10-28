@@ -13,6 +13,7 @@ before(async () => {
   ({ client: admin } = await setupAdmin(server));
   const p = await admin.post('/api/users', { name: 'Eve Employee', email: 'eve@nutricost.com', invite: false });
   db.prepare("UPDATE accounts SET password_hash = (SELECT password_hash FROM accounts WHERE login_email = 'ada@nutricost.com') WHERE id = ?").run(p.body.account_id);
+  await admin.put(`/api/users/${p.body.id}/self-checkout`, { enabled: true }); // (the scanner needs the permission; new people start without it)
   employee = makeClient(server);
   assert.equal((await employee.post('/api/login', { email: 'eve@nutricost.com', password: 'correct-horse-1' })).status, 200);
 });

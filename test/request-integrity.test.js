@@ -22,6 +22,7 @@ const isoPlus = (days) => new Date(Date.now() + days * 864e5).toISOString().slic
 const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, tag: `RQ-${++seq}`, ...extra })).body;
 async function makeLogin(name) {
   const created = await admin.post('/api/users', { name, email: `rq${++seq}@nutricost.com`, invite: true });
+  await admin.put(`/api/users/${created.body.id}/self-checkout`, { enabled: true }); // (new people start with self-checkout OFF)
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);

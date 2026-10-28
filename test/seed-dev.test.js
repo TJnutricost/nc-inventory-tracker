@@ -131,6 +131,10 @@ test('the documented seeded admin (dana.ito@example.com / DevPass!2026) is creat
       const me = await client.get('/api/me');
       assert.equal(me.user.role, 'admin');
       assert.equal(me.user.email, 'dana.ito@example.com');
+      assert.deepEqual([me.user.first_name, me.user.last_name, me.user.name], ['Dana', 'Ito', 'Dana Ito'], 'seeded people carry real first and last names');
+      const people = (await client.get('/api/users')).users || (await client.get('/api/users'));
+      const list = Array.isArray(people) ? people : people.body;
+      assert.ok(list.length >= 10 && list.every((p) => p.first_name && p.last_name && p.name === `${p.first_name} ${p.last_name}`), 'every seeded person has both parts (Edit person shows them)');
     } finally {
       await stopServer(server);
     }

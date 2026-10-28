@@ -47,6 +47,7 @@ const MODULES = {
   // assetRecords above). Since 5B-4 server.js reaches the database only through this seam.
   settings: [require('../settings'), ['getSettings', 'setSetting']],
   locations: [require('../locations'), ['overview', 'add', 'rename', 'remove']], // managed locations (the `locations` setting + the assets that use them)
+  employeeImport: [require('../employeeImport'), ['preview', 'apply']], // admin Employee CSV import (docs/briefs/employee-csv-import.md)
   outbox: [require('../outbox'), ['latest', 'recent']],
   overdue: [require('../overdue'), ['dueAssignments', 'markNotified']],
   requestRecords: [require('../requestRecords'), ['listRequests', 'createEquipmentRequest', 'approveRequest', 'transitionLogged']],

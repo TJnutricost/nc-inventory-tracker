@@ -149,19 +149,30 @@ function admin(req, res, next) {
   return auth(req, res, () => (req.user.role === 'admin' ? next() : res.status(403).json({ error: 'Admins only' })));
 }
 // The signed-in user as the UI sees it: `id` is the EMPLOYEE (person) id, null for an account with no employee record.
-const publicMe = (u) => ({ can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, building: u.building || null, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
+const publicMe = (u) => ({ first_name: u.first_name || null, last_name: u.last_name || null, can_self_checkout: !!u.can_self_checkout, id: u.employee_id, account_id: u.account_id, employee_id: u.employee_id, name: u.name, email: u.email, role: u.role, department: u.department, title: u.title, phone: u.phone, building: u.building || null, active: true, created_at: u.created_at, last_login_at: u.last_login_at, has_password: !!u.password_hash });
 
 // A person (employee) with their optional account. `email` = where to reach them (work email, else login email). The SQL is in
 // src/people.js (moved there verbatim in Slices 5B-2 and 5B-3).
 const { HISTORY_LIMIT } = data.people;
 const publicPerson = (p) => p && ({
-  id: p.id, name: p.name, email: p.email, work_email: p.work_email, department: p.department, title: p.title, phone: p.phone,
+  id: p.id, name: p.name, first_name: p.first_name || null, last_name: p.last_name || null, email: p.email, work_email: p.work_email, department: p.department, title: p.title, phone: p.phone,
   active: p.status === 'active', created_at: p.created_at,
   has_account: !!p.account_id, account_id: p.account_id || null, login_email: p.login_email || null,
   login_enabled: !!p.account_id && !!p.account_active, role: p.role || null,
   last_login_at: p.last_login_at || null, has_password: !!p.password_hash,
   can_self_checkout: !!p.can_self_checkout, building: p.building || null,
 });
+// First and last name are always separate (owner rule 2026-10-28); `name` stays as the display name, composed from them. A request that sends
+// neither field is a legacy caller: `name` alone is accepted as it was and the parts stay NULL (a full name is never split). One part
+// without the other is refused. Returns { name, firstName, lastName } or null when neither part was sent.
+const NAME_MAX = 100;
+function namePartsFrom(body) {
+  const first = clean(body.first_name); const last = clean(body.last_name);
+  if (!first && !last) return null;
+  if (!first || !last) throw httpError(400, 'Enter both a first name and a last name');
+  if (first.length > NAME_MAX || last.length > NAME_MAX) throw httpError(400, `A name can be at most ${NAME_MAX} characters`);
+  return { name: `${first} ${last}`, firstName: first, lastName: last };
+}
 const isEmail = (v) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
 const normEmail = (v) => { const c = clean(v); return c ? c.toLowerCase() : null; };
 
@@ -204,11 +215,13 @@ app.post('/api/setup', wrap(async (req, res) => {
   const rule = setupRule();
   if (rule === 'closed') throw httpError(403, 'Setup is turned off on this server. Ask whoever runs it to set SETUP_TOKEN, or sign in with Google.');
   if (rule === 'code' && !sameSecret(req.body.setup_code || '', process.env.SETUP_TOKEN)) throw httpError(403, 'The setup code is not correct.');
-  const { name, email, password } = req.body;
-  if (!clean(name) || !clean(email) || !password || password.length < 8) throw httpError(400, 'Name, email and a password of at least 8 characters are required');
+  const { email, password } = req.body;
+  const parts = namePartsFrom(req.body);
+  const name = parts ? parts.name : clean(req.body.name);
+  if (!name || !clean(email) || !password || password.length < 8) throw httpError(400, 'First name, last name, email and a password of at least 8 characters are required');
   const hash = await bcrypt.hash(password, 10);
   const mail = normEmail(email);
-  const accountId = await data.accounts.createFirstAdmin({ name: clean(name), mail, hash });
+  const accountId = await data.accounts.createFirstAdmin({ name, firstName: parts ? parts.firstName : null, lastName: parts ? parts.lastName : null, mail, hash });
   await newSession(req);
   req.session.uid = accountId;
   res.json({ ok: true });
@@ -268,9 +281,10 @@ app.post('/api/me/password', auth, wrap(async (req, res) => {
 // email (the login) stays IT's, in People. Passwords are separate.
 app.put('/api/me', auth, async (req, res) => {
   const { name, phone, department, title, building } = req.body;
+  const parts = namePartsFrom(req.body);
   if (req.user.employee_id) {
     // as in People: the building keeps its value when the client doesn't send the field; an empty string clears it
-    await data.people.updateOwnProfile(req.user.employee_id, { name: clean(name), phone: clean(phone), department: clean(department), title: clean(title),
+    await data.people.updateOwnProfile(req.user.employee_id, { name: parts ? parts.name : clean(name), firstName: parts ? parts.firstName : null, lastName: parts ? parts.lastName : null, phone: clean(phone), department: clean(department), title: clean(title),
       building: building === undefined ? req.user.building : clean(building) });
   }
   res.json({ ok: true });
@@ -359,15 +373,16 @@ app.get('/api/users', admin, async (req, res) => {
 
 // Creates the employee and, unless `login: false`, a linked login account (role admin|employee; legacy 'user' = employee).
 app.post('/api/users', admin, async (req, res) => {
-  const name = clean(req.body.name); const email = normEmail(req.body.email);
+  const parts = namePartsFrom(req.body);
+  const name = parts ? parts.name : clean(req.body.name); const email = normEmail(req.body.email);
   const wantsLogin = req.body.login !== false;
-  if (!name) throw httpError(400, 'Name is required');
+  if (!name) throw httpError(400, 'First name and last name are required');
   if (email ? !isEmail(email) : wantsLogin) throw httpError(400, wantsLogin ? 'Name and a valid email are required' : 'That email address is not valid');
   if (email && await data.people.workEmailTaken(email)) throw httpError(400, 'A person with that email already exists');
   if (email && wantsLogin && await data.people.loginEmailTaken(email)) throw httpError(400, 'A login with that email already exists');
   const role = req.body.role === 'admin' ? 'admin' : 'employee';
   const id = await data.people.createPerson({
-    name, email, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone), building: clean(req.body.building), wantsLogin, role,
+    name, firstName: parts ? parts.firstName : null, lastName: parts ? parts.lastName : null, email, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone), building: clean(req.body.building), wantsLogin, role,
   });
   const p = await data.people.getPerson(id);
   if (wantsLogin && req.body.invite !== false) {
@@ -421,8 +436,14 @@ app.put('/api/users/:id', admin, async (req, res) => {
   if (u.account_id && loginEmail !== u.login_email && await data.people.loginEmailTakenByOther(loginEmail, u.account_id)) throw httpError(400, 'That email is already in use');
   // building keeps its value when the client doesn't send the field; an empty string clears it
   const building = req.body.building === undefined ? u.building : clean(req.body.building);
+  // Names: both parts replace the name; neither keeps the record as it is (a legacy record stays without parts); a legacy-only `name` that
+  // changes the display name makes any stored parts stale, so they are cleared rather than left disagreeing.
+  const parts = namePartsFrom(req.body);
+  let personNames = { name: u.name, firstName: u.first_name || null, lastName: u.last_name || null };
+  if (parts) personNames = parts;
+  else if (clean(req.body.name) && clean(req.body.name) !== u.name) personNames = { name: clean(req.body.name), firstName: null, lastName: null };
   await data.people.updatePerson({
-    id, name: clean(req.body.name) || u.name, workEmail, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone),
+    id, ...personNames, workEmail, department: clean(req.body.department), title: clean(req.body.title), phone: clean(req.body.phone),
     building, active, accountId: u.account_id, loginEmail, role,
   });
   if (!active && u.account_id) await data.sessions.destroyForAccount(u.account_id); // signed out everywhere (only this account's sessions)
@@ -473,6 +494,8 @@ app.get('/api/availability', auth, async (req, res) => {
 });
 
 app.get('/api/assets/lookup/:code', auth, async (req, res) => {
+  // The scanner is for IT and for employees with the self-checkout permission (docs/briefs/employee-csv-import.md); nobody else may use it.
+  if (req.user.role !== 'admin' && !req.user.can_self_checkout) throw httpError(403, 'Scanning is not enabled for your account. Browse equipment or ask IT.');
   const code = String(req.params.code).trim();
   // The tag (any letter case), else the normalized serial (src/assetViews.js lookupCode). Archived assets are still found (their tags
   // stay reserved); the flag lets clients say so.
@@ -1160,6 +1183,29 @@ app.post('/api/import/assets', admin, async (req, res) => {
   // The active employees (for assigned_email), then the WHOLE file in ONE transaction, exactly as before (src/assetRecords.js
   // importAssets): a row with a problem is skipped or imported partly and reported in `errors`; anything that throws rolls it all back.
   res.json(await data.assetRecords.importAssets({ rows: items, actorAccountId: req.user.account_id }));
+});
+
+// ---------- employee CSV import (admin only; docs/briefs/employee-csv-import.md) ----------
+// Preview (reads only) and import take the same CSV text; the import recomputes its plan inside its transaction. It creates people with no
+// login (they sign in with Google, which links them by work email) and self-checkout OFF, and updates profile fields of matched people.
+const employeeImportPlan = require('./employeeImportPlan'); // (pure: the template and the CSV rules; no database)
+const employeeCsv = (req) => {
+  const text = String(req.body || '');
+  if (text.length > data.employeeImport.MAX_BYTES) throw httpError(400, 'That file is too large (2 MB at most).');
+  return data.employeeImport.rowsFromCsv(parseCsv(text));
+};
+app.get('/api/import/employees/template.csv', admin, (req, res) => {
+  res.set('Content-Type', 'text/csv; charset=utf-8').set('Content-Disposition', 'attachment; filename="employee-import-template.csv"').send(employeeImportPlan.TEMPLATE);
+});
+app.post('/api/import/employees/preview', admin, async (req, res) => {
+  const { rows } = employeeCsv(req);
+  res.json(await data.employeeImport.preview({ rows }));
+});
+app.post('/api/import/employees', admin, async (req, res) => {
+  const { rows } = employeeCsv(req);
+  const expect = req.query.create !== undefined ? { create: Number(req.query.create), update: Number(req.query.update) } : undefined;
+  const result = await data.employeeImport.apply({ rows, actorAccountId: req.user.account_id, acknowledge: req.query.acknowledge === '1', expect });
+  res.json(result);
 });
 
 // ---------- overdue reminders ----------

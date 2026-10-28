@@ -18,21 +18,25 @@ let seq = 0;
 const count = (sql, ...p) => db.prepare(sql).get(...p).c;
 const newAsset = async (name, extra = {}) => (await admin.post('/api/assets', { available_to_request: true, name, tag: `SC-${++seq}`, ...extra })).body;
 const DUE = '2099-01-01';
-async function makeLogin(name) {
+async function makeLogin(name, { on = true } = {}) { // (the permission is turned on here, since new people start without it; `on: false` keeps the real default)
   const created = (await admin.post('/api/users', { name, email: `sc${++seq}@nutricost.com` })).body;
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.account_id);
   const c = makeClient(server);
   assert.equal((await c.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
+  if (on) await admin.put(`/api/users/${created.id}/self-checkout`, { enabled: true });
   return { client: c, id: created.id };
 }
 const setSelf = (emp, enabled) => admin.put(`/api/users/${emp.id}/self-checkout`, { enabled });
 const selfCheckout = (emp, asset, body = { due_date: DUE }) => emp.client.post(`/api/assets/${asset.id}/checkout`, body);
 
-test('an employee defaults to self-checkout enabled, visible to admin and to the employee', async () => {
-  const emp = await makeLogin('Default Enabled');
-  assert.equal((await admin.get(`/api/users/${emp.id}`)).body.user.can_self_checkout, true);
-  assert.equal((await emp.client.get('/api/me')).body.user.can_self_checkout, true);
-  assert.equal(db.prepare('SELECT can_self_checkout FROM employees WHERE id = ?').get(emp.id).can_self_checkout, 1);
+test('a new employee starts with self-checkout OFF, visible to admin and to the employee, and it is refused until IT turns it on', async () => {
+  const emp = await makeLogin('Default Off', { on: false });
+  assert.equal((await admin.get(`/api/users/${emp.id}`)).body.user.can_self_checkout, false);
+  assert.equal((await emp.client.get('/api/me')).body.user.can_self_checkout, false);
+  assert.equal(db.prepare('SELECT can_self_checkout FROM employees WHERE id = ?').get(emp.id).can_self_checkout, 0);
+  assert.equal((await selfCheckout(emp, await newAsset('Default Off Asset'))).status, 403);
+  assert.equal((await setSelf(emp, true)).status, 200);
+  assert.equal((await selfCheckout(emp, await newAsset('Default Off Asset 2'))).status, 200, 'works once enabled');
 });
 
 test('an enabled employee can self-check-out; it is always a temporary checkout needing a return date', async () => {
@@ -136,12 +140,12 @@ test("an employee cannot change another employee's (or their own) permission", a
   assert.equal(count('SELECT can_self_checkout c FROM employees WHERE id = ?', a.id), 0);
 });
 
-test('new employees default to self-checkout enabled, with or without a login', async () => {
+test('new employees default to self-checkout OFF, with or without a login', async () => {
   const withLogin = (await admin.post('/api/users', { name: 'New With Login', email: `nl${++seq}@nutricost.com`, invite: false })).body;
   const noLogin = (await admin.post('/api/users', { name: 'New No Login', login: false })).body;
-  assert.equal(withLogin.can_self_checkout, true);
-  assert.equal(noLogin.can_self_checkout, true);
-  assert.equal(count('SELECT COUNT(*) c FROM employees WHERE id IN (?, ?) AND can_self_checkout = 1', withLogin.id, noLogin.id), 2);
+  assert.equal(withLogin.can_self_checkout, false);
+  assert.equal(noLogin.can_self_checkout, false);
+  assert.equal(count('SELECT COUNT(*) c FROM employees WHERE id IN (?, ?) AND can_self_checkout = 0', withLogin.id, noLogin.id), 2);
 });
 
 // ---------------------------------------------------------------- migration 7: consume the legacy global setting once
@@ -160,7 +164,7 @@ test('migration 7: legacy global OFF disables every existing employee, once', ()
   assert.deepEqual(runMigrations(old, migrations), migrations.filter((m) => m.id > 6).map((m) => m.id));
   assert.deepEqual(flags(old), [0, 0]);
   old.prepare("INSERT INTO employees (name) VALUES ('Hired Later')").run();
-  assert.deepEqual(flags(old), [0, 0, 1], 'employees added afterwards default to enabled');
+  assert.deepEqual(flags(old), [0, 0, 0], 'employees added afterwards default to disabled (migration 19)');
   assert.equal(old.prepare("SELECT value FROM settings WHERE key = 'self_checkout'").get().value, '0', 'the old row is left as unused data');
   assert.equal(old.pragma('foreign_key_check').length, 0);
 });
@@ -200,6 +204,7 @@ test('the People data carries self-checkout state for login holders, and no-logi
   const row = (id) => rows.find((r) => r.id === id);
   assert.deepEqual([row(withLogin.id).has_account, row(withLogin.id).can_self_checkout], [true, true]);
   assert.deepEqual([row(off.id).has_account, row(off.id).can_self_checkout], [true, false]);
+  assert.equal(row(none.id).can_self_checkout, false, 'a new person has it OFF');
   assert.deepEqual([row(none.id).has_account, row(none.id).login_enabled, row(none.id).role], [false, false, null]);
   assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', none.id), 0, 'still no account for a no-login person');
   // there is no employee directory for non-admins any more (see test/employee-access.test.js)

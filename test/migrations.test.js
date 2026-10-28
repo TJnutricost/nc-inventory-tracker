@@ -172,3 +172,24 @@ test('migration 18: the numbers issued so far are recorded under the prefix in f
   runMigrations(none, migrations);
   assert.equal(none.prepare('SELECT COUNT(*) c FROM issued_tag_ranges').get().c, 0, 'a counter at 0 has issued nothing');
 });
+
+test('migration 19: first_name / last_name are added empty (never split from name), existing permissions and ids survive, new people default to self-checkout OFF', () => {
+  const old = new Database(':memory:');
+  old.pragma('foreign_keys = ON');
+  runMigrations(old, migrations.filter((m) => m.id <= 18));
+  old.prepare("INSERT INTO employees (name, work_email, can_self_checkout, building) VALUES ('Mary Ann Smith', 'mary@x.com', 1, 'HQ'), ('Bo Jones', 'bo@x.com', 0, NULL)").run();
+  old.prepare("INSERT INTO employees (name) VALUES ('Gone')").run();
+  old.prepare("INSERT INTO accounts (employee_id, login_email) VALUES (1, 'mary@x.com')").run();
+  old.prepare('DELETE FROM employees WHERE id = 3').run(); // the AUTOINCREMENT mark (3) must survive the rebuild: id 3 is never reused
+  assert.deepEqual(runMigrations(old, migrations), [19]);
+  const rows = old.prepare('SELECT id, name, work_email, can_self_checkout, building, first_name, last_name FROM employees ORDER BY id').all();
+  assert.deepEqual(rows, [
+    { id: 1, name: 'Mary Ann Smith', work_email: 'mary@x.com', can_self_checkout: 1, building: 'HQ', first_name: null, last_name: null },
+    { id: 2, name: 'Bo Jones', work_email: 'bo@x.com', can_self_checkout: 0, building: null, first_name: null, last_name: null },
+  ]);
+  assert.equal(old.prepare('INSERT INTO employees (name) VALUES (?)').run('New').lastInsertRowid, 4, 'ids keep counting');
+  assert.equal(old.prepare('SELECT can_self_checkout c FROM employees WHERE id = 4').get().c, 0, 'the default for new rows is OFF');
+  assert.throws(() => old.prepare("INSERT INTO employees (name, work_email) VALUES ('Dup', 'MARY@x.com')").run(), /UNIQUE/, 'the case-insensitive work-email index survived');
+  assert.equal(old.prepare('SELECT employee_id FROM accounts').get().employee_id, 1, 'relationships survive');
+  assert.equal(old.pragma('foreign_key_check').length, 0);
+});

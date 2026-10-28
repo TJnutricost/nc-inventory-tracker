@@ -104,6 +104,8 @@ const MIGRATED = [
   'GET /api/activity',
   'GET /api/export/assets.csv',
   'POST /api/import/assets',
+  'POST /api/import/employees/preview',
+  'POST /api/import/employees',
 ];
 
 // Routes with no database access at all, so they cannot use the seam (they are checked to stay that way): logout reaches the sessions
@@ -117,6 +119,7 @@ const NO_OWN_SQL = {
   'GET /vendor/html5-qrcode.min.js': [],
   'GET /vendor/JsBarcode.all.min.js': [],
   // Google sign-in: whether it is offered, and the redirect to Google (src/googleAuth.js; no database; the callback is in MIGRATED)
+  'GET /api/import/employees/template.csv': [], // a constant CSV (src/employeeImportPlan.js)
   'GET /api/auth-options': [],
   'GET /auth/google': [],
 };
@@ -311,7 +314,7 @@ test('ratchet (5B-4): server.js has no database access outside the seam (no db u
   // the only local modules: the env loader, the seam, src/db.js (above), the mailers (the SQLite mail adapter, or the PostgreSQL one),
   // the pure serial helpers, the Google sign-in client (no database access) and, since Slice 5D, the PostgreSQL pool and boot services (checked in the test above)
   const locals = [...allCode.matchAll(/require\(['"](\.\.?\/[^'"]+)['"]\)/g)].map((m) => m[1]).filter((m) => !m.startsWith('./pg/')).sort();
-  assert.deepEqual(locals, ['./dataSeam', './db', './env', './googleAuth', './mailer', './photoStorage', './serial'], 'no data module is loaded by server.js (only the seam; ./photoStorage stores photo FILES and touches no database)');
+  assert.deepEqual(locals, ['./dataSeam', './db', './employeeImportPlan', './env', './googleAuth', './mailer', './photoStorage', './serial'], 'no data module is loaded by server.js (only the seam; ./photoStorage stores photo FILES and ./employeeImportPlan is the pure CSV rules; neither touches a database)');
   assert.doesNotMatch(allCode, /\.prepare\s*\(/, 'no prepared statement');
   assert.doesNotMatch(allCode, /\.transaction\s*\(/, 'no transaction');
   assert.doesNotMatch(allCode, /\b(db|database)\s*\.\s*(exec|pragma|prepare|transaction)\b/, 'no direct database call');

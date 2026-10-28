@@ -54,7 +54,7 @@ test('building does not affect login, account or self-checkout behavior', async 
   const p = (await newPerson({ building: 'Building 9' })).body;
   assert.equal(p.has_account, true);
   assert.equal(p.login_enabled, true);
-  assert.equal(p.can_self_checkout, true);
+  assert.equal(p.can_self_checkout, false, 'new people start without self-checkout');
   const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'");
   assert.equal(tok.get(p.account_id), undefined, 'invite:false still sends no invite');
   const noLogin = (await admin.post('/api/users', { name: 'Bldg No Login', login: false, building: 'Warehouse 1' })).body;

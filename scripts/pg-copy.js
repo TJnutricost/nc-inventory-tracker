@@ -73,7 +73,7 @@ async function assertFreshTarget(client) {
     }
   }
   const migrations = (await client.query('SELECT id FROM schema_migrations ORDER BY id')).rows.map((r) => r.id);
-  if (migrations.join(',') !== '1,2') problems.push(`schema_migrations is [${migrations.join(', ')}], expected [1, 2]`);
+  if (migrations.join(',') !== '1,2,3') problems.push(`schema_migrations is [${migrations.join(', ')}], expected [1, 2, 3]`);
   if (problems.length) {
     throw new Error(`Refusing to copy: the target database is not fresh (${problems.join('; ')}). Nothing was changed.`);
   }

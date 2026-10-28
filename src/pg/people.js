@@ -106,11 +106,11 @@ async function clashGuarded(messages, run) {
 
 // POST /api/users: the employee and, when `wantsLogin`, its linked account (no password: the invite sets it). The fields are cleaned by
 // the route. Returns the new employee id.
-const createPerson = async (q, { name, email, department, title, phone, building, wantsLogin, role }) => inTransaction(q, (c) => clashGuarded(CLASH.create, async () => {
+const createPerson = async (q, { name, firstName = null, lastName = null, email, department, title, phone, building, wantsLogin, role }) => inTransaction(q, (c) => clashGuarded(CLASH.create, async () => {
   if (email && await workEmailTaken(c, email)) throw httpError(400, PERSON_EXISTS);
   if (email && wantsLogin && await loginEmailTaken(c, email)) throw httpError(400, LOGIN_EXISTS);
-  const empId = (await one(c, 'INSERT INTO employees (name, work_email, department, title, phone, building) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
-    [name, email, department, title, phone, building])).id;
+  const empId = (await one(c, 'INSERT INTO employees (name, first_name, last_name, work_email, department, title, phone, building, can_self_checkout) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0) RETURNING id',
+    [name, firstName, lastName, email, department, title, phone, building])).id;
   if (wantsLogin) await c.query('INSERT INTO accounts (employee_id, login_email, role) VALUES ($1, $2, $3)', [empId, email, role]);
   return empId;
 }));
@@ -130,14 +130,14 @@ async function addAccount(q, p, { email, role }) {
 
 // PUT /api/users/:id: the person and, when they have one (`accountId`), their account. The values are worked out and validated by the
 // route (`active` is a boolean). Nothing here deletes a person; signing a deactivated account out is src/pg/sessions.js.
-async function updatePerson(q, { id, name, workEmail, department, title, phone, building, active, accountId, loginEmail, role }) {
+async function updatePerson(q, { id, name, firstName = null, lastName = null, workEmail, department, title, phone, building, active, accountId, loginEmail, role }) {
   const key = toId(id);
   await inTransaction(q, (c) => clashGuarded(CLASH.update, async () => {
     await c.query('SELECT 1 FROM employees WHERE id = $1 FOR NO KEY UPDATE', [key]);
     if (workEmail && await workEmailTakenByOther(c, workEmail, key)) throw httpError(400, IN_USE);
     if (accountId && await loginEmailTakenByOther(c, loginEmail, accountId)) throw httpError(400, IN_USE);
-    await c.query('UPDATE employees SET name = $1, work_email = $2, department = $3, title = $4, phone = $5, building = $6, status = $7 WHERE id = $8',
-      [name, workEmail, department, title, phone, building, active ? 'active' : 'inactive', key]);
+    await c.query('UPDATE employees SET name = $1, first_name = $2, last_name = $3, work_email = $4, department = $5, title = $6, phone = $7, building = $8, status = $9 WHERE id = $10',
+      [name, firstName, lastName, workEmail, department, title, phone, building, active ? 'active' : 'inactive', key]);
     if (accountId) await c.query('UPDATE accounts SET login_email = $1, role = $2, active = $3 WHERE id = $4', [loginEmail, role, active ? 1 : 0, toId(accountId)]);
   }));
 }
@@ -147,8 +147,8 @@ async function setSelfCheckout(q, id, enabled) { await q.query('UPDATE employees
 
 // PUT /api/me: the signed-in person's own details (anyone since 2026-10-27; admins only before). A blank name keeps the stored one; the
 // fields are cleaned by the route.
-async function updateOwnProfile(q, employeeId, { name, phone, department, title, building }) {
-  await q.query('UPDATE employees SET name = COALESCE($1, name), phone = $2, department = $3, title = $4, building = $5 WHERE id = $6', [name, phone, department, title, building, toId(employeeId)]);
+async function updateOwnProfile(q, employeeId, { name, firstName = null, lastName = null, phone, department, title, building }) {
+  await q.query('UPDATE employees SET name = COALESCE($1, name), first_name = COALESCE($2, first_name), last_name = COALESCE($3, last_name), phone = $4, department = $5, title = $6, building = $7 WHERE id = $8', [name, firstName, lastName, phone, department, title, building, toId(employeeId)]);
 }
 
 module.exports = {
