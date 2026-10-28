@@ -181,7 +181,7 @@ test('migration 19: first_name / last_name are added empty (never split from nam
   old.prepare("INSERT INTO employees (name) VALUES ('Gone')").run();
   old.prepare("INSERT INTO accounts (employee_id, login_email) VALUES (1, 'mary@x.com')").run();
   old.prepare('DELETE FROM employees WHERE id = 3').run(); // the AUTOINCREMENT mark (3) must survive the rebuild: id 3 is never reused
-  assert.deepEqual(runMigrations(old, migrations), [19]);
+  assert.deepEqual(runMigrations(old, migrations.filter((m) => m.id <= 19)), [19]);
   const rows = old.prepare('SELECT id, name, work_email, can_self_checkout, building, first_name, last_name FROM employees ORDER BY id').all();
   assert.deepEqual(rows, [
     { id: 1, name: 'Mary Ann Smith', work_email: 'mary@x.com', can_self_checkout: 1, building: 'HQ', first_name: null, last_name: null },

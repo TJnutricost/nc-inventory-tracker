@@ -907,5 +907,23 @@ module.exports = [
       }
     },
   },
+  {
+    // Reset / invitation tokens at rest (security hardening, 2026-10-28). The `tokens.token` column used to hold the link's secret; it now holds
+    // `sha256:<hex>` of it (src/tokenHash.js) and the routes look a presented token up by its hash. The tokens outstanding at this moment are
+    // converted in place (hash of the value they hold), so a link already emailed keeps working until it expires or is used; expiry and
+    // single use are untouched. The outbox kept the full link of every invitation / reset email: those bodies lose the token ('#/reset/[redacted]').
+    id: 20,
+    name: 'tokens.token holds a SHA-256 hash; outbox bodies lose reset / invitation tokens',
+    up: (db) => {
+      const { hashToken, PREFIX, redactTokenLinks } = require('./tokenHash');
+      const setToken = db.prepare('UPDATE tokens SET token = ? WHERE token = ?');
+      for (const { token } of db.prepare('SELECT token FROM tokens WHERE token NOT LIKE ?').all(`${PREFIX}%`)) setToken.run(hashToken(token), token);
+      const setBody = db.prepare('UPDATE outbox SET body = ? WHERE id = ?');
+      for (const { id, body } of db.prepare("SELECT id, body FROM outbox WHERE body LIKE '%#/reset/%'").all()) {
+        const redacted = redactTokenLinks(body);
+        if (redacted !== body) setBody.run(redacted, id);
+      }
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

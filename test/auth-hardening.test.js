@@ -5,6 +5,7 @@ const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { hashToken } = require('../src/tokenHash');
 
 let server; let db;
 const base = () => `http://127.0.0.1:${server.address().port}`;
@@ -58,7 +59,7 @@ test('a reset signs in on a new session id and signs out every other session of 
   const other = await signIn('ada@nutricost.com', 'second-horse-2');
   const admin = db.prepare('SELECT id FROM accounts WHERE login_email = ?').get('ada@nutricost.com');
   const token = crypto.randomBytes(24).toString('base64url');
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(token, admin.id, new Date(Date.now() + 3600e3).toISOString());
+  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(hashToken(token), admin.id, new Date(Date.now() + 3600e3).toISOString());
   const pre = 'nc_assets=s%3Aattacker-chosen.sig';
   const r = await fetch(base() + '/api/reset', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'fetch', Cookie: pre },
     body: JSON.stringify({ token, password: 'reset-horse-4' }) });

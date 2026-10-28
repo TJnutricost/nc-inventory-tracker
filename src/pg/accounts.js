@@ -35,6 +35,7 @@
 const { toId } = require('./reservations');
 const { withTransaction, isInTransaction } = require('./transaction');
 const { NOW } = require('./time');
+const { hashToken } = require('../tokenHash');
 
 const inTransaction = (q, run) => (isInTransaction(q) ? run(q) : withTransaction(run, q));
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
@@ -111,16 +112,17 @@ const resetAccount = async (q, email) => (hasNul(email) ? undefined
   : one(q, `SELECT a.id, a.login_email, COALESCE(e.name, a.login_email) AS name ${ACTIVE_LOGIN}`, [email]));
 
 // Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id. Issuing one replaces the account's previous
-// token of the same purpose, atomically and one issue per account at a time (above). The route generates `token` and `expiresAt`.
+// token of the same purpose, atomically and one issue per account at a time (above). The route generates `token` and `expiresAt`; only the
+// token's hash is stored (src/tokenHash.js).
 async function replaceToken(q, userId, purpose, token, expiresAt) {
   const id = toId(userId);
   await inTransaction(q, async (c) => {
     await c.query('SELECT 1 FROM accounts WHERE id = $1 FOR NO KEY UPDATE', [id]);
     await c.query('DELETE FROM tokens WHERE user_id = $1 AND purpose = $2', [id, purpose]);
-    await c.query('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ($1, $2, $3, $4)', [token, id, purpose, expiresAt]);
+    await c.query('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ($1, $2, $3, $4)', [hashToken(token), id, purpose, expiresAt]);
   });
 }
-const getToken = async (q, token) => (hasNul(token) ? undefined : one(q, 'SELECT * FROM tokens WHERE token = $1', [token]));
+const getToken = async (q, token) => (hasNul(token) ? undefined : one(q, 'SELECT * FROM tokens WHERE token = $1', [hashToken(token)]));
 // POST /api/reset, after the token was checked: the new password, then every token of that account is gone (the link is single use).
 // One transaction; no token left to delete means another reset used the link first: refused, nothing changed (above).
 async function completeReset(q, accountId, hash) {

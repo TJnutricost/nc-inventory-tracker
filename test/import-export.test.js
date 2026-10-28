@@ -23,7 +23,7 @@ test('CSV export includes a header row and the assets that exist', async () => {
 
 test('a non-admin cannot export or import', async () => {
   const created = await admin.post('/api/users', { name: 'Ivy Import', email: 'ivy@nutricost.com' });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose='reset'").get(created.body.id);
+  const tok = require('./helpers').inviteToken(db, created.body.id);
   const c = makeClient(server);
   await c.post('/api/reset', { token: tok.token, password: 'ivy-password-1' });
   assert.equal((await c.get('/api/export/assets.csv')).status, 403);

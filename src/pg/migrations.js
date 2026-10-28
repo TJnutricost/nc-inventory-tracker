@@ -6,4 +6,5 @@ module.exports = [
   { id: 1, name: 'baseline schema (SQLite migrations 1-17, final state)', file: '001_baseline.sql' },
   { id: 2, name: 'issued_tag_ranges (SQLite migration 18)', file: '002_issued_tag_ranges.sql' },
   { id: 3, name: 'employees: first_name, last_name, can_self_checkout default 0 (SQLite migration 19)', file: '003_employee_names_self_checkout_default.sql' },
+  { id: 4, name: 'tokens.token holds a SHA-256 hash; outbox bodies lose reset / invitation tokens (SQLite migration 20)', file: '004_hashed_tokens.sql' },
 ];

@@ -1,6 +1,7 @@
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const { bootApp, startServer, stopServer, makeClient, setupAdmin } = require('./helpers');
+const { hashToken } = require('../src/tokenHash');
 
 let server, db;
 
@@ -96,7 +97,7 @@ test('reset-password works with a freshly issued token and then invalidates it',
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(admin.id);
   // Matches makeToken()'s own format: an ISO string, not SQLite's datetime().
   const exp = new Date(Date.now() + 3600e3).toISOString();
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(token, admin.id, exp);
+  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(hashToken(token), admin.id, exp);
 
   const c = makeClient(server);
   const r = await c.post('/api/reset', { token, password: 'brand-new-password' });
@@ -113,7 +114,7 @@ test('reset-password rejects an expired token', async () => {
   const admin = db.prepare('SELECT id FROM accounts WHERE login_email = ?').get('ada@nutricost.com');
   const token = 'expired-token-123';
   const exp = new Date(Date.now() - 3600e3).toISOString();
-  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(token, admin.id, exp);
+  db.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, 'reset', ?)").run(hashToken(token), admin.id, exp);
   const c = makeClient(server);
   const r = await c.post('/api/reset', { token, password: 'whatever-1234' });
   assert.equal(r.status, 400);

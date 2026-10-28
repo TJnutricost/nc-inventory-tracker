@@ -15,6 +15,8 @@ function currentUser(db, uid) {
     WHERE a.id = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(uid) || null;
 }
 
+const { hashToken } = require('./tokenHash');
+
 // ---- first-run setup ----
 const accountCount = (db) => db.prepare('SELECT COUNT(*) c FROM accounts').get().c;
 // The first admin: one employee (department IT) and its admin account, one transaction. `name` is cleaned and `email` normalized by the
@@ -63,12 +65,14 @@ const resetAccount = (db, email) => db.prepare(`SELECT a.id, a.login_email, COAL
     WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(email);
 
 // Tokens belong to an ACCOUNT (password reset / invite); tokens.user_id holds the account id. Issuing one replaces the account's previous
-// token of the same purpose (two statements, as before). The route generates `token` and its expiry (`expiresAt`, an ISO string).
+// token of the same purpose (two statements, as before). The route generates `token` and its expiry (`expiresAt`, an ISO string); only the
+// token's hash is stored (src/tokenHash.js), so a copy of the database holds no usable link.
 function replaceToken(db, userId, purpose, token, expiresAt) {
   db.prepare('DELETE FROM tokens WHERE user_id = ? AND purpose = ?').run(userId, purpose);
-  db.prepare('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, ?, ?)').run(token, userId, purpose, expiresAt);
+  db.prepare('INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES (?, ?, ?, ?)').run(hashToken(token), userId, purpose, expiresAt);
 }
-const getToken = (db, token) => db.prepare('SELECT * FROM tokens WHERE token = ?').get(token);
+// The row of the token presented in a link (looked up by its hash); undefined if there is none.
+const getToken = (db, token) => db.prepare('SELECT * FROM tokens WHERE token = ?').get(hashToken(token));
 // POST /api/reset, after the token was checked: the new password, then every token of that account is gone (the link is single use).
 // The two statements run back to back as before (not a transaction; on PostgreSQL the token check and this belong in one: 5C).
 function completeReset(db, accountId, hash) {

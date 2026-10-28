@@ -42,7 +42,7 @@ test('default-loan-days is only a UI pre-fill: the server still requires a retur
 
 test('a non-admin cannot read or change settings', async () => {
   const created = await admin.post('/api/users', { name: 'No Settings', email: 'nosettings@nutricost.com' });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose='reset'").get(created.body.id);
+  const tok = require('./helpers').inviteToken(db, created.body.id);
   const c = makeClient(server);
   await c.post('/api/reset', { token: tok.token, password: 'no-settings-1' });
   assert.equal((await c.get('/api/settings')).status, 403);
@@ -79,7 +79,7 @@ test('test-email endpoint records an attempt in the outbox', async () => {
 
 test('deactivating a user signs them out and blocks future logins', async () => {
   const created = await admin.post('/api/users', { name: 'Soon Gone', email: 'soongone@nutricost.com' });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose='reset'").get(created.body.id);
+  const tok = require('./helpers').inviteToken(db, created.body.id);
   const c = makeClient(server);
   await c.post('/api/reset', { token: tok.token, password: 'soon-gone-1' });
   assert.equal((await c.get('/api/me')).status, 200);

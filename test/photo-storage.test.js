@@ -24,7 +24,7 @@ after(async () => { await stopServer(server); await s3.close(); ENV.forEach((k) 
 
 async function makeEmployee(name, email) {
   const created = await admin.post('/api/users', { name, email, role: 'user', invite: true });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.id);
+  const tok = require('./helpers').inviteToken(db, created.body.id);
   const c = makeClient(server);
   assert.equal((await c.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   return { client: c, id: created.body.id };

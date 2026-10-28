@@ -24,7 +24,7 @@ const rootId = (name) => db.prepare('SELECT id FROM catalog_nodes WHERE parent_i
 const newAsset = async (name, extra = {}) => { const r = await admin.post('/api/assets', { available_to_request: true, name, tag: `CT-${++seq}`, ...extra }); assert.equal(r.status, 200, JSON.stringify(r.body)); return r.body; };
 async function makeLogin(name) {
   const created = await admin.post('/api/users', { name, email: `ct${++seq}@nutricost.com`, invite: true });
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
+  const tok = require('./helpers').inviteToken(db, created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   return { client, id: created.body.id, name };

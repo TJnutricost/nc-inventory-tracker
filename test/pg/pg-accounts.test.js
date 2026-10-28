@@ -12,6 +12,7 @@ const { createTwin } = require('../../test-support/pg-twin');
 const fx = require('../../test-support/pg-fixtures');
 const { result, tables, overlap } = require('../../test-support/pg-auth-support');
 const { withTransaction } = require('../../src/pg/transaction');
+const { hashToken } = require('../../src/tokenHash');
 
 const sq = require('../../src/accounts');
 const pg = require('../../src/pg/accounts');
@@ -34,7 +35,7 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     await tables(tw, label);
     return pgOut;
   }
-  const token = async (row) => { await fx.insertRow(tw.pg, 'tokens', row); await fx.insertRow(tw.sq, 'tokens', row); };
+  const token = async (row) => { const hashed = { ...row, token: hashToken(row.token) }; await fx.insertRow(tw.pg, 'tokens', hashed); await fx.insertRow(tw.sq, 'tokens', hashed); }; // (stored hashed, like the app)
 
   before(async () => {
     tdb = await createTestDatabase();
@@ -153,12 +154,12 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     await token({ token: 'expired-off', user_id: w.off.id, purpose: 'reset', expires_at: PAST });
     await write('replaceToken', (q) => pg.replaceToken(q, w.ana.id, 'reset', 'Tok-Ana', LATER), (db) => sq.replaceToken(db, w.ana.id, 'reset', 'Tok-Ana', LATER));
     for (const t of ['Tok-Ana', 'tok-ana', 'TOK-ANA', 'old-ana', 'invite-ana', 'expired-off', '', 'Tok-Ana\u0000', 'Tok%']) await same(`getToken ${t}`, 'getToken', t);
-    assert.deepEqual((await same('the new token', 'getToken', 'Tok-Ana')).ok, { token: 'Tok-Ana', user_id: w.ana.id, purpose: 'reset', expires_at: LATER });
+    assert.deepEqual((await same('the new token', 'getToken', 'Tok-Ana')).ok, { token: hashToken('Tok-Ana'), user_id: w.ana.id, purpose: 'reset', expires_at: LATER });
     assert.equal((await same('the expired token is returned (the route checks expiry)', 'getToken', 'expired-off')).ok.expires_at, PAST);
     await write('completeReset', (q) => pg.completeReset(q, w.ana.id, 'h-new'), (db) => sq.completeReset(db, w.ana.id, 'h-new'));
     const t = await tables(tw, 'after reset');
     assert.equal(t.accounts.find((a) => a.id === w.ana.id).password_hash, 'h-new');
-    assert.deepEqual(t.tokens.map((x) => x.token), ['expired-off'], "every token of the account is gone, another account's stays");
+    assert.deepEqual(t.tokens.map((x) => x.token), [hashToken('expired-off')], "every token of the account is gone, another account's stays");
   });
 
   test('completeReset with no token left is refused and changes nothing; replaceToken is atomic (a failing INSERT keeps the old token)', async () => {
@@ -167,7 +168,7 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     await token({ token: 'keep-robot', user_id: w.robot.id, purpose: 'reset', expires_at: LATER });
     // 'expired-off' belongs to another account: the INSERT fails on the token primary key after the DELETE ran
     assert.deepEqual(await result(() => pg.replaceToken(tw.pg, w.robot.id, 'reset', 'expired-off', LATER)), { raw: true });
-    assert.deepEqual((await tw.pg.query('SELECT token FROM tokens WHERE user_id = $1', [w.robot.id])).rows, [{ token: 'keep-robot' }], 'the DELETE rolled back');
+    assert.deepEqual((await tw.pg.query('SELECT token FROM tokens WHERE user_id = $1', [w.robot.id])).rows, [{ token: hashToken('keep-robot') }], 'the DELETE rolled back');
     // inside a caller's transaction the twins use that transaction (and its rollback)
     await assert.rejects(withTransaction(async (c) => {
       await pg.replaceToken(c, w.robot.id, 'reset', 'in-tx', LATER);
@@ -175,7 +176,7 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
       throw new Error('caller rolls back');
     }, tw.pg), /caller rolls back/);
     assert.equal(await pg.getToken(tw.pg, 'in-tx'), undefined);
-    assert.equal(await pg.getToken(tw.pg, 'keep-robot').then((r) => r.token), 'keep-robot');
+    assert.equal(await pg.getToken(tw.pg, 'keep-robot').then((r) => r.token), hashToken('keep-robot'));
   });
 });
 
@@ -234,7 +235,7 @@ describe('PostgreSQL accounts twin under concurrency', pgSuite(), () => {
     await pg.replaceToken(pool, id, 'reset', 'r0', LATER);
     const r = await overlap(pool, sampler, (c) => pg.replaceToken(c, id, 'reset', 'r1', LATER), (q) => pg.replaceToken(q, id, 'reset', 'r2', LATER));
     assert.deepEqual([r.first, r.second, r.blocked], [{ ok: undefined }, { ok: undefined }, true]);
-    assert.deepEqual((await pool.query('SELECT token FROM tokens WHERE user_id = $1', [id])).rows, [{ token: 'r2' }]);
+    assert.deepEqual((await pool.query('SELECT token FROM tokens WHERE user_id = $1', [id])).rows, [{ token: hashToken('r2') }]);
     const many = await Promise.all(['m1', 'm2', 'm3', 'm4'].map((t) => result(() => pg.replaceToken(pool, id, 'reset', t, LATER))));
     assert.ok(many.every((o) => 'ok' in o));
     assert.equal((await pool.query('SELECT COUNT(*) AS n FROM tokens WHERE user_id = $1', [id])).rows[0].n, 1);

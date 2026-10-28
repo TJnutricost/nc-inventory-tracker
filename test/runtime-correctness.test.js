@@ -101,7 +101,7 @@ let seq = 0;
 async function employee(name) {
   const created = await admin.post('/api/users', { name, email: `rc${++seq}@nutricost.com`, invite: true });
   assert.equal(created.status, 200, JSON.stringify(created.body));
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
+  const tok = require('./helpers').inviteToken(db, created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   return { client, id: created.body.id };

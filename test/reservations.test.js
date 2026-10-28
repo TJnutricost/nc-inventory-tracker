@@ -32,7 +32,7 @@ async function newAsset(name, { status, requestable = true, ...extra } = {}) {
 async function makeLogin(name, { selfCheckout = true } = {}) {
   const created = await admin.post('/api/users', { name, email: `rs${++seq}@nutricost.com`, invite: true, department: 'Marketing' });
   await admin.put(`/api/users/${created.body.id}/self-checkout`, { enabled: true }); // (new people start with self-checkout OFF)
-  const tok = db.prepare("SELECT token FROM tokens WHERE user_id = ? AND purpose = 'reset'").get(created.body.account_id);
+  const tok = require('./helpers').inviteToken(db, created.body.account_id);
   const client = makeClient(server);
   assert.equal((await client.post('/api/reset', { token: tok.token, password: 'employee-password-1' })).status, 200);
   if (!selfCheckout) assert.equal((await admin.put(`/api/users/${created.body.id}/self-checkout`, { enabled: false })).status, 200);

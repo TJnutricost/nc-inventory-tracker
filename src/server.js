@@ -461,6 +461,9 @@ app.post('/api/users/:id/invite', admin, async (req, res) => {
   const u = await data.people.getPerson(Number(req.params.id));
   if (!u) throw httpError(404, 'User not found');
   if (!u.account_id) throw httpError(400, 'This person has no login. Give them one first.');
+  // Without email, local development hands the admin the link to pass on. Production never returns (or issues) a usable link because
+  // email is missing: a misconfigured mail setup must not turn this response into a way to read invitation tokens.
+  if (!mailConfigured() && process.env.NODE_ENV === 'production') throw httpError(503, 'Email is not set up on this server, so no invitation was sent. Ask whoever runs it to configure email.');
   const t = newToken(24 * 7);
   await data.accounts.replaceToken(u.account_id, 'reset', t.token, t.expiresAt);
   const link = `${APP_URL}/#/reset/${t.token}`;
