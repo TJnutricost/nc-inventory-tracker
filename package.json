@@ -14,7 +14,9 @@
     "db:up": "docker compose -f docker-compose.postgres.yml up -d --wait",
     "db:down": "docker compose -f docker-compose.postgres.yml down",
     "db:reset": "echo 'Local only: stopping the dev PostgreSQL container and DELETING its data volume (nc_pgdata). SQLite and ./data* are untouched.' && docker compose -f docker-compose.postgres.yml down -v",
-    "db:check": "node scripts/db-check.js"
+    "db:check": "node scripts/db-check.js",
+    "backup:job": "node scripts/backup-job.js",
+    "backup:tool": "node scripts/backup-tool.js"
   },
   "license": "UNLICENSED",
   "dependencies": {
