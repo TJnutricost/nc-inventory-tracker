@@ -35,6 +35,10 @@ Every dump is encrypted before it leaves the job: AES-256-GCM (authenticated: a 
 - **Rotation:** set a new `BACKUP_ENCRYPTION_KEY`; new dumps use it, old dumps still need the old key. Keep every retired key in the password manager until the last dump made with it has been pruned (about 6 months). Each file records a 4-byte key fingerprint, so the tool tells you "different key" rather than failing mysteriously.
 - **Compromise of the key** alone exposes nothing (the dumps are in a private bucket); a compromise of both the key and the backup bucket exposes the employee data of every retained dump. Rotate, and treat it as a data incident.
 
+## Running a backup on demand (testing)
+
+A Railway cron service only runs on its schedule: *Redeploy* rebuilds it but does not run the job. To test: set the service's cron schedule to a time at least 5 minutes ahead (UTC), redeploy, wait for the run, then **set the schedule back to `30 7 * * *`** and redeploy. Locally, `railway run -s nc-backup -e Staging -- node scripts/backup-tool.js status|list` uses the service's variables without printing them (the database's private URL does not resolve outside Railway, so the job itself only runs in Railway).
+
 ## Monitoring
 
 - Railway → `nc-backup` → Deployments: each daily run is one deployment; **Failed** means the backup did not complete.
@@ -64,7 +68,7 @@ Postgres service → **Backups** tab → pick the date → **Restore**. Railway 
 
 ## Restore drill (monthly, and before go-live)
 
-Run A.1–A.3 and photo steps 1–2 against the newest backup into a local empty database/directory; confirm people/asset counts and that a few photos open. Record the date in PROJECT_STATUS.md. Last drill: automated test run on 2026-10-28 (`test/pg/pg-backup-job.test.js`: restores the dump into a new database and compares it, restores photos into an empty directory); first real-bucket drill is due after the cron service's first successful run.
+Run A.1–A.3 and photo steps 1–2 against the newest backup into a local empty database/directory; confirm people/asset counts and that a few photos open. Record the date in PROJECT_STATUS.md. Last drills: automated test (`test/pg/pg-backup-job.test.js`, 2026-10-28), and the **first real-bucket drill on 2026-10-28**: one supervised run of `nc-backup` (22:20 UTC) produced `db/nc-20261028T222030Z.dump.enc` (119,198 bytes, encrypted: starts with `NCBK1`, no `PGDMP`, no readable e-mails) and 12 photo versions; the dump was downloaded and decrypted with `backup-tool restore-db --restore` into a new empty local PostgreSQL 18 database (17 tables, migrations 1,2,3, 7 employees, 3 accounts, 23 assets) and `restore-photos` wrote 12 files into an empty directory, every one identical (size and MD5) to the live bucket object. The decrypted copies and the test database were deleted afterwards. Not compared: the restored database against the live one (private network only).
 
 ## Retention
 
