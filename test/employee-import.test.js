@@ -1,6 +1,6 @@
 // Employee CSV import (docs/briefs/employee-csv-import.md) and the scanner permission boundary: admin-only routes, preview vs import,
 // create / update / unchanged, duplicates and conflicts, idempotent re-import, what an import never touches (permissions, roles, accounts,
-// assignments, history), new people start without self-checkout / scanner access, Google sign-in links an imported person by work email,
+// assignments, history), new people start without self-checkout / scanner access, Google sign-in only admits an imported person once IT has given them a login,
 // and the scanner API answers 403 without the permission. Runs on both drivers (npm run test:pg-suite).
 const { test, before, after } = require('node:test');
 const assert = require('node:assert/strict');
@@ -15,7 +15,7 @@ before(async () => {
   fake = http.createServer((req, res) => { req.resume(); req.on('end', () => { const o = respond(); res.writeHead(o.status, { 'Content-Type': 'application/json' }).end(JSON.stringify(o.body)); }); });
   await new Promise((r) => fake.listen(0, '127.0.0.1', r));
   process.env.GOOGLE_CLIENT_ID = CLIENT_ID; process.env.GOOGLE_CLIENT_SECRET = 'test-secret';
-  delete process.env.GOOGLE_HOSTED_DOMAIN; delete process.env.GOOGLE_ADMIN_EMAILS;
+  delete process.env.GOOGLE_ADMIN_EMAILS;
   const booted = bootApp();
   db = booted.db;
   require('../src/googleAuth').endpoints.token = `http://127.0.0.1:${fake.address().port}/token`;
@@ -186,14 +186,18 @@ test('legacy people (a name with no first/last) are matched by email, never spli
   assert.equal((await run(HDR + 'Mary Ann,Legacy,legacy@nutricost.com,,,,\r\n')).body.counts.unchanged, 1, 'idempotent');
 });
 
-test('every creation path starts with self-checkout OFF: manual, CSV and Google sign-in; Google alone never opens the scanner', async () => {
+test('every creation path starts with self-checkout OFF: manual and CSV; signing in with Google never opens the scanner, and never creates anyone', async () => {
   const manual = (await admin.post('/api/users', { first_name: 'Manny', last_name: 'Manual', email: 'manny@nutricost.com', invite: false })).body;
   assert.deepEqual([manual.name, manual.first_name, manual.last_name, manual.can_self_checkout], ['Manny Manual', 'Manny', 'Manual', false]);
   assert.equal((await admin.post('/api/users', { first_name: 'Only', email: 'only@nutricost.com' })).status, 400, 'both parts or neither');
-  const s = await googleSignIn('brandnew@nutricost.com', { name: 'Brand New' }); // not in any roster: the existing auto-provisioning (D-10)
+  const peopleBefore = count('SELECT COUNT(*) c FROM employees');
+  const unknown = await googleSignIn('brandnew@nutricost.com', { name: 'Brand New' }); // not in any roster: Google creates nobody
+  assert.match(unknown.r.location, /error=no_access/); assert.equal(await unknown.me(), null);
+  assert.equal(count('SELECT COUNT(*) c FROM employees'), peopleBefore, 'no employee was created by Google');
+  const s = await googleSignIn('manny@nutricost.com'); // the manually created login
   assert.equal(s.r.location, '/#/home');
   const me = await s.me();
-  assert.equal(me.can_self_checkout, false, 'an auto-provisioned employee has self-checkout OFF');
+  assert.equal(me.can_self_checkout, false, 'a new employee has self-checkout OFF');
   assert.equal(count('SELECT can_self_checkout c FROM employees WHERE id = ?', me.employee_id), 0);
   assert.equal((await s.get('/api/assets/lookup/ANYTHING')).status, 403, 'and the scanner API refuses them');
   assert.equal((await s.get('/api/assets')).status, 200, 'browsing still works');
@@ -259,9 +263,13 @@ test('a failure part-way rolls the whole import back', { skip: skipOnPg }, async
   assert.equal(count("SELECT COUNT(*) c FROM activity WHERE action = 'employees_imported'"), logs);
 });
 
-test('an imported person signs in with Google (no invite, no password), linked by work email, as an employee', async () => {
+test('an imported person has no login, so Google refuses them; once IT gives them one they sign in (no invite, no password) as an employee', async () => {
   assert.equal((await run(HDR + 'Gina,Google,gina@nutricost.com,Ops,,,\r\n')).status, 200);
   const g = emp('gina@nutricost.com');
+  const refused = await googleSignIn('gina@nutricost.com');
+  assert.match(refused.r.location, /error=no_access/); assert.equal(await refused.me(), null);
+  assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', g.id), 0, 'Google made no login');
+  assert.equal((await admin.post(`/api/users/${g.id}/account`, { invite: false })).status, 200, 'IT gives them a login');
   const s = await googleSignIn('gina@nutricost.com');
   assert.equal(s.r.location, '/#/home', 'signed in');
   const me = await s.me();
@@ -271,18 +279,17 @@ test('an imported person signs in with Google (no invite, no password), linked b
   assert.equal(count('SELECT COUNT(*) c FROM tokens WHERE user_id = (SELECT id FROM accounts WHERE employee_id = ?)', g.id), 0, 'no invitation');
 });
 
-test('Google refuses an imported person who is inactive, an unverified email and another domain', async () => {
+test('Google refuses an imported person who is inactive, and an unverified email', async () => {
   assert.equal((await run(HDR + 'Ian,Inactive,ian@nutricost.com,,,,\r\n')).status, 200);
   const ian = emp('ian@nutricost.com');
+  assert.equal((await admin.post(`/api/users/${ian.id}/account`, { invite: false })).status, 200);
   await admin.put(`/api/users/${ian.id}`, { active: false });
   let s = await googleSignIn('ian@nutricost.com');
   assert.match(s.r.location, /error=/); assert.equal(await s.me(), null);
   assert.equal((await run(HDR + 'Vera,Verified,vera@nutricost.com,,,,\r\n')).status, 200);
+  assert.equal((await admin.post(`/api/users/${emp('vera@nutricost.com').id}/account`, { invite: false })).status, 200);
   s = await googleSignIn('vera@nutricost.com', { email_verified: false });
-  assert.match(s.r.location, /error=/); assert.equal(await s.me(), null);
-  s = await googleSignIn('vera@nutricost.com', { hd: 'gmail.com' });
-  assert.match(s.r.location, /error=/); assert.equal(await s.me(), null);
-  assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', emp('vera@nutricost.com').id), 0, 'no account was made for a refused sign-in');
+  assert.match(s.r.location, /error=unverified/); assert.equal(await s.me(), null);
 });
 
 test('scanner boundary: without the permission the scanner API and self-checkout answer 403; with it, and for admins, they work; browsing stays open', async () => {
@@ -327,13 +334,17 @@ test('the front end enters names as separate First name / Last name fields every
   assert.equal((src.match(/name="last_name"/g) || []).length, 3);
 });
 
-test('an imported person is only ever an employee: no import creates an account or role, and Google sign-in never elevates them', async () => {
+test('an imported person is only ever an employee: no import creates an account or role, Google creates none, and signing in never elevates them', async () => {
   const csv = HDR + 'Elena,Employee,elena@nutricost.com,IT,Administrator,HQ,\r\nAlex,Admin,admin.like@nutricost.com,IT,Admin,,\r\n'; // admin-looking details change nothing
   const accountsBefore = count('SELECT COUNT(*) c FROM accounts'); const adminsBefore = count("SELECT COUNT(*) c FROM accounts WHERE role = 'admin'");
   assert.equal((await run(csv)).status, 200);
   assert.equal(count('SELECT COUNT(*) c FROM accounts'), accountsBefore, 'the import creates no login at all, so no role');
   assert.equal(count("SELECT COUNT(*) c FROM accounts WHERE role = 'admin'"), adminsBefore, 'no admin was added');
   for (const [email, name] of [['elena@nutricost.com', 'Elena Employee'], ['admin.like@nutricost.com', 'Alex Admin']]) {
+    const none = await googleSignIn(email, { name });
+    assert.match(none.r.location, /error=no_access/, 'no login yet: refused, nothing created');
+    assert.equal(count('SELECT COUNT(*) c FROM accounts WHERE employee_id = ?', emp(email).id), 0, 'Google made no login');
+    assert.equal((await admin.post(`/api/users/${emp(email).id}/account`, { invite: false })).status, 200, 'IT gives them an employee login');
     const g = await googleSignIn(email, { name });
     assert.equal(g.r.location, '/#/home');
     const me = await g.me();

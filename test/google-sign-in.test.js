@@ -75,8 +75,7 @@ before(async () => {
   await new Promise((r) => fake.listen(0, '127.0.0.1', r));
   process.env.GOOGLE_CLIENT_ID = CLIENT_ID;
   process.env.GOOGLE_CLIENT_SECRET = 'test-secret';
-  delete process.env.GOOGLE_HOSTED_DOMAIN;
-  process.env.GOOGLE_ADMIN_EMAILS = ' Boss@nutricost.com , lead@nutricost.com,off@nutricost.com,boss@gmail.com';
+  process.env.GOOGLE_ADMIN_EMAILS = ' Boss@nutricost.com , lead@nutricost.com,off@nutricost.com,boss@gmail.com,stranger@nutricost.com';
   const booted = bootApp();
   db = booted.db;
   require('../src/googleAuth').endpoints.token = `http://127.0.0.1:${fake.address().port}/token`;
@@ -92,8 +91,9 @@ before(async () => {
   await person({ name: 'Left No Login', email: 'gone@nutricost.com', login: false });
   db.prepare("UPDATE employees SET status = 'inactive' WHERE work_email = 'gone@nutricost.com'").run();
   await person({ name: 'Team Lead', email: 'lead@nutricost.com' }); // an employee login, listed in GOOGLE_ADMIN_EMAILS
-  await person({ name: 'Dual', email: 'dual@nutricost.com' }); // then its login moved to another address: that address is taken
+  await person({ name: 'Dual', email: 'dual@nutricost.com' }); // then its login moved to another address: THAT address is the login
   db.prepare("UPDATE accounts SET login_email = 'taken@nutricost.com' WHERE login_email = 'dual@nutricost.com'").run();
+  await person({ name: 'Partner Person', email: 'partner@partner-example.org' }); // an authorized login at another domain (any domain may be a login)
 });
 after(async () => {
   await stopServer(server);
@@ -107,7 +107,8 @@ test('Google sign-in is offered, and GET /auth/google sends the browser to Googl
   assert.equal(`${url.origin}${url.pathname}`, 'https://accounts.google.com/o/oauth2/v2/auth');
   assert.equal(p.client_id, CLIENT_ID);
   assert.equal(p.redirect_uri, CALLBACK);
-  assert.deepEqual([p.response_type, p.scope, p.code_challenge_method, p.hd, p.prompt], ['code', 'openid email profile', 'S256', 'nutricost.com', 'select_account']);
+  assert.deepEqual([p.response_type, p.scope, p.code_challenge_method, p.prompt], ['code', 'openid email', 'S256', 'select_account']);
+  assert.equal(url.searchParams.has('hd'), false, 'no domain hint: the person types their whole Google address');
   assert.ok(p.state.length >= 40 && p.nonce.length >= 40 && p.state !== p.nonce);
   assert.ok(b.cookie(), 'the pending sign-in is kept in a session');
 });
@@ -143,43 +144,33 @@ test('the Google email is matched trimmed and case-insensitively; an admin keeps
 
 const counts = () => db.prepare('SELECT (SELECT COUNT(*) FROM employees) AS e, (SELECT COUNT(*) FROM accounts) AS a').get();
 
-test('a first Google sign-in makes a new person with an employee login (never an admin), and the next one reuses it', async () => {
+test('Google never creates anyone: an unknown address, a person with no login, and a listed admin address with no login are all refused, nothing created', async () => {
   const before_ = counts();
+  for (const email of ['sam.new@nutricost.com', 'nolog@nutricost.com', 'stranger@nutricost.com', 'boss@nutricost.com', 'boss@gmail.com', 'sam@somewhere-else.example']) {
+    const b = browser();
+    b.last = await signIn(b, email, { claims: { name: 'Sam New' } });
+    await refused(b, 'no_access', email);
+  }
+  assert.deepEqual(counts(), before_);
+});
+
+test('an authorized login at another email domain signs in (no domain setting, no hd needed); sign-in changes nothing about the person', async () => {
+  const flags = () => db.prepare("SELECT e.can_self_checkout, a.role FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE a.login_email = 'partner@partner-example.org'").get();
+  const before_ = flags();
   const b = browser();
-  b.last = await signIn(b, 'Sam.New@nutricost.com', { claims: { name: 'Sam New' } });
+  b.last = await signIn(b, 'Partner@Partner-Example.org', { claims: { hd: undefined } });
   assert.equal(b.last.r.location, '/#/home');
-  const me = await b.me();
-  assert.deepEqual([me.email, me.name, me.role, me.has_password], ['sam.new@nutricost.com', 'Sam New', 'employee', false]);
-  assert.deepEqual(counts(), { e: before_.e + 1, a: before_.a + 1 });
-  assert.deepEqual(db.prepare("SELECT e.work_email, e.status, a.active FROM employees e JOIN accounts a ON a.employee_id = e.id WHERE e.name = 'Sam New'").get(),
-    { work_email: 'sam.new@nutricost.com', status: 'active', active: 1 });
-  const again = browser();
-  again.last = await signIn(again, 'sam.new@nutricost.com', { claims: { name: 'Another Name' } });
-  assert.equal((await again.me()).account_id, me.account_id, 'the same login, not a second person');
-  assert.deepEqual(counts(), { e: before_.e + 1, a: before_.a + 1 });
-});
-
-test('a first sign-in without a Google name uses the address; control characters are dropped from a name', async () => {
-  const b = browser();
-  b.last = await signIn(b, 'no.name@nutricost.com');
-  assert.equal((await b.me()).name, 'no.name');
+  assert.deepEqual([(await b.me()).email, (await b.me()).role], ['partner@partner-example.org', 'employee']);
+  assert.deepEqual(flags(), before_, 'self-checkout (and so the scanner) is not granted by signing in');
+  assert.deepEqual(before_, { can_self_checkout: 0, role: 'employee' });
   const c = browser();
-  c.last = await signIn(c, 'odd@nutricost.com', { claims: { name: '  Odd\u0000\u0007 Name  ' } });
-  assert.equal((await c.me()).name, 'Odd Name');
+  c.last = await signIn(c, 'taken@nutricost.com', { claims: { hd: 'some-other-workspace.example' } });
+  assert.equal(c.last.r.location, '/#/home', 'the login email, not the work email, is the key; hd is not checked');
 });
 
-test('a person IT added without a login gets one on their first sign-in, linked to them (no second person)', async () => {
+test('refused, nothing created: a login IT turned off, a person who left (with or without a login), a work email that is not the login', async () => {
   const before_ = counts();
-  const b = browser();
-  b.last = await signIn(b, 'nolog@nutricost.com', { claims: { name: 'Not Used' } });
-  const me = await b.me();
-  assert.deepEqual([me.name, me.role], ['No Login', 'employee'], "IT's record is kept as it is");
-  assert.deepEqual(counts(), { e: before_.e, a: before_.a + 1 });
-});
-
-test('refused, nothing created: a login IT turned off, a person who left (with or without a login), an address that is another login', async () => {
-  const before_ = counts();
-  for (const email of ['off@nutricost.com', 'left@nutricost.com', 'gone@nutricost.com', 'taken@nutricost.com']) {
+  for (const email of ['off@nutricost.com', 'left@nutricost.com', 'gone@nutricost.com', 'dual@nutricost.com']) {
     const b = browser();
     b.last = await signIn(b, email);
     await refused(b, 'no_access', email);
@@ -187,12 +178,11 @@ test('refused, nothing created: a login IT turned off, a person who left (with o
   assert.deepEqual(counts(), before_);
 });
 
-test('ID tokens that fail a check are refused: domain, unverified email, issuer, audience, expiry, nonce', async () => {
+test('ID tokens that fail a check are refused: unverified email, issuer, audience, expiry, nonce', async () => {
   const cases = [
-    ['domain', { hd: 'evil.com' }, 'another Workspace'],
-    ['domain', { hd: undefined }, 'a personal Google account (no hd)'],
-    ['domain', { email: 'bea@gmail.com' }, 'hd right but the email elsewhere'],
     ['unverified', { email_verified: false }, 'unverified email'],
+    ['unverified', { email_verified: undefined }, 'no email_verified claim'],
+    ['unverified', { email: undefined }, 'no email'],
     ['token', { iss: 'https://evil.example' }, 'issuer'],
     ['token', { aud: 'someone-else.apps.googleusercontent.com' }, 'audience'],
     ['token', { aud: [CLIENT_ID, 'other'], azp: 'other' }, 'several audiences, not authorized for us'],
@@ -255,20 +245,27 @@ test('refusals are rate-limited per IP (10, then 15 minutes); a success resets t
   await refused(c, 'no_access', 'counting starts again after a success');
 });
 
-test('GOOGLE_ADMIN_EMAILS: a listed address is an admin from its first sign-in, a listed employee login is promoted; refused stays refused', async () => {
-  const b = browser();
-  b.last = await signIn(b, 'boss@nutricost.com', { claims: { name: 'The Boss' } });
-  assert.deepEqual([(await b.me()).name, (await b.me()).role], ['The Boss', 'admin']);
+test('GOOGLE_ADMIN_EMAILS only promotes an existing authorized login; it never creates one or admits anyone', async () => {
+  const before_ = counts();
   const c = browser();
   c.last = await signIn(c, 'lead@nutricost.com');
-  assert.deepEqual([(await c.me()).name, (await c.me()).role], ['Team Lead', 'admin']);
+  assert.deepEqual([(await c.me()).name, (await c.me()).role], ['Team Lead', 'admin'], 'a listed employee login is promoted');
+  for (const email of ['boss@nutricost.com', 'boss@gmail.com', 'stranger@nutricost.com']) {
+    const b = browser();
+    b.last = await signIn(b, email);
+    await refused(b, 'no_access', `${email}: listed, but no login`);
+  }
   const d = browser();
   d.last = await signIn(d, 'off@nutricost.com');
   await refused(d, 'no_access', 'a listed address IT turned off');
   assert.equal(db.prepare("SELECT role FROM accounts WHERE login_email = 'off@nutricost.com'").get().role, 'employee');
-  const e = browser();
-  e.last = await signIn(e, 'boss@gmail.com', { claims: { hd: undefined } });
-  await refused(e, 'domain', 'a listed address outside the company domain');
+  assert.deepEqual(counts(), before_);
+  const p = browser();
+  p.last = await signIn(p, 'partner@partner-example.org');
+  assert.equal((await p.me()).role, 'employee', 'an unlisted login stays an employee');
+  const a = browser();
+  a.last = await signIn(a, 'ada@nutricost.com');
+  assert.equal((await a.me()).role, 'admin', 'an existing admin stays one');
   // admin rights given this way stay when the address is later removed from the list (never demoted by the app)
   assert.equal((await admin.get('/api/users')).body.find((u) => u.email === 'lead@nutricost.com').role, 'admin');
 });
@@ -288,7 +285,17 @@ test('a sign-in that took longer than 10 minutes at Google is refused (unit: src
   await assert.rejects(g.finish(cfg, { pending, query: { state: pending.state, code: 'x' }, redirectUri: CALLBACK, now: 10 * 60e3 + 1 }), (e) => e.signInCode === 'state');
   assert.equal(g.config({ GOOGLE_CLIENT_ID: CLIENT_ID }), null, 'off without the secret');
   assert.equal(g.config({ GOOGLE_CLIENT_ID: ' ', GOOGLE_CLIENT_SECRET: 's' }), null, 'off with a blank id');
-  assert.equal(g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', GOOGLE_HOSTED_DOMAIN: ' Example.COM ' }).domain, 'example.com');
-  assert.deepEqual([...g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', GOOGLE_ADMIN_EMAILS: ' A@x.com,, b@x.com ' }).admins], ['a@x.com', 'b@x.com']);
+    assert.deepEqual([...g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b', GOOGLE_ADMIN_EMAILS: ' A@x.com,, b@x.com ' }).admins], ['a@x.com', 'b@x.com']);
   assert.equal(g.config({ GOOGLE_CLIENT_ID: 'a', GOOGLE_CLIENT_SECRET: 'b' }).admins.size, 0);
+});
+
+test('checkClaims accepts any verified email (no domain, no hd) and refuses an unverified or missing one (unit)', () => {
+  const g = require('../src/googleAuth');
+  const cfg = g.config({ GOOGLE_CLIENT_ID: CLIENT_ID, GOOGLE_CLIENT_SECRET: 's', GOOGLE_ALLOWED_DOMAINS: 'ignored.example' });
+  assert.equal('domains' in cfg, false, 'no domain setting is read');
+  const claims = (o) => ({ iss: 'https://accounts.google.com', aud: CLIENT_ID, exp: Math.floor(Date.now() / 1000) + 60, nonce: 'n', email: ' A@Other.EXAMPLE ', email_verified: true, ...o });
+  assert.deepEqual(g.checkClaims(cfg, claims({}), 'n'), { email: 'a@other.example' });
+  assert.throws(() => g.checkClaims(cfg, claims({ email_verified: 'false' }), 'n'), (e) => e.signInCode === 'unverified');
+  assert.throws(() => g.checkClaims(cfg, claims({ email_verified: undefined }), 'n'), (e) => e.signInCode === 'unverified');
+  assert.throws(() => g.checkClaims(cfg, claims({ email: '  ' }), 'n'), (e) => e.signInCode === 'unverified');
 });

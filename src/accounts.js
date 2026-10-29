@@ -32,27 +32,8 @@ function createFirstAdmin(db, { name, firstName = null, lastName = null, mail, h
 // The active account with this (normalized) login email, its employee (if any) active too; undefined otherwise.
 const loginAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a LEFT JOIN employees e ON e.id = a.employee_id
     WHERE a.login_email = ? AND a.active = 1 AND (e.id IS NULL OR e.status = 'active')`).get(email);
-// Google sign-in (D-10): the active account of the ACTIVE employee whose work email is this verified Google address (trimmed and
-// lower-cased by src/googleAuth.js); undefined otherwise. An account with no employee, or an employee with no work email, cannot sign in
-// this way (they keep the password). The same row as loginAccount.
-const googleAccount = (db, email) => db.prepare(`SELECT a.* FROM accounts a JOIN employees e ON e.id = a.employee_id
-    WHERE e.work_email = ? AND a.active = 1 AND e.status = 'active'`).get(email);
-// Google sign-in, first time (owner decision 2026-10-27, D-10 revised): a verified company Google address with no login yet gets one,
-// role 'employee' (admin is only ever given by IT in People). One transaction. An active employee with that work email and no login
-// gets a login linked to them; nobody with that work email: a new employee (`name` from Google) and its login. Refused (null): the
-// employee left (inactive), their login was turned off by IT, or the address is already another person's login. Returns the account id.
-function provisionGoogleAccount(db, { email, name }) {
-  return db.transaction(() => {
-    const e = db.prepare(`SELECT e.id, e.status, a.id AS account_id, a.active FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id
-      WHERE e.work_email = ?`).get(email);
-    if (e && e.account_id) return e.status === 'active' && e.active === 1 ? e.account_id : null;
-    if ((e && e.status !== 'active') || db.prepare('SELECT 1 FROM accounts WHERE login_email = ?').get(email)) return null;
-    const emp = e ? e.id : db.prepare('INSERT INTO employees (name, work_email, can_self_checkout) VALUES (?, ?, 0)').run(name, email).lastInsertRowid; // (self-checkout, and so the scanner, is never granted by signing in)
-    return db.prepare("INSERT INTO accounts (employee_id, login_email, role) VALUES (?, ?, 'employee')").run(emp, email).lastInsertRowid;
-  })();
-}
-// Google sign-in by an address listed in GOOGLE_ADMIN_EMAILS (the server operator's way to name the first admins): that login becomes an
-// admin. Never demotes. Returns true when it changed the role.
+// Google sign-in by an address listed in GOOGLE_ADMIN_EMAILS, whose login ALREADY exists and is active (found by loginAccount; Google never
+// creates one): that login becomes an admin. Never demotes. Returns true when it changed the role.
 const makeAdmin = (db, accountId) => db.prepare("UPDATE accounts SET role = 'admin' WHERE id = ? AND role <> 'admin'").run(accountId).changes === 1;
 function recordLogin(db, accountId) { db.prepare("UPDATE accounts SET last_login_at = datetime('now') WHERE id = ?").run(accountId); }
 
@@ -80,4 +61,4 @@ function completeReset(db, accountId, hash) {
   db.prepare('DELETE FROM tokens WHERE user_id = ?').run(accountId);
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

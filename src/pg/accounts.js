@@ -42,7 +42,6 @@ const httpError = (status, msg) => Object.assign(new Error(msg), { status });
 const one = async (q, sql, params) => (await q.query(sql, params)).rows[0];
 const hasNul = (v) => typeof v === 'string' && v.includes('\u0000');
 const SETUP_LOCK_KEY = 4_651_201_400_019; // arbitrary constant (src/pg/migrate.js ...017, src/pg/sweep.js ...018)
-const GOOGLE_LOCK_KEY = 46_512_020; // int4 class key of the per-address Google sign-in lock (the two-key advisory lock form)
 const SETUP_DONE = 'Setup already completed'; // the route's refusal (src/server.js POST /api/setup)
 const LINK_EXPIRED = 'This link has expired. Ask for a new one.'; // the route's refusal (src/server.js POST /api/reset)
 
@@ -75,31 +74,7 @@ const createFirstAdmin = async (q, { name, firstName = null, lastName = null, ma
 // ---- login ----
 // The active account with this (normalized) login email, its employee (if any) active too; undefined otherwise.
 const loginAccount = async (q, email) => (hasNul(email) ? undefined : one(q, `SELECT a.* ${ACTIVE_LOGIN}`, [email]));
-// Google sign-in (D-10): the active account of the ACTIVE employee with this work email (SQLite NOCASE, as loginAccount); undefined if none.
-const googleAccount = async (q, email) => (hasNul(email) ? undefined : one(q, `SELECT a.* FROM accounts a JOIN employees e ON e.id = a.employee_id
-    WHERE lower(e.work_email) = lower($1 COLLATE "C") AND a.active = 1 AND e.status = 'active'`, [email]));
-// Google sign-in, first time: the SQLite twin's rules, one transaction (a caller's when given its client). Two first sign-ins with the
-// same address at once (two tabs) are serialized by a transaction advisory lock on the lower-cased address, so the second finds the
-// first's login and signs into it; a concurrent admin create with the same address is caught by the unique indexes (23505: refused,
-// null; signing in again then finds the login). Lock order as elsewhere: employee row -> account.
-async function provisionGoogleAccount(q, { email, name }) {
-  if (hasNul(email) || hasNul(name)) return null;
-  try {
-    return await inTransaction(q, async (c) => {
-      await c.query('SELECT pg_advisory_xact_lock($1, hashtext(lower($2 COLLATE "C")))', [GOOGLE_LOCK_KEY, email]);
-      const e = await one(c, `SELECT e.id, e.status, a.id AS account_id, a.active FROM employees e LEFT JOIN accounts a ON a.employee_id = e.id
-        WHERE lower(e.work_email) = lower($1 COLLATE "C") FOR UPDATE OF e`, [email]);
-      if (e && e.account_id) return e.status === 'active' && e.active === 1 ? e.account_id : null;
-      if ((e && e.status !== 'active') || await one(c, 'SELECT 1 FROM accounts WHERE lower(login_email) = lower($1 COLLATE "C")', [email])) return null;
-      const emp = e ? e.id : (await one(c, 'INSERT INTO employees (name, work_email, can_self_checkout) VALUES ($1, $2, 0) RETURNING id', [name, email])).id;
-      return (await one(c, "INSERT INTO accounts (employee_id, login_email, role) VALUES ($1, $2, 'employee') RETURNING id", [emp, email])).id;
-    });
-  } catch (err) {
-    if (err.code === '23505') return null;
-    throw err;
-  }
-}
-// GOOGLE_ADMIN_EMAILS (as SQLite): that login becomes an admin; never demotes; true when it changed the role.
+// GOOGLE_ADMIN_EMAILS (as SQLite; an existing active login only): that login becomes an admin; never demotes; true when it changed the role.
 const makeAdmin = async (q, accountId) => (await q.query("UPDATE accounts SET role = 'admin' WHERE id = $1 AND role <> 'admin'", [toId(accountId)])).rowCount === 1;
 async function recordLogin(q, accountId) { await q.query(`UPDATE accounts SET last_login_at = ${NOW} WHERE id = $1`, [toId(accountId)]); }
 
@@ -134,4 +109,4 @@ async function completeReset(q, accountId, hash) {
   });
 }
 
-module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, googleAccount, provisionGoogleAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };
+module.exports = { currentUser, accountCount, createFirstAdmin, loginAccount, makeAdmin, recordLogin, setPassword, resetAccount, replaceToken, getToken, completeReset };

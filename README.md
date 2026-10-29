@@ -212,7 +212,7 @@ To check it, go to **Settings → Send me a test email**. The Outbox shows each 
 
 Off until it is configured: with both variables below set, the login screen shows **Sign in with Google** above the password form (which stays).
 
-Who gets in: anyone with a verified `GOOGLE_HOSTED_DOMAIN` Google account. On their **first** sign-in the app gives them a login with the **Employee** role: linked to their People record if IT already added them (matched by work email), otherwise as a new person named from their Google profile. **Admin is given by IT** (People → edit → Access), or, for the first admin of a new environment, by listing the address in `GOOGLE_ADMIN_EMAILS` (comma-separated; that person becomes an admin when they sign in with Google; never removed by the app). Refused: a person IT deactivated, a login IT turned off, or an address that is already someone else's login.
+Who gets in: **Google verifies identity; the People list decides access.** A sign-in succeeds only when Google's token is valid, its email is verified, and that exact email (trimmed, case-insensitive) is the **login email of an existing, active login whose employee is active**. A People record without a login is not enough, and **Google never creates a person or a login** (no self-registration, no pending-approval queue). Unknown, deactivated or login-disabled people are refused with "This Google account does not have access to this app. Ask IT to add you." The login screen does not pre-select a domain: people type their whole Google address, and any domain works if IT gave that address a login (People → add person with login, an invite, or the employee CSV import). Signing in changes nothing about the person: Employee role, scanner/self-checkout permission and assignments stay as IT set them. `GOOGLE_ADMIN_EMAILS` (optional, comma-separated) only **promotes** an address that already is an active login to admin at its sign-in (never removed by the app); it cannot create an account or admit anyone, so clear it once the first admins exist. The password login stays beside Google.
 
 Setup (once, in the Google Cloud Console, signed in with a company account):
 1. Create a project inside the company organization.
@@ -222,12 +222,13 @@ Setup (once, in the Google Cloud Console, signed in with a company account):
    ```
    GOOGLE_CLIENT_ID=<…apps.googleusercontent.com>
    GOOGLE_CLIENT_SECRET=<GOCSPX-…>
-   # GOOGLE_HOSTED_DOMAIN=nutricost.com   (the default)
-   # GOOGLE_ADMIN_EMAILS=you@nutricost.com   (optional: made admins at Google sign-in)
+   # GOOGLE_ADMIN_EMAILS=you@nutricost.com   (optional: promotes an EXISTING active login to admin)
    ```
 5. Restart the app.
 
 `APP_URL` must match the address in the browser exactly, or Google answers `redirect_uri_mismatch`.
+
+**Limitation: the OAuth app is Internal.** With audience *Internal*, Google itself only lets accounts of the Google Cloud project's own Workspace organization sign in (secondary domains and domain aliases of that organization included). Employees of a separately managed Workspace organization will be stopped by Google before they reach this app, whatever logins exist here. Giving them a login here is necessary but not sufficient. The safest next step, if that is ever needed, is to change the audience to *External* (a deliberate decision in Google Cloud, not done by this app) and keep the People/login directory as the gate (it already is: only existing logins get in), or to bring those domains into the same Workspace organization as secondary domains. Until then the app cannot admit them.
 
 ---
 

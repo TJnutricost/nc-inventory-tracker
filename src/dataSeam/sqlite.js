@@ -40,7 +40,7 @@ const MODULES = {
   catalogViews: [require('../catalogViews'), ['searchCatalog', 'catalogTree']],
   requestAccess: [require('../requestAccess'), ['loadRequest', 'isSelfInitiated', 'cancelBlock']],
   // extracted verbatim from server.js in Slice 5B-3 (people, authentication, sessions; people.js gained the /api/users functions)
-  accounts: [require('../accounts'), ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'googleAccount', 'provisionGoogleAccount', 'makeAdmin', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset']],
+  accounts: [require('../accounts'), ['currentUser', 'accountCount', 'createFirstAdmin', 'loginAccount', 'makeAdmin', 'recordLogin', 'setPassword', 'resetAccount', 'replaceToken', 'getToken', 'completeReset']],
   sessions: [require('../sessions'), ['get', 'set', 'touch', 'destroy', 'purgeExpired', 'destroyForAccount']],
   // Slice 5B-4: settings (the SQL of src/db.js getSettings / setSetting, copied verbatim: src/db.js is unchanged), the outbox and the
   // overdue sweep, the request list / create / approve (extracted verbatim from server.js; additions to activityLog, people, assetViews,

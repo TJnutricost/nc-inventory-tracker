@@ -91,49 +91,9 @@ describe('PostgreSQL accounts twin (differential against src/accounts.js)', pgSu
     for (const e of ['off@nutricost.com', 'gone@nutricost.com']) assert.equal((await same(`inactive ${e}`, 'loginAccount', e)).ok, undefined);
   });
 
-  test('googleAccount: an active employee\'s work email with an active login only, ASCII-only case folding', async () => {
-    const off = await tw.employee({ name: 'Off Work', work_email: 'offwork@nutricost.com' });
-    const left = await tw.employee({ name: 'Left', work_email: 'left@nutricost.com', status: 'inactive' });
-    const unu = await tw.employee({ name: 'Ünï', work_email: 'Ünï@nutricost.com' });
-    await tw.employee({ name: 'Bare', work_email: 'bare@nutricost.com' }); // no login
-    await tw.insert('accounts', { employee_id: off.id, login_email: 'offwork@nutricost.com', active: 0 });
-    await tw.insert('accounts', { employee_id: left.id, login_email: 'left@nutricost.com' });
-    const u = await tw.insert('accounts', { employee_id: unu.id, login_email: 'unu-login@nutricost.com' });
-    const emails = ['ana@nutricost.com', 'ANA@NUTRICOST.COM', 'ana.admin@nutricost.com', 'offwork@nutricost.com', 'left@nutricost.com', 'bare@nutricost.com',
-      'robot@nutricost.com', 'Ünï@nutricost.com', 'ÜNï@NUTRICOST.COM', 'ÜNÏ@nutricost.com', 'ünï@nutricost.com', 'nobody@nutricost.com', '', 'ana@nutricost.com\u0000', '%@nutricost.com', 'ana_nutricost.com'];
-    for (const e of emails) await same(`google ${JSON.stringify(e)}`, 'googleAccount', e);
-    assert.equal((await same('work email, any ASCII case', 'googleAccount', 'ANA@NUTRICOST.COM')).ok.id, w.ana.id);
-    assert.equal((await same('the login email is not the key', 'googleAccount', 'ana.admin@nutricost.com')).ok, undefined);
-    assert.equal((await same('non-ASCII same letters', 'googleAccount', 'ÜNï@NUTRICOST.COM')).ok.id, u.id, 'ASCII letters fold, Ü and ï match themselves');
-    for (const e of ['ünï@nutricost.com', 'ÜNÏ@nutricost.com']) assert.equal((await same(`non-ASCII other case ${e}`, 'googleAccount', e)).ok, undefined, 'non-ASCII letters do not fold');
-    for (const e of ['offwork@nutricost.com', 'left@nutricost.com', 'bare@nutricost.com', 'robot@nutricost.com']) assert.equal((await same(`refused ${e}`, 'googleAccount', e)).ok, undefined);
-  });
-
-  test('provisionGoogleAccount: the same outcome and the same rows on both engines', async () => {
-    await tw.employee({ name: 'Gone Two', work_email: 'gone2@nutricost.com', status: 'inactive' });
-    const cases = [
-      ['a new address: a new employee and its employee login', { email: 'newbie@nutricost.com', name: 'New Bie' }],
-      ['the same address again: that login', { email: 'newbie@nutricost.com', name: 'Other' }],
-      ['an employee without a login: linked to them', { email: 'bare@nutricost.com', name: 'Ignored' }],
-      ['an active login (found by googleAccount first in the route): that login', { email: 'ana@nutricost.com', name: 'x' }],
-      ['a login IT turned off', { email: 'offwork@nutricost.com', name: 'x' }],
-      ['a person who left, with a login', { email: 'left@nutricost.com', name: 'x' }],
-      ['a person who left, without a login', { email: 'gone2@nutricost.com', name: 'x' }],
-      ['the address is another login', { email: 'ana.admin@nutricost.com', name: 'x' }],
-    ];
-    const out = {};
-    for (const [label, args] of cases) out[label] = await write(label, (q) => pg.provisionGoogleAccount(q, args), (db) => sq.provisionGoogleAccount(db, args));
-    const t = await tables(tw, 'after provisioning');
-    const made = t.accounts.find((a) => a.login_email === 'newbie@nutricost.com');
-    assert.deepEqual([made.role, made.password_hash, t.employees.find((e) => e.id === made.employee_id).name], ['employee', null, 'New Bie']);
-    assert.equal(out[cases[1][0]].ok, made.id);
-    assert.equal(out[cases[3][0]].ok, w.ana.id);
-    for (const [label] of cases.slice(4)) assert.deepEqual(out[label], { ok: null }, label);
-    assert.equal(await pg.provisionGoogleAccount(tw.pg, { email: 'nul@nutricost.com', name: 'a\u0000b' }), null, 'NUL: refused, nothing stored');
-  });
-
   test('makeAdmin: an employee login becomes admin (true), an admin stays (false), unknown ids change nothing', async () => {
-    const id = (await tw.pg.query("SELECT id FROM accounts WHERE login_email = 'newbie@nutricost.com'")).rows[0].id;
+    const newbie = await tw.employee({ name: 'New Bie', work_email: 'newbie@nutricost.com' });
+    const id = (await tw.insert('accounts', { employee_id: newbie.id, login_email: 'newbie@nutricost.com' })).id;
     assert.deepEqual(await write('promote', (q) => pg.makeAdmin(q, id), (db) => sq.makeAdmin(db, id)), { ok: true });
     assert.deepEqual(await write('already admin', (q) => pg.makeAdmin(q, id), (db) => sq.makeAdmin(db, id)), { ok: false });
     assert.deepEqual(await write('unknown', (q) => pg.makeAdmin(q, 999999), (db) => sq.makeAdmin(db, 999999)), { ok: false });
@@ -217,17 +177,6 @@ describe('PostgreSQL accounts twin under concurrency', pgSuite(), () => {
     await pg.replaceToken(pool, id, 'reset', 'twice', LATER);
     const outs = await Promise.all([result(() => pg.completeReset(pool, id, 'h-c')), result(() => pg.completeReset(pool, id, 'h-d'))]);
     assert.equal(outs.filter((o) => 'ok' in o).length, 1, JSON.stringify(outs));
-  });
-
-  test('two first Google sign-ins with the same address at once: one person, one login, both signed into it', async () => {
-    const args = { email: 'twice@nutricost.com', name: 'Twice' };
-    const r = await overlap(pool, sampler, (c) => pg.provisionGoogleAccount(c, args), (q) => pg.provisionGoogleAccount(q, args));
-    assert.ok(r.blocked, 'the second waited for the first');
-    assert.equal(typeof r.first.ok, 'number');
-    assert.deepEqual(r.second, r.first);
-    const many = await Promise.all([1, 2, 3, 4].map(() => result(() => pg.provisionGoogleAccount(pool, { email: 'four@nutricost.com', name: 'Four' }))));
-    assert.equal(new Set(many.map((o) => o.ok)).size, 1, JSON.stringify(many));
-    assert.equal((await pool.query("SELECT COUNT(*) AS n FROM employees WHERE work_email IN ('twice@nutricost.com', 'four@nutricost.com')")).rows[0].n, 2);
   });
 
   test('two simultaneous invites for one account leave exactly one live token (the later one)', async () => {
