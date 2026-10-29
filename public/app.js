@@ -129,7 +129,7 @@ const isPermReq = (r) => r.requested_assignment_type === 'permanent';
 // The lifecycle a person sees (derived on the server from status + opened_at; see src/requests.js). One vocabulary for employees and IT.
 // The card pill, the detail sheet and the state filter ALL read it through `stateKey`/`statusLabel` below, so they cannot disagree,
 // and a raw database status ("completed", "cancelled", "denied") is never shown.
-const LIFE_LABEL = { submitted: 'Submitted', in_review: 'In review', approved: 'Approved', dropped_off: 'Dropped off', fulfilled: 'Fulfilled', resolved: 'Resolved', denied: 'Declined', rescinded: 'Rescinded', withdrawn: 'Withdrawn', cancelled: 'Cancelled', dismissed: 'Dismissed' };
+const LIFE_LABEL = { ready: 'Ready', submitted: 'Submitted', in_review: 'In review', approved: 'Approved', dropped_off: 'Dropped off', fulfilled: 'Fulfilled', resolved: 'Resolved', denied: 'Declined', rescinded: 'Rescinded', withdrawn: 'Withdrawn', cancelled: 'Cancelled', dismissed: 'Dismissed' };
 const LIFE_CLASS = { submitted: 'open', in_review: 'in_review', approved: 'approved', dropped_off: 'dropped_off', fulfilled: 'completed', resolved: 'completed', denied: 'denied', rescinded: 'cancelled', withdrawn: 'cancelled', cancelled: 'cancelled', dismissed: 'cancelled' }; // pill colour
 const OPEN_STATES = ['submitted', 'in_review', 'approved', 'dropped_off'];
 const CLOSED_STATES = ['fulfilled', 'resolved', 'denied', 'rescinded', 'withdrawn', 'cancelled', 'dismissed'];
@@ -244,14 +244,21 @@ function statusPill(a) {
 const assetStatus = (a) => (!['retired', 'lost', 'disposed'].includes(a.status) && isOverdue(a.due_date) ? 'overdue' : a.status);
 
 // ============================================================ sheets (bottom modal)
-function sheet(html, { onOpen, wide } = {}) {
+// `closeX` adds a close button that stays in the sheet's top-right corner on phones while the content scrolls; `dirty` (a function) says whether there are unsaved
+// changes: then every user dismissal (X, Close, tapping outside) asks before discarding them. close() itself never asks.
+function sheet(html, { onOpen, wide, closeX, dirty } = {}) {
   const root = $('#sheet-root');
   const wrap = document.createElement('div');
   wrap.className = 'sheet-backdrop';
-  wrap.innerHTML = `<div class="sheet" role="dialog" aria-modal="true" ${wide ? 'style="max-width:720px"' : ''}><div class="grab"></div>${html}</div>`;
+  wrap.innerHTML = `<div class="sheet${closeX ? ' has-x' : ''}" role="dialog" aria-modal="true" ${wide ? 'style="max-width:720px"' : ''}><div class="grab"></div>${closeX ? `<div class="sheet-x-bar"><button type="button" class="sheet-x" data-close aria-label="Close">${icon('x')}</button></div>` : ''}${html}</div>`;
   root.appendChild(wrap);
   const close = () => { wrap.remove(); document.body.style.overflow = root.children.length ? 'hidden' : ''; }; // (a sheet may sit on top of another)
-  wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('[data-close]')) close(); });
+  const dismiss = () => {
+    if (!dirty || !dirty()) return close();
+    const s = sheet(`<h2>Discard changes?</h2><p class="muted small" style="margin-top:0">You have changes that are not saved. Closing now discards them.</p><div class="sheet-actions"><button type="button" class="btn" data-close>Keep editing</button><button type="button" class="btn danger" id="discard">Discard changes</button></div>`);
+    $('#discard', s.el).onclick = () => { s.close(); close(); };
+  };
+  wrap.addEventListener('click', (e) => { if (e.target === wrap || e.target.closest('[data-close]')) dismiss(); });
   document.body.style.overflow = 'hidden';
   const el = $('.sheet', wrap);
   onOpen && onOpen(el, close);
@@ -549,14 +556,21 @@ async function refreshBadge() {
   try {
     const rows = await api('GET', '/api/requests?status=open');
     // For an employee the badge means "IT is waiting on you": a return IT asked for, not one they started themselves.
-    let n = isAdmin() ? rows.filter((r) => r.status === 'open' || r.status === 'dropped_off').length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
+    const live = (r) => r.status === 'open' || r.status === 'dropped_off';
+    let returns = isAdmin() ? rows.filter((r) => r.type !== 'equipment' && live(r)).length : rows.filter((r) => r.type === 'return' && r.status === 'open' && !r.self_initiated).length;
+    let equipment = isAdmin() ? rows.filter((r) => r.type === 'equipment' && live(r)).length : 0; // (the older item requests; the new ones are counted below)
+    let reservations = 0;
     // IT: reservations waiting for approval + everyone currently on a waitlist. Employee: offers waiting for their answer. Active items only, never history.
-    try { n += (await api('GET', '/api/reservation-counts')).attention; } catch { /* the badge is best-effort */ }
-    S.badge = n;
+    try { reservations = (await api('GET', '/api/reservation-counts')).attention; } catch { /* the badge is best-effort */ }
+    // Equipment requests: IT = requests waiting on IT; an employee = equipment ready for them (its own sidebar entry; the Requests tab counts it too)
+    try { equipment += (await api('GET', '/api/equipment-request-counts')).attention; } catch { /* best-effort */ }
+    const n = returns + equipment + reservations;
+    S.cnt = { equipment, returns, reservations }; S.badge = n;
+    for (const [k, label] of [['equipment', 'Equipment'], ['returns', 'Returns'], ['reservations', 'Reservations']]) { const b = $(`#cats [data-v=${k}]`); if (b) b.innerHTML = `${label}${S.cnt[k] ? ` <span class="seg-count">${S.cnt[k]}</span>` : ''}`; }
     const tab = $('.tabbar a[data-key=requests]');
     if (tab) { $('.badge-dot', tab)?.remove(); if (n) tab.insertAdjacentHTML('beforeend', `<span class="badge-dot">${n}</span>`); }
-    const side = $('.sidebar a[data-key=requests]');
-    if (side) { $('.count', side)?.remove(); if (n) side.insertAdjacentHTML('beforeend', `<span class="count">${n}</span>`); }
+    const put = (key, v) => { const a = $(`.sidebar a[data-key=${key}]`); if (a) { $('.count', a)?.remove(); if (v) a.insertAdjacentHTML('beforeend', `<span class="count">${v}</span>`); } };
+    put('requests', n);
   } catch { /* */ }
 }
 const main = () => $('#main');
@@ -630,6 +644,10 @@ const ROUTES = [
   [/^#\/scan$/, viewScan, { key: 'scan', scan: true }],
   [/^#\/requests$/, viewRequests, { key: 'requests' }],
   [/^#\/calendar$/, viewCalendar, { key: 'calendar' }],
+  // the earlier separate screens now live under Requests (Equipment | Returns | Reservations); old links and emails land there
+  [/^#\/my-reservations$/, () => { history.replaceState(null, '', '#/requests?cat=reservations'); return route(true); }, { key: 'requests' }],
+  [/^#\/my-requests$/, () => { history.replaceState(null, '', '#/requests?cat=equipment'); return route(true); }, { key: 'requests' }],
+  [/^#\/equipment-requests$/, () => { history.replaceState(null, '', '#/requests?cat=equipment'); return route(true); }, { key: 'requests' }],
   [/^#\/people$/, viewPeople, { key: 'people', admin: true }],
   [/^#\/person\/(\d+)$/, viewPerson, { key: 'people', admin: true }],
   [/^#\/labels$/, viewLabels, { key: 'labels', admin: true }],
@@ -846,11 +864,12 @@ async function viewHome() {
   if (!isAdmin()) {
     main().innerHTML = `<div class="page-head"><h1>${greet}, ${esc(first)}</h1></div>
       <div class="stack">${returnBanners(d.mine, 'home')}
-      <div class="actions">${canScan() ? `<a href="#/scan" class="btn primary lg">${icon('scan')} Scan</a>` : ''}<button class="btn ${canScan() ? '' : 'primary '}lg" id="req">${icon('plus')} Request</button></div>
+      <div class="actions home-actions${canScan() ? ' has-scan' : ''}">${canScan() ? `<a href="#/scan" class="btn primary lg scan-wide">${icon('scan')} <span>Scan</span></a>` : ''}<button class="btn ${canScan() ? '' : 'primary '}lg" id="reserve-eq">${icon('calendar')} <span>Reserve equipment</span></button><button class="btn lg" id="req">${icon('plus')} <span>Request equipment</span></button></div>
       <div class="card"><div class="card-head"><h2>My equipment</h2><span class="muted small">${d.mine.length} item${d.mine.length === 1 ? '' : 's'} · <a href="#/equipment">See all</a></span></div>${myEquipmentList(d.mine)}</div>
       ${d.myRequests.length ? `<div class="card"><div class="card-head"><h2>My requests</h2><a href="#/requests" class="small">See all</a></div><ul class="list">${d.myRequests.map((r) => `<li><div class="item"><div class="thumb">${icon('box')}</div><div class="grow"><div class="title">${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${isPermReq(r) ? ' · Permanent assignment' : ''}</div><div class="sub truncate">${r.catalog_path ? (r.asset_id ? 'Specific: ' + esc(r.asset_label || '') : 'Any matching') + ' · ' : ''}${esc(r.message || '')} · ${fmtWhen(r.created_at)}</div></div>${reqPill(r)}</div></li>`).join('')}</ul></div>` : ''}
       </div>`;
-    $('#req').onclick = () => requestEquipmentSheet();
+    $('#req').onclick = () => requestNeedSheet();
+    $('#reserve-eq').onclick = reserveEquipment;
     wireDropoffs(main());
     return;
   }
@@ -934,11 +953,11 @@ async function viewBrowse() {
     <div class="stack">
       <div class="row"><div class="search grow">${icon('search')}<input id="q" type="search" placeholder="Search camera, laptop, brand, model, tag…" value="${esc(st.q)}" enterkeyhint="search"></div>
         ${canScan() ? `<button class="btn" id="scanbtn" title="Scan">${icon('scan')}</button>` : ''}</div>
-      <p class="small muted" style="margin:0">Shared equipment. Something checked out or reserved right now is still listed: open it to see when it is free.</p>
+      <p class="small muted" style="margin:0">Shared equipment. Open an item to see its availability calendar and reserve it. Something checked out or reserved right now is still listed: open it to see when it is free.</p>
       <div id="bn"></div>
       <div class="card" id="results" hidden></div>
     </div>
-    <div class="browse-req" id="reqfoot"><span class="small muted">Don't see what you need?</span><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`;
+    <div class="browse-req" id="reqfoot"><span class="small muted">Don't see what you need?</span><button type="button" class="btn" data-reqit>${icon('plus')} Request equipment</button></div>`;
   const cur = () => byId.get(st.path[st.path.length - 1]);
   const availMeta = (n) => (n ? `${n} available` : 'None available');
   const renderNav = () => {
@@ -985,9 +1004,9 @@ async function viewBrowse() {
       if (mine !== st.token) return;
       box.innerHTML = `<div class="card-head"><span class="muted small">${esc(label)} · ${list.length} asset${list.length === 1 ? '' : 's'}</span></div>${list.length
         ? `<ul class="list">${list.map(rowHtml).join('')}</ul>`
-        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search. Try a broader word such as “camera” or “laptop”, or send IT a request.' : 'No shared equipment is listed here yet.'}</p><button type="button" class="btn" data-reqit>${icon('send')} Send IT a request</button></div>`}`;
+        : `<div class="empty">${icon('box')}<p>${st.q ? 'Nothing matches that search. Try a broader word such as “camera” or “laptop”, or request it from IT.' : 'No shared equipment is listed here yet.'}</p><button type="button" class="btn" data-reqit>${icon('plus')} Request equipment</button></div>`}`;
       $('#reqfoot').hidden = !list.length; // an empty list carries its own request button; the footer one would just repeat it
-      const eb = $('[data-reqit]', box); if (eb) eb.onclick = () => requestEquipmentSheet();
+      const eb = $('[data-reqit]', box); if (eb) eb.onclick = () => requestNeedSheet();
     } catch (e) { if (mine === st.token) fail(e); }
   };
   const go2 = () => { renderNav(); load(); };
@@ -1006,7 +1025,7 @@ async function viewBrowse() {
   S.soft = { base: '#/assets', fn: () => { fromHash(); go2(); } };
   $('#q').oninput = debounce((e) => { st.q = e.target.value.trim(); go2(); });
   if ($('#scanbtn')) $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
-  $('#reqfoot [data-reqit]').onclick = () => requestEquipmentSheet(); // the same request flow as before (the empty-state button is wired when the list renders)
+  $('#reqfoot [data-reqit]').onclick = () => requestNeedSheet(); // the same request flow as before (the empty-state button is wired when the list renders)
   fromHash(); go2();
 }
 
@@ -1949,16 +1968,297 @@ function viewScan() {
   else if (!S.silent && !$('.scanner')) openScanner({ onResult: scanned }); // phones: jump straight into the camera
 }
 
+// ============================================================ employee reservations + equipment requests
+// Two separate employee actions (docs/briefs/employee-reservations-requests.md):
+//   Reserve equipment  = Browse (the equipment tree): open a specific item, see its availability calendar, reserve it or join its waitlist. Needs no scanner / self-checkout permission.
+//   Request equipment  = the form below: "I need a piece of equipment" (one item), decided by IT. Nothing is ordered, reserved or assigned automatically.
+// My reservations and My requests are the employee's own views; IT works the Equipment requests queue. The server decides every rule (src/equipmentRequests.js);
+// this code only draws state and calls the endpoints.
+function reserveEquipment() { go('#/assets'); } // (function declarations: ROUTES, defined far above, refers to the views below)
+const EQ_CLASS = { submitted: 'open', in_review: 'in_review', approved: 'approved', ready: 'reserved', fulfilled: 'completed', declined: 'denied', cancelled: 'cancelled' };
+const eqPill = (r) => pill(EQ_CLASS[r.status] || 'open', r.status === 'ready' ? 'Ready' : r.status_label);
+const eqWhat = (r) => [r.category, r.brand, r.model].filter(Boolean).join(' › ');
+const eqPermText = (r) => (!r.permanent_requested ? 'Shared equipment' : r.permanent_decision === 'approved' ? 'Permanent assignment: approved' : r.permanent_decision === 'denied' ? 'Permanent assignment: not approved' : 'Permanent assignment requested');
+const EQ_EVENT = { submitted: 'Request submitted', opened: 'IT opened the request', approved: 'Approved by IT', declined: 'Declined by IT', ready: 'Marked ready: 48-hour priority hold started', permanent_approved: 'Permanent assignment approved', permanent_denied: 'Permanent assignment not approved',
+  hold_expired: 'Priority hold ended unclaimed', hold_claimed: 'Reservation made during the hold: it keeps the unit', claim_ended: 'The reservation ended before the equipment was issued', hold_declined: 'Employee declined the ready unit', hold_released: 'IT released the hold', claimed_by_reservation: 'Claimed by a reservation', checked_out: 'Checked out', assigned_permanently: 'Assigned permanently', fulfilled: 'Fulfilled', cancelled: 'Cancelled', cancelled_by_it: 'Cancelled by IT', note: 'Note added' };
+
+// A compact, searchable dropdown (closed by default; the closed button shows the choice). `options` = [{ id, label }]; `extra` = rows pinned under the list
+// ({ value, label }, e.g. Other); `custom` lets the typed text itself be chosen ("Use “…”"); `none` adds a "No preference" row. onChange gets
+// { id, label } (a listed option), { custom: true, label } (typed text), { extra: value } or null (cleared). The list is short and scrolls inside itself.
+function mountCombo(root, { options, value = null, placeholder = 'Choose…', searchPlaceholder = 'Search…', extra = [], custom = false, none = '', onChange }) {
+  let cur = value; let open = false;
+  const shown = () => (cur ? cur.label : '');
+  root.innerHTML = `<div class="cb"><button type="button" class="cb-btn" aria-haspopup="listbox" aria-expanded="false"><span class="cb-val${cur ? '' : ' ph'}">${esc(shown() || placeholder)}</span>${icon('chev', 'cb-chev')}</button>
+    <div class="cb-pop" hidden><div class="search">${icon('search')}<input type="search" class="cb-q" placeholder="${esc(searchPlaceholder)}" autocomplete="off" aria-label="${esc(searchPlaceholder)}"></div><ul class="cb-list" role="listbox"></ul></div></div>`;
+  const btn = $('.cb-btn', root); const pop = $('.cb-pop', root); const q = $('.cb-q', root); const list = $('.cb-list', root);
+  const rows = () => {
+    const t = q.value.trim().toLowerCase();
+    const hit = options.filter((o) => !t || o.label.toLowerCase().includes(t));
+    const out = [];
+    if (none && !t) out.push({ none: true, label: none });
+    out.push(...hit.map((o) => ({ pick: o })));
+    if (custom && q.value.trim() && !options.some((o) => o.label.toLowerCase() === t)) out.push({ typed: q.value.trim(), label: `Use “${q.value.trim()}”` });
+    out.push(...extra.filter((x) => !t || x.label.toLowerCase().includes(t)).map((x) => ({ extra: x })));
+    return out;
+  };
+  const paint = () => {
+    const r = rows();
+    list.innerHTML = r.length ? r.map((x, i) => `<li role="option" aria-selected="${!!(cur && x.pick && cur.id === x.pick.id)}"><button type="button" data-i="${i}">${esc(x.pick ? x.pick.label : x.label || x.extra.label)}</button></li>`).join('') : '<li class="cb-empty">Nothing matches</li>';
+    list._rows = r;
+  };
+  const set = (v) => { cur = v; const s = $('.cb-val', root); s.textContent = shown() || placeholder; s.classList.toggle('ph', !cur); };
+  const toggle = (on) => {
+    open = on; pop.hidden = !on; btn.setAttribute('aria-expanded', String(on));
+    if (on) { q.value = ''; paint(); list.scrollTop = 0; q.focus({ preventScroll: true }); }
+  };
+  const choose = (x) => {
+    if (!x) return;
+    const v = x.none ? null : x.pick ? { id: x.pick.id, label: x.pick.label } : x.typed ? { custom: true, label: x.typed } : { extra: x.extra.value, label: x.extra.label };
+    set(v); toggle(false); btn.focus({ preventScroll: true }); onChange && onChange(v);
+  };
+  btn.onclick = () => toggle(!open);
+  q.oninput = paint;
+  q.onkeydown = (e) => {
+    if (e.key === 'Escape') { e.stopPropagation(); toggle(false); btn.focus(); }
+    else if (e.key === 'Enter') { e.preventDefault(); choose((list._rows || [])[0]); }
+  };
+  list.onclick = (e) => { const b = e.target.closest('button[data-i]'); if (b) choose(list._rows[Number(b.dataset.i)]); };
+  const outside = (e) => { if (!root.isConnected) document.removeEventListener('mousedown', outside, true); else if (open && !root.contains(e.target)) toggle(false); };
+  document.addEventListener('mousedown', outside, true);
+  return { set };
+}
+
+// The "Request equipment" form: a category from a compact searchable list (every catalog category, or Other = free text), optional brand and model (chosen from
+// the catalog entries under the category, or typed), optional details, and the "Request permanent assignment" toggle (off by default). One item per request.
+async function requestNeedSheet() {
+  let rows = [];
+  try { rows = await getCatalog(); } catch { /* the form still works with Other */ }
+  const kids = (id) => rows.filter((r) => r.parent_id === id).map((r) => ({ id: r.id, label: r.name }));
+  const roots = kids(null).filter((r) => r.label.toLowerCase() !== 'other'); // (the one "Other" below is the free-text choice)
+  const st = { cat: null, other: !roots.length, brand: null, model: null };
+  const { el, close } = sheet(`<h2>Request equipment</h2><p class="muted small" style="margin:2px 0 0">One item per request. IT reviews it and decides; nothing is ordered or assigned automatically.</p>
+    <form class="form-grid eq-grid" id="f">
+      <div class="field eq-full"><span>Category</span><div id="cb-cat"></div></div>
+      <label class="field eq-full" id="cat-other" hidden><span>What kind of equipment?</span><input name="category_other" maxlength="120" placeholder="e.g. Standing desk converter" autocomplete="off"></label>
+      <div class="field" id="slot-brand"></div><div class="field" id="slot-model"></div>
+      <label class="field eq-full"><span>Additional details (optional)</span><textarea name="details" rows="3" maxlength="1000" placeholder="Anything IT should know?"></textarea></label>
+      <label class="check eq-full"><input type="checkbox" name="permanent"><span><strong>Request permanent assignment</strong><br><span class="small muted">IT decides this separately. If it is not approved, you can still reserve the equipment as shared when it is ready.</span></span></label>
+      <div class="sheet-actions eq-full"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">${icon('send')} Send to IT</button></div>
+    </form>`);
+  el.classList.add('eq-form');
+  const f = $('#f', el);
+  // Brand and model: a compact picker when the catalog has entries at that level, otherwise a plain optional text box. Typing is always allowed.
+  const slot = (key, label, opts) => {
+    const root = $(`#slot-${key}`, el);
+    root.innerHTML = `<span>${label} (optional)</span><div id="cb-${key}"></div>`;
+    if (opts.length) mountCombo($(`#cb-${key}`, root), { options: opts, value: st[key], placeholder: 'Any', searchPlaceholder: `Search or type a ${key}…`, custom: true, none: 'No preference', onChange: (v) => { st[key] = v; if (key === 'brand') { st.model = null; paintSlots(); } } });
+    else { $(`#cb-${key}`, root).innerHTML = `<input name="${key}" maxlength="120" autocomplete="off" placeholder="Type a ${key}" value="${esc(st[key] ? st[key].label : '')}">`; $(`#cb-${key} input`, root).oninput = (e) => { st[key] = e.target.value.trim() ? { custom: true, label: e.target.value.trim() } : null; }; }
+  };
+  const paintSlots = () => {
+    const brandOpts = !st.other && st.cat ? kids(st.cat.id) : [];
+    slot('brand', 'Brand', brandOpts);
+    slot('model', 'Model', st.brand && st.brand.id ? kids(st.brand.id) : []);
+  };
+  mountCombo($('#cb-cat', el), {
+    options: roots, placeholder: 'Choose a category', searchPlaceholder: 'Search categories…', extra: [{ value: 'other', label: 'Other' }],
+    onChange: (v) => {
+      st.other = !!(v && v.extra === 'other'); st.cat = v && v.id ? v : null; st.brand = null; st.model = null;
+      $('#cat-other', el).hidden = !st.other;
+      if (st.other) $('#cat-other input', el).focus();
+      paintSlots();
+    },
+  });
+  if (!roots.length) { $('#cb-cat', el).innerHTML = '<div class="small muted">The equipment list is empty: describe what you need below.</div>'; $('#cat-other', el).hidden = false; }
+  paintSlots();
+  f.onsubmit = (e) => {
+    e.preventDefault();
+    const body = { details: f.details.value, permanent: f.permanent.checked };
+    if (st.other) { body.category_other = f.category_other.value.trim(); if (!body.category_other) return toast('Say what kind of equipment you need.', true); }
+    else {
+      if (!st.cat) return toast('Choose a category, or choose Other.', true);
+      // the deepest catalog entry chosen; typed brand / model only fills a level the catalog choice left open
+      body.catalog_node_id = (st.model && st.model.id) || (st.brand && st.brand.id) || st.cat.id;
+    }
+    if (st.brand && !st.brand.id) body.brand = st.brand.label;
+    if (st.model && !st.model.id) body.model = st.model.label;
+    busy($('#go', el), async () => { await api('POST', '/api/equipment-requests', body); close(); toast('Request sent to IT', false, 'ok'); refreshBadge(); go('#/my-requests'); });
+  };
+}
+
+// How a request stands, in the words IT and employees see everywhere. The equipment decision and the permanent-assignment decision are INDEPENDENT.
+const EQ_DECISION = { submitted: 'Submitted', in_review: 'In review', approved: 'Approved', ready: 'Approved', fulfilled: 'Approved', declined: 'Declined', cancelled: 'Cancelled' };
+const eqPermLabel = (r) => (!r.permanent_requested ? 'Not requested' : r.permanent_decision === 'approved' ? 'Approved' : r.permanent_decision === 'denied' ? 'Denied' : 'Pending decision');
+// Ready is one of three things; an expired hold is never shown as active (hold_active is the server's clock, not the stored deadline).
+const eqStage = (r) => (r.status !== 'ready' ? r.status_label : r.claimed_reservation_id ? 'Ready — claimed by reservation' : r.hold_active ? 'Ready — priority hold active' : 'Ready — no active priority hold');
+
+// The request, its decisions, its history and what the viewer may do next. IT opening a submitted request moves it to In review (the server records it).
+async function openEqDetail(id, { admin: asAdmin, reload }) {
+  let r;
+  try { r = await api('GET', '/api/equipment-requests/' + id); } catch (e) { return fail(e); }
+  if (asAdmin && r.status === 'submitted') { try { r = await api('POST', `/api/equipment-requests/${id}/review`, {}); reload(); } catch { /* still show it */ } }
+  const live = ['submitted', 'in_review', 'approved', 'ready'].includes(r.status);
+  const first = (r.user_name || '').split(' ')[0] || 'the employee';
+  const who = asAdmin ? r.user_name : 'You';
+  const again = () => { reload(); openEqDetail(id, { admin: asAdmin, reload }); };
+  const act = (verb, body = {}) => api('POST', `/api/equipment-requests/${id}/${verb}`, body);
+  const unit = r.asset_label || 'the unit';
+  const claimRange = r.claim ? resvRange(r.claim) : '';
+
+  // ---- Decisions. Two independent decisions; picking an option only changes this screen: nothing is saved until "Save decisions".
+  // Equipment: editable only while it is Submitted / In review (a saved approval is withdrawn with Cancel request, not toggled off).
+  // Permanent assignment: editable until the equipment is issued or the unit is on hold; a saved answer is changed through "Edit decisions".
+  const eEditable = asAdmin && ['submitted', 'in_review'].includes(r.status);
+  const pEditable = asAdmin && r.permanent_requested && ['submitted', 'in_review', 'approved'].includes(r.status);
+  const pSaved = r.permanent_decision === 'approved' ? 'approve' : r.permanent_decision === 'denied' ? 'deny' : 'pending';
+  const sel = { e: 'pending', p: pSaved };
+  const eText = r.status === 'declined' ? 'Declined' : r.status === 'cancelled' ? 'Cancelled' : ['approved', 'ready', 'fulfilled'].includes(r.status) ? '✓ Approved' : `Pending${r.status === 'in_review' ? ' (in review)' : ''}`;
+  const pText = !r.permanent_requested ? 'Not requested' : r.permanent_decision === 'approved' ? '✓ Approved' : r.permanent_decision === 'denied' ? 'Denied' : 'Pending decision';
+  const segHtml = (k, opts) => `<div class="dec-seg" role="radiogroup" data-k="${k}" style="--n:${opts.length}">${opts.map(([v, l]) => `<button type="button" role="radio" aria-checked="false" data-v="${v}">${l}</button>`).join('')}</div>`;
+  const dec = `<div class="dec"><h3>Decisions</h3>
+    <div class="dec-row"><div class="lab">Equipment decision</div>
+      ${eEditable ? segHtml('e', [['pending', 'Pending'], ['approve', 'Approve'], ['decline', 'Decline']]) : `<div class="dec-status">${esc(eText)}</div>`}
+      ${asAdmin && !eEditable && ['approved', 'ready'].includes(r.status) ? '<div class="small muted">To withdraw an approval, use Cancel request below.</div>' : ''}</div>
+    <div class="dec-row"><div class="lab">Permanent assignment decision</div>
+      ${pEditable ? `<div id="p-ctl"${pSaved !== 'pending' ? ' hidden' : ''}>${segHtml('p', pSaved === 'pending' ? [['pending', 'Pending'], ['approve', 'Approve'], ['deny', 'Deny']] : [['approve', 'Approve'], ['deny', 'Deny']])}<div class="small muted" id="p-off" hidden>Not needed when the equipment request is declined.</div></div>
+        <div id="p-done"${pSaved === 'pending' ? ' hidden' : ''}><div class="dec-status">${esc(pText)}</div><button type="button" class="btn sm" id="dec-edit" style="margin-top:8px">Edit decisions</button></div>`
+      : `<div class="dec-status">${esc(pText)}</div>`}</div>
+    ${asAdmin && live ? `<label class="field"><span>Note to ${esc(first)} (optional)</span><textarea name="note" id="dec-note" rows="2" maxlength="1000" placeholder="Optional. Saved in the history and shown to ${esc(first)}; it does not change any decision."></textarea></label>
+    <button type="button" class="btn primary" id="dec-save" disabled>Save decisions</button>` : ''}
+  </div>`;
+
+  // ---- Actions, grouped. Fulfilment: how the equipment gets issued. Other: closing it. Never both a Decline and a Cancel.
+  const fulfil = []; const other = [];
+  if (!asAdmin) {
+    if (r.status === 'ready' && r.hold_active && r.asset_shared) fulfil.push(`<button class="btn primary" id="a-reserve">${icon('calendar')} Reserve it</button>`);
+    if (r.can_decline_ready) other.push('<button class="btn" id="a-declineready">Decline this equipment</button>');
+    if (r.can_cancel) other.push('<button class="btn danger" id="a-cancel">Cancel request</button>');
+  } else {
+    if (r.status === 'approved' && r.track === 'shared') fulfil.push(`<button class="btn primary" id="a-ready">${icon('check')} Mark a unit ready (48-hour hold)</button><button class="btn" id="a-handed">Record as handed over (no inventory item)</button>`);
+    if (r.status === 'approved' && r.track === 'permanent') fulfil.push(`<button class="btn primary" id="a-deliver">${icon('out')} Deliver &amp; assign permanently</button><button class="btn" id="a-handed">Record as delivered (not individually tracked)</button>`);
+    if (r.status === 'ready') fulfil.push(`<button class="btn primary" id="a-checkout">${icon('out')} Issue to ${esc(first)}</button><button class="btn" id="a-handed">Record as handed over</button>`);
+    if (r.status === 'ready') other.push(`<button class="btn" id="a-release">${r.hold_active ? 'End priority hold' : 'Return to Approved'}</button>`);
+    if (['approved', 'ready'].includes(r.status)) other.push('<button class="btn danger" id="a-cancel">Cancel request</button>'); // (submitted / in review are declined above; fulfilled has no ordinary cancel)
+  }
+  const grp = (title, items) => (items.length ? `<div class="act-group"><h4>${title}</h4><div class="act-grid">${items.join('')}</div></div>` : '');
+  const guide = !asAdmin || !live ? '' : r.status === 'submitted' || r.status === 'in_review' ? 'Decide the equipment request. If a permanent assignment was requested it is a separate decision: you can approve the equipment and deny permanent assignment.'
+    : r.track === null ? 'The equipment is approved. Decide the permanent assignment before a unit can be readied or issued.'
+    : r.status === 'approved' && r.track === 'permanent' ? 'Permanent assignment approved. Deliver the item and record the assignment. It is not put on hold and is not offered to anyone else.'
+    : r.status === 'approved' ? `Shared equipment${r.permanent_requested ? ' (permanent assignment denied)' : ''}. Mark a unit ready to give ${first} a 48-hour priority hold. Reserving it is only a claim: the request is Fulfilled when the equipment is actually issued.` : '';
+  const holdBox = r.status !== 'ready' ? '' : r.claimed_reservation_id
+    ? `<div class="banner info">${icon('calendar')}<div class="grow small"><strong>Ready — claimed by reservation</strong><br>${esc(who)} reserved <strong>${esc(unit)}</strong>${claimRange ? ` for ${esc(claimRange)}` : ''}. The 48-hour priority hold has ended; the reservation protects only those dates. This request is Fulfilled when the equipment is actually issued.</div></div>`
+    : r.hold_active
+      ? `<div class="banner info">${icon('check')}<div class="grow small"><strong>48-hour priority hold active</strong><br>Priority: <strong>${esc(r.user_name)}</strong> · Unit: <strong>${esc(unit)}</strong><br>Hold ends: ${esc(r.hold_expires_text)}<br>Other employees cannot reserve or check out this unit until then. ${asAdmin ? 'Ending an unclaimed hold makes it generally available again.' : 'Reserve it, or ask IT to check it out.'}</div></div>`
+      : `<div class="banner warn">${icon('alert')}<div class="grow small"><strong>Ready — no active priority hold</strong><br>The hold on <strong>${esc(unit)}</strong> has ended and nothing claimed it. The request returns to Approved shortly.</div></div>`;
+  const row = (k, v) => `<div class="k">${k}</div><div class="v">${v}</div>`;
+  let isDirty = () => false; // (set below, once the decision controls exist)
+  const { el, close } = sheet(`<h2 style="overflow-wrap:anywhere">${esc(eqWhat(r))}</h2>
+    <div class="row wrap" style="gap:8px;margin:4px 0 12px">${eqPill(r)}${r.status === 'ready' ? `<span class="small muted">${esc(eqStage(r))}</span>` : ''}</div>
+    <div class="stack">
+      ${holdBox}
+      ${dec}
+      <div class="kv">
+        ${asAdmin ? row('Requested by', `${esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`) : ''}
+        ${row('Submitted', fmtWhen(r.created_at) + (r.category_other ? ' · category typed by the employee' : ''))}
+        ${r.asset_label && r.status !== 'ready' ? row('Unit', esc(r.asset_label)) : ''}
+        ${r.details ? row('Details', `<div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(r.details)}</div>`) : ''}
+        ${r.decision_note ? row('Note from IT', esc(r.decision_note)) : ''}
+        ${r.permanent_note ? row('Permanent assignment note', esc(r.permanent_note)) : ''}
+      </div>
+      ${guide ? `<p class="small muted" style="margin:0">${esc(guide)}</p>` : ''}
+      ${grp(asAdmin ? 'Fulfilment' : 'Your options', fulfil)}
+      ${grp(asAdmin ? 'Other actions' : '', other)}
+      ${asAdmin && r.status === 'approved' ? `<p class="small muted" style="margin:0">Not in inventory yet? <a href="#/new" id="a-new">Register the equipment</a>, then come back and pick it.</p>` : ''}
+      <div><h3 style="margin:8px 0 4px;font-size:15px">History</h3><ul class="list">${r.events.map((ev) => `<li><div class="item"><div class="grow"><div class="title">${esc(EQ_EVENT[ev.action] || ev.action)}</div><div class="sub">${esc(ev.actor_name)} · ${fmtWhen(ev.created_at)}${ev.note ? ` · ${esc(ev.note)}` : ''}</div></div></div></li>`).join('')}</ul></div>
+    </div>
+    <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`, { closeX: true, dirty: () => isDirty() });
+  const on = (sel2, fn) => { const b = $(sel2, el); if (b) b.onclick = (e) => fn(e.currentTarget); };
+  const handled = (verb, body, msg) => (btn) => busy(btn, async () => { await act(verb, body); close(); toast(msg, false, 'ok'); refreshBadge(); again(); });
+  const leave = () => close();
+  const fresh = (verb, body, msg) => async (note) => { await act(verb, { ...body, note }); toast(msg, false, 'ok'); refreshBadge(); again(); };
+  const confirmSheet = (title, text, label, onOk) => {
+    leave();
+    const s = sheet(`<h2>${esc(title)}</h2><p class="muted small" style="margin-top:0">${esc(text)}</p><div class="sheet-actions"><button type="button" class="btn" data-close>Keep it</button><button class="btn danger" id="go">${esc(label)}</button></div>`);
+    $('#go', s.el).onclick = (e) => busy(e.currentTarget, async () => { await onOk(); s.close(); refreshBadge(); again(); });
+  };
+
+  // decision controls: choosing an option only repaints; "Save decisions" is the one mutation
+  const permVisible = () => pEditable && !$('#p-ctl', el).hidden;
+  const paint = () => {
+    $$('.dec-seg', el).forEach((g) => $$('button', g).forEach((b) => {
+      const k = g.dataset.k; const v = b.dataset.v; const onNow = sel[k] === v;
+      b.classList.toggle('on', onNow); b.classList.toggle('ok', onNow && v === 'approve'); b.classList.toggle('no', onNow && (v === 'decline' || v === 'deny')); b.setAttribute('aria-checked', String(onNow));
+    }));
+    const declined = eEditable && sel.e === 'decline';
+    if ($('#p-ctl', el)) { $('.dec-seg[data-k=p]', el).classList.toggle('off', declined); $('#p-off', el).hidden = !declined; }
+    const save = $('#dec-save', el); if (!save) return;
+    const pChange = permVisible() && !declined && sel.p !== 'pending' && sel.p !== pSaved;
+    const hasNote = !!(($('#dec-note', el).value || '').trim());
+    save.textContent = eEditable || permVisible() ? 'Save decisions' : 'Save note';
+    save.disabled = !((eEditable && sel.e !== 'pending') || pChange || hasNote);
+  };
+  $$('.dec-seg', el).forEach((g) => g.addEventListener('click', (e) => { const b = e.target.closest('button[data-v]'); if (!b || g.classList.contains('off')) return; sel[g.dataset.k] = b.dataset.v; paint(); }));
+  on('#dec-edit', () => { $('#p-ctl', el).hidden = false; $('#p-done', el).hidden = true; paint(); });
+  $('#dec-note', el)?.addEventListener('input', paint);
+  on('#dec-save', () => {
+    const note = ($('#dec-note', el).value || '').trim() || undefined;
+    const pv = sel.p === 'approve' ? 'approved' : sel.p === 'deny' ? 'denied' : undefined;
+    // a note and no decision change: just the note (no status or decision is touched)
+    if (!(eEditable && sel.e !== 'pending') && !(permVisible() && sel.p !== 'pending' && sel.p !== pSaved)) return busy($('#dec-save', el), async () => { await act('note', { note }); close(); toast(`Note saved. ${first} has been told.`, false, 'ok'); refreshBadge(); again(); });
+    if (eEditable && sel.e === 'decline') return confirmSheet('Decline equipment request', `${r.user_name} will be told and the request is closed. This can't be undone.`, 'Decline equipment request', async () => { await act('decline', { note }); toast('Equipment request declined', false, 'ok'); });
+    if (eEditable && sel.e === 'approve') return busy($('#dec-save', el), async () => { await act('approve', { note, permanent_decision: permVisible() && pv && pv !== r.permanent_decision ? pv : undefined }); close(); toast('Decisions saved. They have been told.', false, 'ok'); refreshBadge(); again(); });
+    busy($('#dec-save', el), async () => { await act('permanent', { decision: pv, note }); close(); toast('Decisions saved. They have been told.', false, 'ok'); refreshBadge(); again(); });
+  });
+  paint();
+  isDirty = () => !!((eEditable && sel.e !== 'pending') || (permVisible() && sel.p !== 'pending' && sel.p !== pSaved) || (($('#dec-note', el)?.value || '').trim()));
+
+  on('#a-reserve', () => { close(); go(calUrl({ asset: r.asset_id, reserve: true, from: '#/requests' })); });
+  on('#a-declineready', handled('decline-ready', {}, 'Declined. The unit is available to others again.'));
+  if (asAdmin) {
+    on('#a-cancel', () => confirmSheet('Cancel request', r.status === 'ready'
+      ? `This closes the request completely${r.hold_active ? ` and ends the priority hold: ${unit} becomes generally available again` : ''}. ${first} is told.${claimRange ? ` ${first}'s reservation (${claimRange}) is not cancelled.` : ' No reservation is cancelled.'}`
+      : `This withdraws the approval and closes the request. ${first} is told.`, 'Cancel request', async () => { await act('cancel'); toast('Request cancelled', false, 'ok'); }));
+  } else on('#a-cancel', handled('cancel', {}, 'Request cancelled'));
+  on('#a-new', () => close());
+  on('#a-release', () => confirmSheet(r.hold_active ? 'End priority hold' : 'Return to Approved',
+    r.hold_active ? `Ending the priority hold makes ${unit} generally available again: other employees will be able to reserve and check it out. ${first} is told and the request stays approved. No reservation is cancelled.`
+      : `${unit} is no longer under a priority hold. This returns the request to Approved${claimRange ? `; ${first}'s reservation (${claimRange}) stays in place` : ''}.`,
+    r.hold_active ? 'End priority hold' : 'Return to Approved', async () => { await act('release'); toast(r.hold_active ? 'Priority hold ended' : 'Returned to Approved', false, 'ok'); }));
+  const pick = (title, then) => { leave(); assetPickerSheet({ title, catalogNode: r.catalog_node_id, filterCategory: r.category_other ? undefined : r.category, onPick: then }); };
+  on('#a-ready', () => pick(`Which unit is ready for ${first}?`, (assetId) => noteSheet('Mark unit ready', `${first} is told and the unit gets a 48-hour priority hold for them: nobody else can reserve or check it out meanwhile. Reserving it is only a claim; the request is Fulfilled when it is actually issued. Add a note (optional).`, 'Mark ready', 'e.g. Pick it up at the IT room', fresh('ready', { asset_id: assetId }, 'Marked ready. The 48-hour priority hold has started.'))));
+  on('#a-deliver', () => pick(`Item delivered to ${first}`, (assetId) => noteSheet('Deliver & assign permanently', `The item is permanently assigned to ${r.user_name} and the request is fulfilled. Add a note (optional).`, 'Assign permanently', 'Optional note', fresh('fulfill', { asset_id: assetId }, 'Assigned permanently'))));
+  on('#a-handed', () => { leave(); noteSheet('Record as handed over', 'Use this for equipment that is not individually inventoried, or was handed over outside the system. No assignment is created. Add a note (optional).', 'Mark fulfilled', 'Optional note', fresh('fulfill', { untracked: true }, 'Fulfilled')); });
+  on('#a-checkout', () => {
+    leave();
+    const s = sheet(`<h2>Issue to ${esc(first)}</h2><p class="muted small" style="margin-top:0">${esc(r.asset_label || '')}: a temporary checkout. The request is Fulfilled once it is issued.</p>
+      <form class="form-grid" id="f"><label class="field"><span>Return date</span><input type="date" name="due_date" required min="${localToday()}"></label>
+        <label class="field"><span>Return time (optional)</span><input type="time" name="due_time"></label>
+        <label class="field"><span>Note (optional)</span><input name="note" maxlength="1000"></label>
+        <div class="sheet-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="go">Issue (check out)</button></div></form>`);
+    $('#f', s.el).onsubmit = (e) => { e.preventDefault(); const fd = Object.fromEntries(new FormData(e.target)); busy($('#go', s.el), async () => { await act('fulfill', fd); s.close(); toast('Issued. The request is fulfilled.', false, 'ok'); refreshBadge(); again(); }); };
+  });
+}
+
+// One request in the Requests list (same card as the earlier requests; the click opens the detail sheet).
+const eqCard = (r) => `<div class="card"><div class="item" data-eqd="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer"><div class="thumb req-thumb">${icon('box')}</div><div class="grow">
+  <div class="row spread" style="align-items:flex-start"><div class="title">${esc(eqWhat(r))}</div>${eqPill(r)}</div>
+  <div class="sub">Equipment request · ${isAdmin() ? `<a href="#/person/${r.employee_id}">${esc(r.user_name)}</a>${r.user_department ? ' · ' + esc(r.user_department) : ''} · ` : ''}${fmtWhen(r.created_at)}</div>
+  <div class="small" style="margin-top:4px">Equipment: <strong>${esc(EQ_DECISION[r.status])}</strong> · Permanent assignment: <strong>${esc(eqPermLabel(r))}</strong></div>
+  ${r.status === 'ready' ? `<div class="small" style="margin-top:4px"><strong>${esc(eqStage(r))}</strong>${r.asset_label ? ` · ${esc(r.asset_label)}` : ''}${r.hold_active && !r.claimed_reservation_id ? ` · until ${esc(r.hold_expires_text)}` : ''}</div>` : ''}
+  <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-eqopen="${r.id}">View details</button></div>
+</div></div></div>`;
+
 // ============================================================ requests
 async function viewRequests() {
-  // Employees get an "All" tab first, and it is their default; IT's tabs and default are unchanged.
-  const tabs = isAdmin() ? ['open', 'closed', 'reservations'] : ['all', 'open', 'closed', 'reservations'];
-  const state = { tab: tabs.includes(qs().get('tab')) ? qs().get('tab') : tabs[0], f: qs().get('state') || '' };
-  main().innerHTML = `<div class="page-head"><h1>Requests</h1><button class="btn primary" id="new">${icon('plus')} ${isAdmin() ? 'New' : 'Request equipment'}</button></div>
-    <div class="stack"><div class="row wrap" style="gap:10px"><div class="seg" id="seg">${isAdmin() ? '' : '<button data-v="all">All</button>'}<button data-v="open">Open</button><button data-v="closed">Closed</button><button data-v="reservations">Reservations</button></div>
+  // ONE Requests screen for IT and employees: Equipment | Returns | Reservations, each with Open / Closed. Equipment = the new equipment requests AND the
+  // earlier item requests (both tables stay as they are; nothing is converted); Returns = returns and issue reports; Reservations = reservations + waitlist.
+  const q0 = qs(); const oldTab = q0.get('tab');
+  const state = { cat: ['equipment', 'returns', 'reservations'].includes(q0.get('cat')) ? q0.get('cat') : oldTab === 'reservations' ? 'reservations' : 'equipment', tab: ['open', 'closed'].includes(oldTab) ? oldTab : 'open', f: q0.get('state') || '' };
+  main().innerHTML = `<div class="page-head"><h1>Requests</h1>${isAdmin() ? `<button class="btn primary" id="new">${icon('plus')} New</button>` : `<div class="row wrap" style="gap:8px"><button class="btn primary" id="reserve-eq">${icon('calendar')} Reserve equipment</button><button class="btn" id="need-eq">${icon('plus')} Request equipment</button></div>`}</div>
+    <div class="stack"><div class="seg" id="cats" role="group" aria-label="Request type"><button data-v="equipment">Equipment</button><button data-v="returns">Returns</button><button data-v="reservations">Reservations</button></div>
+      <div class="row wrap" style="gap:10px"><div class="seg" id="seg"><button data-v="open">Open</button><button data-v="closed">Closed</button></div>
       ${isAdmin() ? '<select id="st" aria-label="Filter by state" style="width:auto;min-height:40px;padding:6px 10px;font-size:15px"></select>' : ''}</div><div id="list"><div class="spinner"></div></div></div>`;
-  $('#new').onclick = async () => {
-    if (!isAdmin()) return requestEquipmentSheet();
+  if (!isAdmin()) { $('#reserve-eq').onclick = reserveEquipment; $('#need-eq').onclick = () => requestNeedSheet(); }
+  if ($('#new')) $('#new').onclick = async () => {
     const { el, close } = sheet(`<h2>New request</h2><div class="stack" style="margin-top:14px">
       <button class="btn lg block" id="n1">${icon('box')} Log an equipment request for someone</button>
       <button class="btn lg block" id="n2">${icon('send')} Ask someone to return an item</button></div>`);
@@ -1967,7 +2267,7 @@ async function viewRequests() {
   };
   // Reservations (slice 7): a separate list, not a request type. IT sees every one (pending approvals first, with Approve / Decline);
   // an employee sees their own, with Cancel / Shorten. All rules come from the server.
-  const syncResvLabel = (n) => { const b = $('#seg [data-v=reservations]'); if (b) b.innerHTML = `Reservations${n ? ` <span class="seg-count">${n}</span>` : ''}`; };
+  const syncResvLabel = () => {}; // (the category counts are painted by refreshBadge)
   // The reservation + waitlist sections (their cards), shared by the Reservations tab and the All tab.
   const reservationCards = async () => {
     const [rows, wl] = await Promise.all([api('GET', '/api/reservations'), api('GET', '/api/waitlist')]); // (waitlist entries live here too, not in a product of their own)
@@ -1983,9 +2283,12 @@ async function viewRequests() {
     const section = (title, items, empty, draw = (r) => reservationItem(r, { admin: adminV, tab: 'reservations' })) => `<div class="card"><div class="card-head"><h2>${title}</h2><span class="muted small">${items.length}</span></div>${items.length
       ? `<ul class="list">${items.map(draw).join('')}</ul>` : `<div class="empty">${icon('calendar')}<p>${empty}</p></div>`}</div>`;
     const drawWl = (w) => waitlistItem(w, { admin: adminV });
-    const html = `${adminV
-      ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Waitlist', activeWl, 'Nobody is on a waitlist.', drawWl) + section('Upcoming & active', live, 'No confirmed reservations ahead.')
-      : `${offered.length ? section('Available for you', offered, '', drawWl) : ''}${section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${queued.length ? section('Waitlist', queued, '', drawWl) : ''}`}${done.length ? section('Past & closed', done, '') : ''}${wlDone.length ? section('Past waitlist entries', wlDone, '', drawWl) : ''}`;
+    // Open = what still needs a decision or is ahead; Closed = past, declined and cancelled
+    const html = state.tab === 'closed'
+      ? `${section('Past & closed', done, 'Nothing closed yet.')}${wlDone.length ? section('Past waitlist entries', wlDone, '', drawWl) : ''}`
+      : adminV
+        ? section('Waiting for approval', pending, 'Nothing is waiting for approval.') + section('Waitlist', activeWl, 'Nobody is on a waitlist.', drawWl) + section('Upcoming & active', live, 'No confirmed reservations ahead.')
+        : `${offered.length ? section('Available for you', offered, '', drawWl) : ''}${section('Pending & upcoming', [...pending, ...live], 'No reservations yet. Open an item in Browse and choose Reserve.')}${queued.length ? section('Waitlist', queued, '', drawWl) : ''}`;
     return { html, rows, wl };
   };
   const wireReservations = (list, { rows, wl }, reload) => { wireReservationActions(list, rows, reload); wireWaitlistActions(list, wl, reload); };
@@ -1995,25 +2298,29 @@ async function viewRequests() {
     list.innerHTML = `<div class="stack">${data.html}</div>`;
     wireReservations(list, data, () => renderReservations().catch(fail));
   };
+  const NEWKEY = { submitted: 'submitted', in_review: 'in_review', approved: 'approved', ready: 'ready', fulfilled: 'fulfilled', declined: 'denied', cancelled: 'cancelled' };
   const render = async () => {
+    $$('#cats button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.cat));
     $$('#seg button').forEach((b) => b.classList.toggle('on', b.dataset.v === state.tab));
-    const stSel = $('#st'); if (stSel) stSel.style.display = state.tab === 'reservations' ? 'none' : '';
-    if (state.tab === 'reservations') return renderReservations();
-    api('GET', '/api/reservation-counts').then((c) => syncResvLabel(c.attention)).catch(() => {});
-    // All (employees): their open and closed requests together, then their reservations and waitlist, in the same cards as the other tabs.
-    const all = state.tab === 'all' ? [...(await api('GET', '/api/requests?status=open')), ...(await api('GET', '/api/requests?status=closed'))] : await api('GET', '/api/requests?status=' + state.tab);
-    const extra = state.tab === 'all' ? await reservationCards() : null;
+    const stSel = $('#st'); if (stSel) stSel.style.display = state.cat === 'reservations' ? 'none' : '';
+    refreshBadge(); // (also paints the counts on the category tabs)
+    if (state.cat === 'reservations') return renderReservations();
+    const isEq = state.cat === 'equipment';
+    const legacy = (await api('GET', '/api/requests?status=' + state.tab)).filter((r) => (r.type === 'equipment') === isEq);
+    const fresh = isEq ? (await api('GET', '/api/equipment-requests?status=' + state.tab)).map((n) => ({ __new: n, id: 'n' + n.id, created_at: n.created_at })) : [];
+    const all = [...fresh, ...legacy].sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0));
     const list = $('#list'); if (!list) return;
-    // IT's state filter: the tab's states with how many requests are in each. (Client-side over the same list; the lifecycle comes from the server.)
-    const countOf = (k) => all.filter((r) => stateKey(r) === k).length;
-    const states = (state.tab === 'open' ? OPEN_STATES : CLOSED_STATES).filter((k) => !ISSUE_ONLY_STATES.includes(k) || countOf(k) > 0);
-    if (!states.includes(state.f)) state.f = '';
+    // the state filter: this tab's states with how many are in each (client-side; the lifecycle comes from the server)
+    const sk = (r) => (r.__new ? NEWKEY[r.__new.status] : stateKey(r));
+    const countOf = (k) => all.filter((r) => sk(r) === k).length;
+    const keys = isEq ? (state.tab === 'open' ? ['submitted', 'in_review', 'approved', 'ready'] : ['fulfilled', 'denied', 'rescinded', 'cancelled']) : (state.tab === 'open' ? OPEN_STATES : CLOSED_STATES).filter((k) => !ISSUE_ONLY_STATES.includes(k) || countOf(k) > 0);
+    if (!keys.includes(state.f)) state.f = '';
     const st = $('#st');
-    if (st) st.innerHTML = `<option value="">All (${all.length})</option>${states.map((k) => `<option value="${k}"${state.f === k ? ' selected' : ''}>${LIFE_LABEL[k]} (${countOf(k)})</option>`).join('')}`;
-    const rows = state.f ? all.filter((r) => stateKey(r) === state.f) : all;
-    if (!rows.length && !extra) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${all.length ? `No ${LIFE_LABEL[state.f].toLowerCase()} requests.` : state.tab === 'open' ? 'No open requests.' : 'Nothing here yet.'}</p></div></div>`; return; }
-    const find = (id) => all.find((r) => r.id === Number(id));
-    const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Equipment request');
+    if (st) st.innerHTML = `<option value="">All (${all.length})</option>${keys.map((k) => `<option value="${k}"${state.f === k ? ' selected' : ''}>${LIFE_LABEL[k]} (${countOf(k)})</option>`).join('')}`;
+    const rows = state.f ? all.filter((r) => sk(r) === state.f) : all;
+    if (!rows.length) { list.innerHTML = `<div class="card"><div class="empty">${icon('inbox')}<p>${all.length ? `No ${LIFE_LABEL[state.f].toLowerCase()} requests.` : state.tab === 'open' ? `No open ${isEq ? 'equipment requests' : 'returns or issue reports'}.` : 'Nothing here yet.'}</p></div></div>`; return; }
+    const find = (id) => legacy.find((r) => r.id === Number(id));
+    const kindOf = (r) => (r.type === 'return' ? 'Return request' : r.type === 'issue' ? 'Issue report' : isPermReq(r) ? 'Permanent assignment request' : 'Item request');
     const titleOf = (r) => (r.type === 'return' ? `Return ${esc(r.asset_name || 'item')}` : r.type === 'issue' ? `Issue — ${esc(r.asset_name || 'item')}` : isPermReq(r) ? `Permanent assignment request — ${esc(r.asset_name || r.category || 'equipment')}` : `${esc(r.catalog_path ? crumbText(r.catalog_path) : (r.category || 'Equipment'))}${r.asset_name && !r.catalog_path ? ` — ${esc(r.asset_name)}` : ''}`);
     // What exactly was asked for: the catalog level as it was when the request was made, and whether any matching asset or
     // one specific item. (Older requests have only the free-text category.)
@@ -2071,6 +2378,8 @@ async function viewRequests() {
       const { el, close } = sheet(`<h2>${esc(kindOf(r))}</h2>
         <div class="row wrap" style="gap:8px;margin:2px 0 12px">${reqPill(r)}${isPermReq(r) ? '<span class="pill plain available">Permanent assignment</span>' : ''}</div>
         <div class="kv">
+          ${r.type === 'equipment' ? row('Equipment request decision', esc({ submitted: 'Submitted', in_review: 'In review', approved: 'Approved', fulfilled: 'Approved · Fulfilled', denied: 'Declined', rescinded: 'Cancelled by the requester', cancelled: 'Cancelled' }[stateKey(r)] || statusLabel(r))) : ''}
+          ${r.type === 'equipment' ? row('Permanent assignment decision', esc(r.requested_assignment_type === 'permanent' ? (r.status === 'completed' ? 'Approved and assigned' : r.status === 'denied' ? 'Denied' : 'Pending decision') : r.requested_assignment_type === 'checkout' ? 'Not requested (temporary checkout)' : 'Not recorded (this request predates the permanent-assignment option)')) : ''}
           ${row(r.type === 'issue' ? 'Reported by' : 'Requested by', `${isAdmin() ? `<a href="#/person/${r.user_id}" data-x>${esc(r.user_name)}</a>` : esc(r.user_name)}${r.user_department ? ' · ' + esc(r.user_department) : ''}`)}
           ${row(r.type === 'equipment' && r.status === 'completed' && !r.asset_label ? 'Assigned asset' : 'Asset', r.asset_id ? `${isAdmin() ? `<a href="#/asset/${r.asset_id}${srcQ('requests', { tab: state.tab })}" data-x>${esc(r.asset_name || '')}</a>` : esc(r.asset_name || '')} <span class="mono small muted">${esc(r.asset_tag || '')}</span>` : '')}
           ${row('Requested', r.catalog_path ? `<strong>${esc(crumbText(r.catalog_path))}</strong>` : '')}
@@ -2090,6 +2399,7 @@ async function viewRequests() {
       if (justOpened) render().catch(() => {}); // the list behind the sheet now shows "In review"
     };
     list.innerHTML = `<div class="stack">${rows.map((r) => {
+      if (r.__new) return eqCard(r.__new);
       const isRet = r.type === 'return';
       const btns = actionsFor(r);
       return `<div class="card"><div class="item" data-detail="${r.id}" tabindex="0" style="align-items:flex-start;cursor:pointer">
@@ -2101,8 +2411,13 @@ async function viewRequests() {
           ${r.resolution_note ? `<div class="small muted" style="margin-top:6px">IT: ${esc(r.resolution_note)}</div>` : ''}
           <div class="row wrap" style="margin-top:10px;gap:8px"><button class="btn sm" data-open="${r.id}">View details</button>${btns}</div>
         </div></div></div>`;
-    }).join('')}${extra ? extra.html : ''}</div>`;
-    if (extra) wireReservations(list, extra, () => render().catch(fail));
+    }).join('')}</div>`;
+    const openNew = (id) => openEqDetail(Number(id), { admin: isAdmin(), reload: () => render().catch(() => {}) });
+    $$('[data-eqd]', list).forEach((it) => {
+      it.onclick = (e) => { if (e.target.closest('a,button')) return; openNew(it.dataset.eqd); };
+      it.onkeydown = (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target === it) { e.preventDefault(); openNew(it.dataset.eqd); } };
+    });
+    $$('[data-eqopen]', list).forEach((b) => b.onclick = () => openNew(b.dataset.eqopen));
     $$('[data-detail]', list).forEach((it) => {
       const open = () => openDetail(find(it.dataset.detail));
       it.onclick = (e) => { if (e.target.closest('a,button')) return; open(); };
@@ -2111,7 +2426,8 @@ async function viewRequests() {
     $$('[data-open]', list).forEach((b) => b.onclick = () => openDetail(find(b.dataset.open)));
     wireActions(list);
   };
-  const keepUrl = () => history.replaceState(null, '', `#/requests?tab=${state.tab}${state.f ? '&state=' + state.f : ''}`);
+  const keepUrl = () => history.replaceState(null, '', `#/requests?cat=${state.cat}&tab=${state.tab}${state.f ? '&state=' + state.f : ''}`);
+  $('#cats').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; state.cat = b.dataset.v; state.f = ''; keepUrl(); render().catch(fail); };
   $('#seg').onclick = (e) => { const b = e.target.closest('button'); if (!b) return; state.tab = b.dataset.v; state.f = ''; keepUrl(); render().catch(fail); };
   if ($('#st')) $('#st').onchange = (e) => { state.f = e.target.value; keepUrl(); render().catch(fail); };
   render();
@@ -2684,7 +3000,9 @@ async function viewCalendar() {
   const panelHtml = () => {
     const day = st.day; const i = Number(day.slice(8)) - 1;
     const body = day < data.today ? passedHtml(day) : isSummary() ? summaryPanel(day, i) : assetPanel(day, i);
-    return body + (canReserve ? reservePanel() + waitlistPanel() : '') + (isSummary() ? '' : queueHtml());
+    const prio = !isSummary() && A[0] && A[0].priority_hold;
+    const prioNotice = prio ? `<div class="banner info">${icon('calendar')}<div class="grow small"><strong>On a priority hold</strong> for another employee until ${esc(prio.until_text)}. Reserving is paused for everyone else until then${canReserve ? ': you can join the waitlist for the dates you want' : ''}.</div></div>` : '';
+    return prioNotice + body + (canReserve ? reservePanel() + waitlistPanel() : '') + (isSummary() ? '' : queueHtml());
   };
 
   const gridHtml = () => {

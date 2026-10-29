@@ -46,8 +46,8 @@ test('a clean, fully migrated database passes and reports row counts', () => {
   assert.equal('schema_migrations' in result.counts, false);
 });
 
-test('the expected schema version is every SQLite migration (1..20)', () => {
-  assert.deepEqual(EXPECTED_MIGRATIONS, Array.from({ length: 20 }, (_, i) => i + 1));
+test('the expected schema version is every SQLite migration (1..21)', () => {
+  assert.deepEqual(EXPECTED_MIGRATIONS, Array.from({ length: 21 }, (_, i) => i + 1));
   db.prepare('DELETE FROM schema_migrations WHERE id = 18').run();
   const result = audit();
   assert.equal(result.ok, false);

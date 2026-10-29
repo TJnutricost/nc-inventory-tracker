@@ -1054,6 +1054,135 @@ app.post('/api/requests/:id/dropped-off', auth, async (req, res) => {
   }
   res.json({ ok: true });
 });
+// ---------- employee equipment requests ----------
+// "I need a piece of equipment" (src/equipmentRequests.js): one physical item per request, decided by IT, never an automatic purchase, asset, reservation or
+// assignment. Any signed-in employee may submit and follow their own (no scanner / self-checkout permission); IT decides, readies and fulfils. The rules and the
+// audit trail live in the module; these routes check the input, identify the caller and send the emails after each write commits.
+const eqLabel = (r) => [r.category, r.brand, r.model].filter(Boolean).join(' › ');
+async function eqTell(r, headline, detail) {
+  try { const p = await data.people.getPerson(r.employee_id); if (p) notify.equipmentNeedUpdate(p, r, headline, detail); } catch (e) { console.error('[equipment-request:mail]', e.message); }
+}
+const eqNote = (v) => {
+  const s = clean(v);
+  if (s && s.length > data.equipmentRequests.TEXT_MAX) throw httpError(400, `Please keep notes under ${data.equipmentRequests.TEXT_MAX} characters`);
+  return s;
+};
+const eqId = (req) => Number(req.params.id);
+app.get('/api/equipment-requests', auth, async (req, res) => {
+  if (req.query.status !== undefined && !['open', 'closed'].includes(req.query.status)) throw httpError(400, 'Status must be open or closed');
+  res.json(await data.equipmentRequests.list(req.user, { status: req.query.status }));
+});
+app.get('/api/equipment-request-counts', auth, async (req, res) => res.json(await data.equipmentRequests.counts(req.user)));
+app.post('/api/equipment-requests', auth, async (req, res) => {
+  const me = req.user.employee_id;
+  if (!me) throw httpError(400, "Your login isn't linked to an employee record. Ask IT.");
+  const b = req.body || {};
+  const limited = (v, label, max) => {
+    const s = clean(v);
+    if (s && s.length > max) throw httpError(400, `${label} is too long (up to ${max} characters).`);
+    return s;
+  };
+  const { FIELD_MAX, TEXT_MAX } = data.equipmentRequests;
+  const details = limited(b.details, 'Additional details', TEXT_MAX);
+  let category; let categoryOther = false; let nodeId = null; let catalogPath = null; let brand = null; let model = null;
+  if (b.catalog_node_id !== undefined && b.catalog_node_id !== null && b.catalog_node_id !== '') {
+    // a category (and optionally a brand and model) chosen from the catalog: any live level; the names are snapshotted so the request reads the same later
+    nodeId = Number(b.catalog_node_id);
+    if (!Number.isInteger(nodeId) || nodeId < 1 || !(await data.catalog.isLive(nodeId))) throw httpError(400, 'Choose equipment from the catalog list, or Other.');
+    const names = await data.catalog.pathNames(nodeId);
+    category = names[0]; brand = names[1] || null; model = names.length > 2 ? names.slice(2).join(' › ') : null;
+    catalogPath = await data.catalog.pathText(nodeId);
+  } else {
+    category = limited(b.category_other, 'The category', FIELD_MAX);
+    if (!category) throw httpError(400, 'Choose a category, or choose Other and say what you need.');
+    categoryOther = true;
+  }
+  // typed brand / model text only fills a level the catalog choice left open
+  const customBrand = limited(b.brand, 'The brand', FIELD_MAX); const customModel = limited(b.model, 'The model', FIELD_MAX);
+  if (!brand) brand = customBrand;
+  if (!model) model = customModel;
+  const r = await data.equipmentRequests.create({ employeeId: me, createdBy: req.user.account_id, category, categoryOther, nodeId, catalogPath, brand, model, details, permanent: b.permanent === true || b.permanent === 'true' || b.permanent === 1 });
+  notify.equipmentNeedSubmitted(await data.people.getPerson(me), r);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+app.get('/api/equipment-requests/:id', auth, async (req, res) => res.json(await data.equipmentRequests.get(eqId(req), req.user)));
+// IT opens a request (Submitted -> In review). Admin only; never a GET side effect.
+app.post('/api/equipment-requests/:id/review', admin, async (req, res) => {
+  await data.equipmentRequests.review(eqId(req), { actorAccountId: req.user.account_id });
+  res.json(await data.equipmentRequests.get(eqId(req), req.user));
+});
+// Approve the NEED; the permanent-assignment preference is decided separately (here, in the same step, or later on /permanent).
+app.post('/api/equipment-requests/:id/approve', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.approve(eqId(req), { actorAccountId: req.user.account_id, note, permanentDecision: clean(req.body.permanent_decision) || undefined, permanentNote: eqNote(req.body.permanent_note) });
+  await eqTell(r, 'Approved', `IT approved the need.${r.permanent_decision === 'approved' ? ' Your permanent assignment was approved too: IT will deliver it.' : r.permanent_decision === 'denied' ? ' The permanent assignment was not approved, so it will be shared equipment you can reserve.' : ''}${note ? ` Note from IT: ${note}` : ''}`);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+app.post('/api/equipment-requests/:id/permanent', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.setPermanent(eqId(req), { actorAccountId: req.user.account_id, decision: clean(req.body.decision), note });
+  await eqTell(r, r.permanent_decision === 'approved' ? 'Permanent assignment approved' : 'Permanent assignment not approved', r.permanent_decision === 'approved' ? 'IT will deliver the equipment and assign it to you.' : `IT did not approve a permanent assignment, so this will be shared equipment you can reserve.${note ? ` Note from IT: ${note}` : ''}`);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+// A note without a decision: recorded in the history, shown to the employee as "Note from IT" and emailed; nothing else changes.
+app.post('/api/equipment-requests/:id/note', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.addNote(eqId(req), { actorAccountId: req.user.account_id, note });
+  await eqTell(r, 'Note from IT', note);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+app.post('/api/equipment-requests/:id/decline', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.decline(eqId(req), { actorAccountId: req.user.account_id, note });
+  await data.waitlist.dispatchHoldEmails(); // (declining a ready request frees its unit, which may have been offered to the next person in line)
+  await eqTell(r, 'Declined', `IT declined this request.${note ? ` Note from IT: ${note}` : ''}`);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+// A unit is ready: notify the requester and start their 48-hour priority hold on it.
+app.post('/api/equipment-requests/:id/ready', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.markReady(eqId(req), { actorAccountId: req.user.account_id, assetId: num(req.body.asset_id), note });
+  const d = await data.equipmentRequests.get(r.id, req.user);
+  await eqTell(d, 'Ready for you', `${d.asset_label} is ready. It is on a priority hold for you until ${d.hold_expires_text} (${data.equipmentRequests.HOLD_HOURS} hours): reserve it, or ask IT to check it out. Nobody else can reserve or check it out meanwhile.${note ? ` Note from IT: ${note}` : ''}`);
+  res.json(d);
+});
+// Issued: a permanent assignment delivered, a checkout, or a handover that needs no inventory item.
+app.post('/api/equipment-requests/:id/fulfill', admin, async (req, res) => {
+  const note = eqNote(req.body.note);
+  const r = await data.equipmentRequests.fulfill(eqId(req), { actorAccountId: req.user.account_id, assetId: num(req.body.asset_id), dueDate: clean(req.body.due_date), dueTime: clean(req.body.due_time), note, untracked: req.body.untracked === true || req.body.untracked === 'true' });
+  await data.waitlist.dispatchHoldEmails();
+  await eqTell(r, 'Fulfilled', `Your equipment has been issued.${note ? ` Note from IT: ${note}` : ''}`);
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+app.post('/api/equipment-requests/:id/cancel', auth, async (req, res) => {
+  const r = await data.equipmentRequests.cancel(eqId(req), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: req.user.role === 'admin' });
+  await data.waitlist.dispatchHoldEmails();
+  if (req.user.role === 'admin' && r.employee_id !== req.user.employee_id) await eqTell(r, 'Cancelled', 'IT cancelled this request.');
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+// The employee declines the ready unit: the hold ends, the unit goes back to everyone, the request stays approved.
+app.post('/api/equipment-requests/:id/decline-ready', auth, async (req, res) => {
+  const r = await data.equipmentRequests.releaseHold(eqId(req), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: false });
+  await data.waitlist.dispatchHoldEmails();
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+app.post('/api/equipment-requests/:id/release', admin, async (req, res) => {
+  const r = await data.equipmentRequests.releaseHold(eqId(req), { actorAccountId: req.user.account_id, employeeId: req.user.employee_id, isAdmin: true });
+  await data.waitlist.dispatchHoldEmails();
+  await eqTell(r, 'Hold released', 'IT released the priority hold on your equipment. Your request is still approved; IT will let you know when a unit is ready.');
+  res.json(await data.equipmentRequests.get(r.id, req.user));
+});
+// The sweep: priority holds that ran out unclaimed go back to approved (or fulfilled, when the employee reserved the unit meanwhile). Never throws.
+async function expireEquipmentHolds() {
+  try {
+    for (const { request, outcome } of await data.equipmentRequests.expireHolds()) {
+      if (outcome === 'claimed') await eqTell(request, 'Reserved for you', 'The priority hold ended, and your reservation keeps the unit for you. IT will issue it to you.');
+      else if (outcome === 'claim_ended') await eqTell(request, 'Reservation ended', 'Your reservation ended before the equipment was issued. Your request is still approved: ask IT to hold a unit for you again.');
+      else await eqTell(request, 'Hold ended', `The ${data.equipmentRequests.HOLD_HOURS}-hour priority hold ended without a claim and the unit is available to everyone again. Your request is still approved: ask IT to hold a unit for you again.`);
+    }
+  } catch (e) { console.error('[equipment-request:hold-sweep]', e.message); }
+}
+
 // ---- employee actions on equipment they currently hold (Phase 2, Slice 2) ----
 // The asset must be visible to the caller AND checked out to the caller right now (src/assetAccess.js heldAsset). Anything else is
 // refused on the server; a hidden button is never the authorization. (A visible-but-not-held asset is a 400, an invisible one a 404.)
@@ -1237,7 +1366,7 @@ if (DB_DRIVER !== 'pg') startOverdueTimer(); // (on PostgreSQL boot() starts it,
 // do not touch the waitlist directly) and sends any hold email still owed. Idempotent, so running it often is harmless. Through the seam
 // since Slice 5B-4 (on SQLite the sweep still runs to completion inside the call; a failure is logged, as before). The PostgreSQL
 // single-flight scheduler (src/pg/sweep.js) replaces this timer on PostgreSQL (started by boot() below, with the same first run at 20 s).
-function waitlistSweep() { return data.waitlist.sweep().catch((e) => console.error('[waitlist:sweep]', e.message)); }
+async function waitlistSweep() { await expireEquipmentHolds(); return data.waitlist.sweep().catch((e) => console.error('[waitlist:sweep]', e.message)); } // (a ready equipment request's priority hold ends first: it frees its unit for the queue)
 if (DB_DRIVER !== 'pg') {
   setInterval(waitlistSweep, 60e3).unref();
   setTimeout(waitlistSweep, 20e3).unref();
@@ -1303,13 +1432,14 @@ async function bootPg() {
   const ran = await runMigrations(pool);
   if (ran.length) console.log(`PostgreSQL: applied schema migration(s) ${ran.join(', ')}`);
   const uninstall = installNotifier(pool, mailer);
-  const scheduler = createSweepScheduler({ pool });
+  const scheduler = createSweepScheduler({ pool, run: async () => { await expireEquipmentHolds(); return data.waitlist.sweep(); } });
   scheduler.start();
   setTimeout(() => { scheduler.tick(); }, 20e3).unref();
   startOverdueTimer();
   return { stop: async () => { await scheduler.stop(); uninstall(); await require('./pg/pool').close(); } };
 }
 app.boot = boot;
+app.sweepNow = async () => { await expireEquipmentHolds(); await data.waitlist.sweep(); }; // (what the timer runs; tests call it instead of waiting a minute)
 
 function listen({ stop }) {
   // (Express 5 hands a listen failure to this callback as `err`; it must not print the success banner then. The 'error' handler below reports it.)

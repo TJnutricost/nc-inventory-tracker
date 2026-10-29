@@ -72,10 +72,15 @@ const { reserveEligibility } = availability; // shared with the single-asset cal
 // Waitlist entries that are merely waiting, ordinary pending requests and everything closed are NOT blockers: waiting is demand, not possession.
 // `excludeId` = the reservation being (re)checked; `ignoreHoldId` = the waitlist hold being confirmed (it must not count against itself).
 // Ranges are half-open: adjacent ranges (return 1:00 PM / pickup 1:00 PM) do not overlap.
-function findBlockers(db, asset, range, { today, excludeId = 0, ignoreHoldId = 0 } = {}) {
+function findBlockers(db, asset, range, { today, excludeId = 0, ignoreHoldId = 0, employeeId = null } = {}) {
   const want = T.keysOf(range);
   const near = (rows) => rows.filter((r) => T.overlaps(want, T.keysOf(r)));
   const out = [];
+  // A READY equipment request (src/equipmentRequests.js) keeps this unit for its requester for 48 hours: for everyone ELSE it blocks all time,
+  // exactly like a checkout with no known end (the requester themselves is never blocked by it). It never outranks a reservation that exists.
+  const prioSql = "SELECT * FROM equipment_requests WHERE asset_id = ? AND status = 'ready' AND hold_expires_at > datetime('now')";
+  const prio = employeeId == null ? db.prepare(prioSql).get(asset.id) : db.prepare(`${prioSql} AND employee_id <> ?`).get(asset.id, employeeId);
+  if (prio) out.push({ kind: 'priority_hold', row: prio, sk: '0000-01-01T00:00', ek: T.INF_KEY });
   const resv = db.prepare(`SELECT * FROM reservations WHERE asset_id = ? AND id <> ? AND start_date <= ? AND end_date >= ?
     AND (status = 'confirmed' OR (status = 'pending' AND waitlist_entry_id IS NOT NULL)) ORDER BY start_date, start_time, id`).all(asset.id, excludeId, range.end_date, range.start_date);
   for (const r of near(resv)) out.push({ kind: r.status === 'confirmed' ? 'reservation' : 'pending_hold', row: r, ...T.keysOf(r) });
@@ -94,6 +99,7 @@ const plan = (db, asset, range, opts) => { const blockers = findBlockers(db, ass
 // Why a blocker makes the time unavailable, in the words the screens use (never who has it).
 function whyBlocked(b, today) {
   if (b.kind === 'hold') return `It is on a priority hold for a waitlisted team ${when(b.row)}.`;
+  if (b.kind === 'priority_hold') return `It is on a priority hold for another employee until ${T.fmtStamp(b.row.hold_expires_at)}.`;
   if (b.kind === 'pending_hold') return `A reservation from the waitlist is waiting for IT approval ${when(b.row)}.`;
   if (b.kind === 'checkout') {
     const a = b.row;
@@ -180,7 +186,7 @@ function approve(db, id, { actorAccountId, note: text }) {
     const emp = db.prepare('SELECT status FROM employees WHERE id = ?').get(r.employee_id);
     if (!emp || emp.status !== 'active') throw httpError(409, "Can't approve: that person is inactive.");
     if (r.start_date < today) throw httpError(409, "Can't approve: the start date has already passed. Decline it so they can book again.");
-    const blocked = findBlockers(db, asset, r, { excludeId: r.id, today })[0];
+    const blocked = findBlockers(db, asset, r, { excludeId: r.id, today, employeeId: r.employee_id })[0];
     if (blocked) throw httpError(409, `Can't approve: ${whyBlocked(blocked, today)} Decline it or ask the employee to choose other dates.`);
     const info = db.prepare("UPDATE reservations SET status = 'confirmed', decided_by = ?, decided_at = datetime('now'), decision_note = ?, updated_at = datetime('now') WHERE id = ? AND status = 'pending'")
       .run(actorAccountId, text || null, id);

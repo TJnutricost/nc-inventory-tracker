@@ -69,7 +69,7 @@ function freeParts(db, e, today) {
   const emp = db.prepare('SELECT status FROM employees WHERE id = ?').get(e.employee_id);
   if (!emp || emp.status !== 'active') return null;
   if (reservations.hasOwnOverlap(db, e.asset_id, e.employee_id, e)) return null;
-  return reservations.plan(db, asset, e, { today });
+  return reservations.plan(db, asset, e, { today, employeeId: e.employee_id });
 }
 
 // A piece of an entry that has been split keeps the entry's place in line (same queue_seq / queued_at / request_group), so splitting never costs priority.
@@ -164,7 +164,7 @@ function classify(db, { assetId, employeeId, start, end, startTime, endTime, exc
   if (reservations.hasOwnHold(db, assetId, employeeId, range)) return no('own_hold', 409, 'You have a priority hold on those dates. Confirm it under Requests > Reservations.', done);
   const mine = db.prepare(`SELECT * FROM waitlist_entries WHERE asset_id = ? AND employee_id = ? AND status IN ('waiting','held') AND id <> ? AND start_date <= ? AND end_date >= ?`).all(assetId, employeeId, excludeEntryId, end, start);
   if (mine.some((w) => T.overlapsRows(w, range))) return no('own_waitlist', 409, "You're already on the waitlist for this item for overlapping dates.", done);
-  const p = reservations.plan(db, asset, range, { today });
+  const p = reservations.plan(db, asset, range, { today, employeeId });
   const reservers = p.blockers.filter((o) => o.kind === 'reservation' && o.row.employee_id !== employeeId)
     .map((o) => ({ reservation_id: o.row.id, start_date: o.row.start_date, start_time: o.row.start_time, end_date: o.row.end_date, end_time: o.row.end_time, employee_id: o.row.employee_id }));
   const base = { ...done, free: p.free, busy: p.busy, reservers, requires_approval: !!asset.reservation_requires_approval };
@@ -271,7 +271,7 @@ function confirmHold(db, id, { employeeId, actorAccountId }) {
     const clash = !el.ok ? "this item can't be reserved right now" : !emp || emp.status !== 'active' ? 'your account is not active'
       : e.start_date < today ? 'the start date has passed' : T.endKey(e.end_date, e.end_time) <= T.nowKey() ? 'that time has already ended' : reservations.hasOwnOverlap(db, e.asset_id, employeeId, e) ? 'you already have a reservation for those dates' : null;
     // the hold is priority, so nothing else should be in the way; if something somehow is (a checkout, an approval), the hold goes back to waiting
-    const taken = clash ? null : findBlockers(db, asset, e, { today, ignoreHoldId: e.id })[0];
+    const taken = clash ? null : findBlockers(db, asset, e, { today, ignoreHoldId: e.id, employeeId })[0];
     if (clash || taken) {
       // The dates can't be had after all: give the hold back (or close it if the dates are gone) and let the queue move; report it afterwards.
       if (e.start_date < today || T.endKey(e.end_date, e.end_time) <= T.nowKey()) close(db, e.id, 'expired', null);

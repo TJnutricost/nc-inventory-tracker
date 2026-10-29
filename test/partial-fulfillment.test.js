@@ -624,13 +624,13 @@ test('front end: new optional times default AM/PM from the business clock only o
   assert.match(box, /aria-pressed="\$\{m && h >= 12 \? 'true' : 'false'\}"/);
 });
 
-test('front end: Requests has an All tab first for employees (their default), the waitlist title opens the same edit sheet, and the redundant notice is gone', () => {
+test('front end: ONE Requests screen (Equipment | Returns | Reservations, each Open / Closed) for everyone, the waitlist title opens the same edit sheet, and the redundant notice is gone', () => {
   const view = src.slice(src.indexOf('async function viewRequests('), src.indexOf('function noteSheet('));
-  assert.match(view, /const tabs = isAdmin\(\) \? \['open', 'closed', 'reservations'\] : \['all', 'open', 'closed', 'reservations'\];/, 'IT is unchanged');
-  assert.match(view, /state = \{ tab: tabs\.includes\(qs\(\)\.get\('tab'\)\) \? qs\(\)\.get\('tab'\) : tabs\[0\]/, 'the first tab is the default');
-  assert.match(view, /\$\{isAdmin\(\) \? '' : '<button data-v="all">All<\/button>'\}<button data-v="open">Open<\/button><button data-v="closed">Closed<\/button><button data-v="reservations">Reservations<\/button>/, 'the existing tabs are kept');
-  assert.match(view, /\.\.\.\(await api\('GET', '\/api\/requests\?status=open'\)\), \.\.\.\(await api\('GET', '\/api\/requests\?status=closed'\)\)/, 'requests, open then closed');
-  assert.match(view, /\$\{extra \? extra\.html : ''\}/, 'then the same reservation and waitlist cards');
+  assert.match(view, /<div class="seg" id="cats"[^>]*><button data-v="equipment">Equipment<\/button><button data-v="returns">Returns<\/button><button data-v="reservations">Reservations<\/button><\/div>/, 'the three categories');
+  assert.match(view, /<div class="seg" id="seg"><button data-v="open">Open<\/button><button data-v="closed">Closed<\/button><\/div>/, 'Open / Closed inside each');
+  assert.doesNotMatch(view, /data-v="all"/, 'no separate All tab: one screen for both roles');
+  assert.match(view, /api\('GET', '\/api\/equipment-requests\?status=' \+ state\.tab\)/, 'the new equipment requests are listed under Equipment');
+  assert.match(view, /api\('GET', '\/api\/requests\?status=' \+ state\.tab\)\)\.filter\(\(r\) => \(r\.type === 'equipment'\) === isEq\)/, 'and so are the earlier item requests, untouched');
   const wl = src.slice(src.indexOf('function waitlistItem('), src.indexOf('// ONE date sheet'));
   assert.match(wl, /w\.can_edit \? `<a href="#" class="title" data-wl-edit="\$\{w\.id\}">/, 'the title carries the same data-wl-edit as the Edit dates button');
   assert.match(wl, /<button class="btn sm" data-wl-edit="\$\{w\.id\}">Edit dates<\/button>/, 'and the button stays');

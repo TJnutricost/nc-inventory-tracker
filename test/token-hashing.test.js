@@ -114,7 +114,7 @@ test('migration 20: outstanding tokens are hashed in place (their links keep wor
   old.prepare("INSERT INTO tokens (token, user_id, purpose, expires_at) VALUES ('legacyRawToken0123456789abcdefgh', 1, 'reset', ?), ('legacyForgotToken0123456789abcdef', 1, 'forgot', ?)").run(live, live);
   old.prepare("INSERT INTO outbox (to_addr, subject, body, status) VALUES ('legacy1@x.com', 'Welcome', '<a href=\"https://it.x/#/reset/legacyRawToken0123456789abcdefgh\">Set</a>', 'sent'), ('a@x.com', 'Other', '<a href=\"https://it.x/#/asset/3\">Asset</a>', 'sent')").run();
 
-  assert.deepEqual(runMigrations(old, migrations), [20]);
+  assert.deepEqual(runMigrations(old, migrations), [20, 21]);
   const accounts = require('../src/accounts');
   const row = accounts.getToken(old, 'legacyRawToken0123456789abcdefgh');
   assert.deepEqual([row.user_id, row.purpose, row.expires_at, row.token], [1, 'reset', live, hashToken('legacyRawToken0123456789abcdefgh')], 'the emailed link still finds its token');

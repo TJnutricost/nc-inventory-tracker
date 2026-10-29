@@ -159,7 +159,7 @@ describe('PostgreSQL baseline ⇄ SQLite schema parity', pgSuite(), () => {
     const p = await describePg(client);
     const sqliteTables = Object.keys(s).filter((t) => t !== 'sqlite_sequence').sort();
     assert.deepEqual(Object.keys(p).sort(), sqliteTables);
-    assert.equal(sqliteTables.length, 17, '16 app tables + schema_migrations');
+    assert.equal(sqliteTables.length, 19, '18 app tables + schema_migrations');
     for (const t of sqliteTables) assert.deepEqual(p[t].columns.map((c) => c.name), s[t].columns.map((c) => c.name), t);
   });
 

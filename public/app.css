@@ -767,3 +767,60 @@ li.resv .item { padding-top: 12px; padding-bottom: 12px; }
 .dd-sub { font-size: 13px; font-weight: 500; color: var(--muted); }
 .seg-full { display: flex; width: 100%; }
 .seg-full button { flex: 1; min-height: 44px; }
+
+/* ---------- Request equipment form (compact combobox, centred modal) and the employee Home action grid ---------- */
+.cb { position: relative; }
+.cb-btn { width: 100%; min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; font: inherit; font-size: 16px; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px; cursor: pointer; }
+.cb-btn[aria-expanded="true"] { border-color: var(--brand-accent, #1f6feb); }
+.cb-val { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-val.ph { color: var(--muted); }
+.cb-chev { width: 18px; height: 18px; flex: none; color: var(--muted); transform: rotate(90deg); }
+.cb-pop { position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 6; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 28px rgba(0,0,0,.28); padding: 8px; }
+.cb-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 240px; overflow-y: auto; overscroll-behavior: contain; }
+.cb-list li button { width: 100%; text-align: left; font: inherit; font-weight: 550; color: var(--text); background: none; border: 0; border-radius: 8px; padding: 10px; min-height: 40px; cursor: pointer; }
+.cb-list li button:hover, .cb-list li button:focus-visible { background: var(--surface-2); outline: none; }
+.cb-list li[aria-selected="true"] button { background: var(--surface-2); font-weight: 700; }
+.cb-empty { padding: 10px; color: var(--muted); font-size: 14px; }
+.sheet.eq-form { max-width: 640px; }
+.eq-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
+.eq-grid .field, .eq-grid .check { margin: 0; }
+.eq-grid textarea { min-height: 72px; }
+.eq-grid .sheet-actions { margin-top: 4px; }
+@media (min-width: 560px) { .eq-grid { grid-template-columns: 1fr 1fr; } .eq-grid .eq-full { grid-column: 1 / -1; } }
+@media (min-width: 700px) { .sheet-backdrop:has(.eq-form) { padding: 16px; } .sheet.eq-form { padding: 16px 22px 18px; } }
+.actions.home-actions .btn { min-height: 52px; justify-content: center; text-align: center; line-height: 1.2; white-space: normal; }
+.actions.home-actions .scan-wide { grid-column: 1 / -1; }
+@media (min-width: 700px) { .actions.home-actions.has-scan { grid-template-columns: repeat(3, 1fr); } .actions.home-actions.has-scan .scan-wide { grid-column: auto; } }
+.eq-grid [hidden], .cb [hidden] { display: none !important; } /* (.field / .check set their own display, which would otherwise beat the hidden attribute) */
+.sidebar a[data-key="equipment-requests"], .sidebar a[data-key="my-requests"] { gap: 10px; font-size: 15px; white-space: nowrap; } /* (the label and its count badge stay on one line) */
+#cats { display: flex; width: 100%; } #cats button { flex: 1 1 auto; white-space: nowrap; padding: 7px 8px; } #cats .seg-count { margin-left: 4px; } /* (Equipment | Returns | Reservations with their counts stay on one line, phone included) */
+
+/* ---------- request detail: the Decisions panel and the grouped actions ---------- */
+.dec { border: 1px solid var(--line); border-radius: 12px; padding: 14px; display: grid; gap: 14px; background: var(--surface-2); }
+.dec h3 { margin: 0; font-size: 15px; }
+.dec-row { display: grid; gap: 6px; }
+.dec-row .lab { font-size: 13px; font-weight: 650; color: var(--muted); }
+.dec-status { font-weight: 700; }
+.dec-seg { display: grid; grid-template-columns: repeat(var(--n, 3), 1fr); gap: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: 11px; padding: 3px; }
+.dec-seg button { appearance: none; border: 0; background: transparent; font: inherit; font-weight: 600; font-size: 14px; min-height: 42px; border-radius: 8px; color: var(--muted); cursor: pointer; }
+.dec-seg button.on { background: var(--surface-2); color: var(--text); box-shadow: var(--shadow); }
+.dec-seg button.on.ok { background: var(--ok-soft); color: var(--ok); }
+.dec-seg button.on.no { background: var(--bad-soft); color: var(--bad); }
+.dec-seg.off { opacity: .45; pointer-events: none; }
+.dec #dec-save { width: 100%; min-height: 44px; }
+.dec [hidden] { display: none !important; }
+.act-group { display: grid; gap: 8px; }
+.act-group h4 { margin: 0; font-size: 13px; font-weight: 650; color: var(--muted); }
+.act-group + .act-group { border-top: 1px solid var(--line); padding-top: 12px; }
+.act-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; }
+.act-grid .btn { width: 100%; min-height: 44px; justify-content: center; text-align: center; line-height: 1.2; white-space: normal; }
+
+/* ---------- sheet close X (phones): in the sheet's top-right corner, stays visible while the content scrolls ---------- */
+.sheet-x-bar { display: none; }
+@media (max-width: 699px) {
+  .sheet.has-x { max-height: min(92dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 12px)); }
+  .sheet-x-bar { display: block; position: sticky; top: 0; height: 0; z-index: 7; }
+  .sheet-x { position: absolute; top: 0; right: max(0px, env(safe-area-inset-right, 0px)); width: 44px; height: 44px; display: grid; place-items: center; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: var(--surface-2); color: var(--text); box-shadow: var(--shadow); cursor: pointer; }
+  .sheet-x svg { width: 20px; height: 20px; }
+  .sheet.has-x h2:first-of-type { padding-right: 56px; }
+}

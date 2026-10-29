@@ -925,5 +925,63 @@ module.exports = [
       }
     },
   },
+  {
+    // Employee equipment requests (2026-10-29): the "Request equipment" form, IT's decisions, the permanent-assignment preference and the 48-hour
+    // priority hold on a ready unit (docs/briefs/employee-reservations-requests.md). A separate table from `requests` (whose type/status CHECKs
+    // describe the older request kinds): one physical item per row, with an append-only event log for the audit trail. The partial unique index
+    // allows one live priority hold per unit.
+    id: 21,
+    name: 'equipment_requests and equipment_request_events: employee equipment requests',
+    up: (db) => {
+      db.exec(`CREATE TABLE equipment_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        employee_id INTEGER NOT NULL REFERENCES employees(id) ON DELETE RESTRICT,
+        created_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+        category TEXT NOT NULL,
+        category_other INTEGER NOT NULL DEFAULT 0 CHECK (category_other IN (0,1)),
+        catalog_node_id INTEGER REFERENCES catalog_nodes(id) ON DELETE RESTRICT,
+        catalog_path TEXT,
+        brand TEXT,
+        model TEXT,
+        details TEXT,
+        permanent_requested INTEGER NOT NULL DEFAULT 0 CHECK (permanent_requested IN (0,1)),
+        permanent_decision TEXT CHECK (permanent_decision IN ('approved','denied')),
+        permanent_note TEXT,
+        status TEXT NOT NULL DEFAULT 'submitted' CHECK (status IN ('submitted','in_review','approved','ready','fulfilled','declined','cancelled')),
+        decision_note TEXT,
+        decided_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+        decided_at TEXT,
+        asset_id INTEGER REFERENCES assets(id) ON DELETE RESTRICT,
+        asset_label TEXT,
+        assignment_id INTEGER REFERENCES assignments(id) ON DELETE RESTRICT,
+        ready_at TEXT,
+        hold_expires_at TEXT,
+        claimed_reservation_id INTEGER REFERENCES reservations(id) ON DELETE RESTRICT,
+        closed_at TEXT,
+        closed_by INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        CHECK (permanent_decision IS NULL OR permanent_requested = 1),
+        CHECK (status <> 'ready' OR (asset_id IS NOT NULL AND hold_expires_at IS NOT NULL)),
+        CHECK (hold_expires_at IS NULL OR status = 'ready'),
+        CHECK (claimed_reservation_id IS NULL OR status = 'ready'),
+        CHECK (status IN ('submitted','in_review','approved','ready') OR closed_at IS NOT NULL)
+      );
+      CREATE INDEX idx_eqreq_employee ON equipment_requests (employee_id, status);
+      CREATE INDEX idx_eqreq_status ON equipment_requests (status, created_at);
+      CREATE UNIQUE INDEX idx_eqreq_ready_asset ON equipment_requests (asset_id) WHERE status = 'ready';
+      CREATE TABLE equipment_request_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id INTEGER NOT NULL REFERENCES equipment_requests(id) ON DELETE RESTRICT,
+        actor_id INTEGER REFERENCES accounts(id) ON DELETE RESTRICT,
+        action TEXT NOT NULL,
+        from_status TEXT,
+        to_status TEXT,
+        note TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX idx_eqreq_events_request ON equipment_request_events (request_id, id);`);
+    },
+  },
 ];
 module.exports.BASELINE_SQL = BASELINE_SQL;

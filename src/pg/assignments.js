@@ -103,6 +103,10 @@ async function createAssignment(q, { assetId, employeeId, actorAccountId, actorI
       .find((r) => T.overlaps(out, T.keysOf(r)));
     if (pendingHold) throw httpError(409, `This item is being held for another employee ${T.when(pendingHold)} (waiting for IT approval), so it can't be checked out through then.`);
 
+    // A READY equipment request keeps the unit for its requester for 48 hours (src/equipmentRequests.js): nobody else may take it meanwhile, IT included.
+    const prio = (await c.query(`SELECT * FROM equipment_requests WHERE asset_id = $1 AND status = 'ready' AND hold_expires_at > ${NOW}`, [asset.id])).rows[0];
+    if (prio && prio.employee_id !== employee.id) throw httpError(409, `This item is on a priority hold for another employee until ${T.fmtStamp(prio.hold_expires_at)}, so it can't be checked out right now.${actorIsAdmin ? ' Release the hold on their equipment request first.' : ' Reserve it for later, or join the waitlist.'}`);
+
     const open = (await c.query(`SELECT s.employee_id, e.name FROM assignments s JOIN employees e ON e.id = s.employee_id
       WHERE s.asset_id = $1 AND s.returned_at IS NULL ORDER BY s.checked_out_at, s.id`, [asset.id])).rows;
     if (open.some((o) => o.employee_id === employee.id)) throw httpError(400, `${employee.name} already has this asset.`);
@@ -121,6 +125,8 @@ async function createAssignment(q, { assetId, employeeId, actorAccountId, actorI
           [asset.id, actor, employee.id, 'waitlist_checked_out', `${T.when(h)} · checked out in person, so the availability offer is accepted`]);
       }
     }
+    // Taking the unit in person is the requester's claim on their ready equipment request: it is fulfilled by this checkout.
+    await require('./equipmentRequests').claimByCheckout(c, { assetId: asset.id, employeeId: employee.id, actorAccountId: actor, assignmentId: assignment.id });
     if (cond) await c.query('UPDATE assets SET condition = $1 WHERE id = $2', [cond, asset.id]);
     await refreshStatus(c, asset.id);
     await c.query('INSERT INTO activity (asset_id, actor_id, subject_user_id, action, details) VALUES ($1, $2, $3, $4, $5)',

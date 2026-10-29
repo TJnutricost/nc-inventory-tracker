@@ -505,8 +505,8 @@ test('front end: pill, detail and state filter share one vocabulary, and a raw d
   // nothing in the pill path can print the status column
   assert.doesNotMatch(block, /r\.status\s*\)|\|\| r\.status/);
   // the filter and its counts both go through stateKey; the detail's pill is the same reqPill
-  assert.match(src, /all\.filter\(\(r\) => stateKey\(r\) === k\)/);
-  assert.match(src, /all\.filter\(\(r\) => stateKey\(r\) === state\.f\)/);
+  assert.match(src, /all\.filter\(\(r\) => sk\(r\) === k\)/);
+  assert.match(src, /all.filter\(\(r\) => sk\(r\) === state\.f\)/);
   assert.doesNotMatch(src, /pill\(r\.status/);
   assert.equal((src.match(/\$\{reqPill\(r\)\}/g) || []).length >= 4, true, 'cards, detail and Home lists all use reqPill');
   // the server still reports the underlying lifecycle: no new status or lifecycle value for issues

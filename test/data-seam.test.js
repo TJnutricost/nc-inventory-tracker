@@ -129,7 +129,9 @@ ${REPORT}`).out;
     // Slice 5B-4
     'settings', 'locations', 'outbox', 'overdue', 'requestRecords',
     // Employee CSV import
-    'employeeImport'].sort());
+    'employeeImport',
+    // Employee equipment requests
+    'equipmentRequests'].sort());
 });
 
 // ---------------------------------------------------------------- binding

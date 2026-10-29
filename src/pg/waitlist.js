@@ -76,7 +76,7 @@ async function freeParts(c, e, today) {
   const emp = (await c.query('SELECT status FROM employees WHERE id = $1', [e.employee_id])).rows[0];
   if (!emp || emp.status !== 'active') return null;
   if (await reservations.hasOwnOverlap(c, e.asset_id, e.employee_id, e)) return null;
-  return reservations.plan(c, asset, e, { today });
+  return reservations.plan(c, asset, e, { today, employeeId: e.employee_id });
 }
 
 // A piece of an entry that has been split keeps the entry's place in line (same queue_seq / queued_at / request_group /
@@ -179,7 +179,7 @@ async function classify(q, { assetId, employeeId, start, end, startTime, endTime
   const mine = (await q.query(`SELECT * FROM waitlist_entries WHERE asset_id = $1 AND employee_id = $2 AND status IN ('waiting','held') AND id <> $3 AND start_date <= $4 AND end_date >= $5`,
     [toId(assetId), toId(employeeId), toId(excludeEntryId) ?? 0, end, start])).rows;
   if (mine.some((w) => T.overlapsRows(w, range))) return no('own_waitlist', 409, "You're already on the waitlist for this item for overlapping dates.", done);
-  const p = await reservations.plan(q, asset, range, { today });
+  const p = await reservations.plan(q, asset, range, { today, employeeId });
   const reservers = p.blockers.filter((o) => o.kind === 'reservation' && o.row.employee_id !== employeeId)
     .map((o) => ({ reservation_id: o.row.id, start_date: o.row.start_date, start_time: o.row.start_time, end_date: o.row.end_date, end_time: o.row.end_time, employee_id: o.row.employee_id }));
   const b = { ...done, free: p.free, busy: p.busy, reservers, requires_approval: !!asset.reservation_requires_approval };
@@ -344,7 +344,7 @@ async function confirmHold(q, id, { employeeId, actorAccountId }) {
       : e.start_date < today ? 'the start date has passed' : T.endKey(e.end_date, e.end_time) <= T.nowKey() ? 'that time has already ended' : null;
     if (!clash && await reservations.hasOwnOverlap(c, e.asset_id, employeeId, e)) clash = 'you already have a reservation for those dates';
     // the hold is priority, so nothing else should be in the way; if something somehow is (a checkout, an approval), the hold goes back to waiting
-    const taken = clash ? null : (await reservations.findBlockers(c, asset, e, { today, ignoreHoldId: e.id }))[0];
+    const taken = clash ? null : (await reservations.findBlockers(c, asset, e, { today, ignoreHoldId: e.id, employeeId }))[0];
     if (clash || taken) {
       if (over()) await close(c, e, 'expired', null);
       else await c.query(`UPDATE waitlist_entries SET status = 'waiting', hold_started_at = NULL, hold_expires_at = NULL, hold_email_at = NULL, updated_at = ${NOW} WHERE id = $1`, [e.id]);
