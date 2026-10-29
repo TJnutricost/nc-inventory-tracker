@@ -51,6 +51,8 @@ const MODULES = {
   outbox: [require('../outbox'), ['latest', 'recent']],
   overdue: [require('../overdue'), ['dueAssignments', 'markNotified']],
   requestRecords: [require('../requestRecords'), ['listRequests', 'createEquipmentRequest', 'approveRequest', 'transitionLogged']],
+  // employee equipment requests and the 48-hour priority hold (docs/briefs/employee-reservations-requests.md)
+  equipmentRequests: [require('../equipmentRequests'), ['create', 'list', 'get', 'counts', 'review', 'approve', 'setPermanent', 'addNote', 'decline', 'expireHolds', 'markReady', 'fulfill', 'claimByCheckout', 'cancel', 'releaseHold']],
 };
 
 function bindModule(db, name, mod, dbFunctions) {

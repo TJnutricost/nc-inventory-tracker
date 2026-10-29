@@ -88,6 +88,10 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
       AND end_date >= ? AND (? IS NULL OR start_date <= ?)`).all(assetId, employeeId, today, due, due).find((r) => T.overlaps(out, T.keysOf(r)));
     if (pendingHold) throw httpError(409, `This item is being held for another employee ${T.when(pendingHold)} (waiting for IT approval), so it can't be checked out through then.`);
 
+    // A READY equipment request keeps the unit for its requester for 48 hours (src/equipmentRequests.js): nobody else may take it meanwhile, IT included.
+    const prio = db.prepare("SELECT * FROM equipment_requests WHERE asset_id = ? AND status = 'ready' AND hold_expires_at > datetime('now')").get(assetId);
+    if (prio && prio.employee_id !== employeeId) throw httpError(409, `This item is on a priority hold for another employee until ${T.fmtStamp(prio.hold_expires_at)}, so it can't be checked out right now.${actorIsAdmin ? ' Release the hold on their equipment request first.' : ' Reserve it for later, or join the waitlist.'}`);
+
     const open = db.prepare(`SELECT s.employee_id, e.name FROM assignments s JOIN employees e ON e.id = s.employee_id
       WHERE s.asset_id = ? AND s.returned_at IS NULL ORDER BY s.checked_out_at`).all(assetId);
     if (open.some((o) => o.employee_id === employeeId)) throw httpError(400, `${employee.name} already has this asset.`);
@@ -105,6 +109,8 @@ function createAssignment(db, { assetId, employeeId, actorAccountId, actorIsAdmi
           .run(assetId, actorAccountId, employeeId, 'waitlist_checked_out', `${T.when(h)} · checked out in person, so the availability offer is accepted`);
       }
     }
+    // Taking the unit in person is the requester's claim on their ready equipment request: it is fulfilled by this checkout.
+    require('./equipmentRequests').claimByCheckout(db, { assetId, employeeId, actorAccountId, assignmentId: info.lastInsertRowid });
     if (cond) db.prepare('UPDATE assets SET condition = ? WHERE id = ?').run(cond, assetId);
     refreshStatus(db, assetId);
     db.prepare('INSERT INTO activity (asset_id, actor_id, subject_user_id, action, details) VALUES (?, ?, ?, ?, ?)')

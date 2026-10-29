@@ -37,6 +37,7 @@ const MAX_EVENTS = 200;
 const MAX_LIST = 300;
 const INT4_MAX = 2147483647;
 const { NOW } = time;
+const PRIORITY_END = '2100-12-31'; // a priority hold (ready equipment request) blocks every day, for everyone but its requester
 const { inIndex } = catalog;
 
 // Which assets this viewer may see in the calendar, for a scope. Returns { scope, assets[] }. `index` = an already loaded
@@ -77,11 +78,11 @@ async function resolveScope(q, { isAdmin, employeeId, nodeId, assetId }, index =
 }
 
 // One asset's full calendar row (asset scope, and an employee's catalog-entry list). Synchronous over the loaded catalog index.
-function assetRow(index, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve }) {
+function assetRow(index, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve, prio = null }) {
   const mine = !!employeeId && held.some((h) => h.employee_id === employeeId);
   const seatsTotal = capacity(a);
   const holds = wl.filter((w) => w.status === 'held' && !w.lapsed);
-  const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds];
+  const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds, ...(prio ? [{ start_date: today, end_date: PRIORITY_END, start_time: null, end_time: null }] : [])];
   const canOpen = isAdmin || mine || (!a.archived_at && a.status === 'available' && !!a.available_to_request);
   const periods = held.flatMap((h) => periodsFor(h, today).map((pd) => {
     const { assignment_type, ...pub } = pd;
@@ -90,6 +91,7 @@ function assetRow(index, a, held, resv, wl, { isAdmin, employeeId, today, win, c
       : { ...pub, mine: h.employee_id === employeeId };
   }));
   return {
+    priority_hold: prio ? { until: prio.hold_expires_at, until_text: T.fmtStamp(prio.hold_expires_at) } : null,
     id: a.id, name: a.name, tag: canOpen ? a.tag : null, category: a.category, can_open: canOpen, mine,
     catalog_path: a.catalog_node_id && (isAdmin || inIndex.isLive(index, a.catalog_node_id)) ? inIndex.pathText(index, a.catalog_node_id) : null,
     status: isAdmin ? a.status : undefined, archived: isAdmin ? !!a.archived_at : undefined,
@@ -181,19 +183,22 @@ async function availability(q, { isAdmin, employeeId = null, nodeId, assetId, mo
   const wl = byAsset(assets, await many(`SELECT w.*, CASE WHEN w.status = 'held' AND w.hold_expires_at <= ${NOW} THEN 1 ELSE 0 END AS lapsed, e.name AS holder_name, e.department AS holder_department
     FROM waitlist_entries w JOIN employees e ON e.id = w.employee_id
     WHERE w.status IN ('waiting','held') AND w.end_date >= $1 AND w.asset_id = ANY($2::int[]) ORDER BY w.queue_seq, w.status, w.id`, [today, ids]));
+  const prio = new Map();
+  for (const r of await many(`SELECT * FROM equipment_requests WHERE status = 'ready' AND hold_expires_at > ${NOW} AND asset_id = ANY($1::int[])`, [ids])) prio.set(r.asset_id, r);
+  const prioFor = (id) => { const p = prio.get(id); return p && p.employee_id !== employeeId ? p : null; };
   const head = { scope, today, month: win.month, first: win.first, last: win.last };
 
   if (scope.type === 'asset') {
-    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(index, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve })) };
+    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(index, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve, prio: prioFor(a.id) })) };
   }
-  const confirmedBy = new Map([...resv].map(([id, list]) => [id, [...list.filter((r) => r.status === 'confirmed'), ...wl.get(id).filter((w) => w.status === 'held' && !w.lapsed)]]));
+  const confirmedBy = new Map([...resv].map(([id, list]) => [id, [...list.filter((r) => r.status === 'confirmed'), ...wl.get(id).filter((w) => w.status === 'held' && !w.lapsed), ...(prioFor(id) ? [{ start_date: today, end_date: PRIORITY_END, start_time: null, end_time: null }] : [])]]));
   const events = isAdmin ? allCheckouts(assets, open, { today, win }) : [];
   const listed = !isAdmin && scope.type === 'node' ? assets.slice(0, MAX_LIST) : null;
   return {
     ...head, view: 'summary', total: assets.length,
     days: summaryDays(assets, open, confirmedBy, { isAdmin, today, win, events }),
     ...(isAdmin ? { events: events.slice(0, MAX_EVENTS), events_truncated: events.length > MAX_EVENTS } : {}),
-    ...(listed ? { assets: listed.map((a) => assetRow(index, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve: false })), assets_truncated: assets.length > MAX_LIST } : {}),
+    ...(listed ? { assets: listed.map((a) => assetRow(index, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve: false, prio: prioFor(a.id) })), assets_truncated: assets.length > MAX_LIST } : {}),
   };
 }
 
@@ -207,6 +212,7 @@ async function todayStates(q, assets) {
   for (const r of (await q.query('SELECT asset_id, assignment_type, due_date, checked_out_at FROM assignments WHERE returned_at IS NULL AND asset_id = ANY($1::int[])', [ids])).rows) open.get(r.asset_id).push(r);
   for (const r of (await q.query("SELECT asset_id, start_date, start_time, end_date, end_time FROM reservations WHERE status = 'confirmed' AND start_date <= $1 AND end_date >= $1 AND asset_id = ANY($2::int[])", [today, ids])).rows) block.get(r.asset_id).push(r);
   for (const r of (await q.query(`SELECT asset_id, start_date, start_time, end_date, end_time FROM waitlist_entries WHERE status = 'held' AND hold_expires_at > ${NOW} AND start_date <= $1 AND end_date >= $1 AND asset_id = ANY($2::int[])`, [today, ids])).rows) block.get(r.asset_id).push(r);
+  for (const r of (await q.query(`SELECT asset_id FROM equipment_requests WHERE status = 'ready' AND hold_expires_at > ${NOW} AND asset_id = ANY($1::int[])`, [ids])).rows) block.get(r.asset_id).push({ start_date: today, end_date: today, start_time: null, end_time: null });
   for (const a of assets) {
     const s = dayState(a, open.get(a.id), today, today, block.get(a.id));
     const state = s === 'available' ? 'available' : s === 'reserved' ? 'reserved' : s === 'partial' ? 'partial' : s === 'occupied' ? 'checked_out' : 'unavailable';

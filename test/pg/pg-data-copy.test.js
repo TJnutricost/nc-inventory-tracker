@@ -42,7 +42,7 @@ describe('Slice 6B: SQLite -> PostgreSQL data copy', pgSuite(), () => {
     assert.deepEqual(result.differences, []);
     assert.equal(result.ok, true);
     assert.equal(Number((await tdb.pool.query('SELECT COUNT(*) AS n FROM sessions')).rows[0].n), 0);
-    assert.deepEqual((await tdb.pool.query('SELECT id FROM schema_migrations')).rows, [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+    assert.deepEqual((await tdb.pool.query('SELECT id FROM schema_migrations')).rows, [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }, { id: 5 }]);
     const { rows } = await tdb.pool.query('SELECT purchase_cost, notes, cover_photo_id FROM assets WHERE id = 2');
     assert.equal(rows[0].purchase_cost, 1234.5678);
     assert.equal(rows[0].notes, 'Notes with "quotes", emoji 🎧 and\nnew lines');

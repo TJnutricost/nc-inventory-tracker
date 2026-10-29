@@ -31,7 +31,7 @@ describe('PostgreSQL hashed reset / invitation tokens', pgSuite(), () => {
   after(async () => { await tdb?.drop(); });
 
   test('migration 4 hashes outstanding tokens with the digest the app uses, redacts outbox links, and is safe to apply again', async () => {
-    assert.deepEqual(await runMigrations(pool, pgMigrations), [4]);
+    assert.deepEqual(await runMigrations(pool, pgMigrations), [4, 5]);
     const rows = (await pool.query('SELECT token, purpose FROM tokens ORDER BY purpose')).rows;
     assert.deepEqual(rows, [
       { token: hashToken('legacyForgotToken0123456789abcdef'), purpose: 'forgot' },

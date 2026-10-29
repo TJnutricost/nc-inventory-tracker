@@ -91,7 +91,7 @@ describe('Slice 6C: PostgreSQL backup and restore', suiteOptions(), () => {
   test('restore into an empty database: identical to the SQLite source, sequences continue, sessions stay empty', async () => {
     const target = await fresh({ migrate: false });
     const { tables } = await restore(dump, target.url);
-    assert.equal(tables.length, 17);
+    assert.equal(tables.length, 19);
     const result = await verify(sqlite, target.pool);
     assert.deepEqual(result.differences, []);
     const emp = await target.pool.query("INSERT INTO employees (name, status) VALUES ('After restore', 'active') RETURNING id");

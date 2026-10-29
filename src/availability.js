@@ -44,6 +44,7 @@ const T = require('./timeRange');
 const { capacity } = require('./assignments');
 
 const httpError = (status, msg) => Object.assign(new Error(msg), { status });
+const PRIORITY_END = '2100-12-31'; // a priority hold (ready equipment request) blocks every day, for everyone but its requester
 const MAX_ASSETS = 1000; // same ceiling as the asset list
 const MAX_EVENTS = 200; // open temporary checkouts returned to an admin's broad calendar
 const MAX_LIST = 300; // asset rows returned to an employee's catalog-entry calendar
@@ -148,12 +149,13 @@ function resolveScope(db, { isAdmin, employeeId, nodeId, assetId }) {
 }
 
 // One asset's full calendar row (asset scope only).
-function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve }) {
+function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canReserve, prio = null }) {
   const mine = !!employeeId && held.some((h) => h.employee_id === employeeId);
   const seatsTotal = capacity(a);
   // What blocks a day: CONFIRMED reservations and ACTIVE waitlist holds (a hold keeps the time for the person offered it until it expires).
   const holds = wl.filter((w) => w.status === 'held' && !w.lapsed);
-  const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds];
+  // A ready equipment request's priority hold (src/equipmentRequests.js) blocks every day for everyone but its requester (`prio` is null for them).
+  const confirmed = [...resv.filter((r) => r.status === 'confirmed'), ...holds, ...(prio ? [{ start_date: today, end_date: PRIORITY_END, start_time: null, end_time: null }] : [])];
   // The tag is shown only where the viewer could already open the asset (an admin always; an employee: available + shared, or theirs).
   const canOpen = isAdmin || mine || (!a.archived_at && a.status === 'available' && !!a.available_to_request);
   const periods = held.flatMap((h) => periodsFor(h, today).map((p) => {
@@ -163,6 +165,7 @@ function assetRow(db, a, held, resv, wl, { isAdmin, employeeId, today, win, canR
       : { ...pub, mine: h.employee_id === employeeId };
   }));
   return {
+    priority_hold: prio ? { until: prio.hold_expires_at, until_text: T.fmtStamp(prio.hold_expires_at) } : null,
     id: a.id, name: a.name, tag: canOpen ? a.tag : null, category: a.category, can_open: canOpen, mine,
     catalog_path: a.catalog_node_id && (isAdmin || catalog.isLive(db, a.catalog_node_id)) ? catalog.pathText(db, a.catalog_node_id) : null,
     status: isAdmin ? a.status : undefined, archived: isAdmin ? !!a.archived_at : undefined,
@@ -279,12 +282,18 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
       WHERE w.status IN ('waiting','held') AND w.end_date >= ? AND w.asset_id IN (${assets.map(() => '?').join(',')}) ORDER BY w.queue_seq`).all(today, ...assets.map((a) => a.id));
     for (const r of rows) wl.get(r.asset_id).push(r);
   }
+  // ready equipment requests: their unit is on a priority hold for 48 hours (everyone but the requester sees it as taken)
+  const prio = new Map();
+  if (assets.length) {
+    for (const r of db.prepare(`SELECT * FROM equipment_requests WHERE status = 'ready' AND hold_expires_at > datetime('now') AND asset_id IN (${assets.map(() => '?').join(',')})`).all(...assets.map((a) => a.id))) prio.set(r.asset_id, r);
+  }
+  const prioFor = (id) => { const p = prio.get(id); return p && p.employee_id !== employeeId ? p : null; };
   const head = { scope, today, month: win.month, first: win.first, last: win.last };
 
   if (scope.type === 'asset') {
-    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve })) };
+    return { ...head, view: 'asset', assets: assets.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve, prio: prioFor(a.id) })) };
   }
-  const confirmedBy = new Map([...resv].map(([id, list]) => [id, [...list.filter((r) => r.status === 'confirmed'), ...wl.get(id).filter((w) => w.status === 'held' && !w.lapsed)]]));
+  const confirmedBy = new Map([...resv].map(([id, list]) => [id, [...list.filter((r) => r.status === 'confirmed'), ...wl.get(id).filter((w) => w.status === 'held' && !w.lapsed), ...(prioFor(id) ? [{ start_date: today, end_date: PRIORITY_END, start_time: null, end_time: null }] : [])]]));
   const events = isAdmin ? allCheckouts(assets, open, { today, win }) : [];
   // an employee looking at a catalog entry: the actual assets too (anonymous rows, same shape as the single-asset view)
   const listed = !isAdmin && scope.type === 'node' ? assets.slice(0, MAX_LIST) : null;
@@ -292,7 +301,7 @@ function availability(db, { isAdmin, employeeId = null, nodeId, assetId, month, 
     ...head, view: 'summary', total: assets.length,
     days: summaryDays(assets, open, confirmedBy, { isAdmin, today, win, events }),
     ...(isAdmin ? { events: events.slice(0, MAX_EVENTS), events_truncated: events.length > MAX_EVENTS } : {}),
-    ...(listed ? { assets: listed.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve: false })), assets_truncated: assets.length > MAX_LIST } : {}),
+    ...(listed ? { assets: listed.map((a) => assetRow(db, a, open.get(a.id), resv.get(a.id), wl.get(a.id), { isAdmin, employeeId, today, win, canReserve: false, prio: prioFor(a.id) })), assets_truncated: assets.length > MAX_LIST } : {}),
   };
 }
 
@@ -310,6 +319,7 @@ function todayStates(db, assets) {
   for (const r of db.prepare(`SELECT asset_id, assignment_type, due_date, checked_out_at FROM assignments WHERE returned_at IS NULL AND asset_id IN (${marks})`).all(...ids)) open.get(r.asset_id).push(r);
   for (const r of db.prepare(`SELECT asset_id, start_date, start_time, end_date, end_time FROM reservations WHERE status = 'confirmed' AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
   for (const r of db.prepare(`SELECT asset_id, start_date, start_time, end_date, end_time FROM waitlist_entries WHERE status = 'held' AND hold_expires_at > datetime('now') AND start_date <= ? AND end_date >= ? AND asset_id IN (${marks})`).all(today, today, ...ids)) block.get(r.asset_id).push(r);
+  for (const r of db.prepare(`SELECT asset_id FROM equipment_requests WHERE status = 'ready' AND hold_expires_at > datetime('now') AND asset_id IN (${marks})`).all(...ids)) block.get(r.asset_id).push({ start_date: today, end_date: today, start_time: null, end_time: null });
   for (const a of assets) {
     const s = dayState(a, open.get(a.id), today, today, block.get(a.id));
     const state = s === 'available' ? 'available' : s === 'reserved' ? 'reserved' : s === 'partial' ? 'partial' : s === 'occupied' ? 'checked_out' : 'unavailable';

@@ -639,7 +639,7 @@ test('front end: Reserve and the reservation tools exist only where they belong'
   assert.doesNotMatch(view, /toast\([^)]*is reserved/, 'tapping a reserved day opens the sheet; there is no warning toast');
 });
 
-test('front end: employee Browse starts on All equipment for real (selected AND listed, no click), and "Send IT a request" is a button using the unchanged request flow', () => {
+test('front end: employee Browse starts on All equipment for real (selected AND listed, no click), and "Request equipment" is a button opening the new equipment request form', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const browse = src.slice(src.indexOf('async function viewBrowse()'), src.indexOf('// ============================================================ asset detail'));
   // the root is "All equipment" by default: initial state, derived on every URL read, always drawn selected, list loaded for it
@@ -657,7 +657,7 @@ test('front end: employee Browse starts on All equipment for real (selected AND 
   // the request CTA: real buttons (footer + empty state), no tiny inline link, same sheet
   assert.doesNotMatch(browse, /<a href="#" id="reqlink">/);
   assert.equal((browse.match(/<button type="button" class="btn" data-reqit>/g) || []).length, 2, 'footer and empty state');
-  assert.equal((browse.match(/onclick = \(\) => requestEquipmentSheet\(\)/g) || []).length, 2, 'both open the existing request sheet');
+  assert.equal((browse.match(/onclick = \(\) => requestNeedSheet\(\)/g) || []).length, 2, 'both open the Request equipment form');
   assert.match(browse, /\$\('#reqfoot'\)\.hidden = !list\.length/, 'the footer button steps aside when the empty state already has one');
 });
 

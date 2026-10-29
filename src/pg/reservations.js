@@ -64,10 +64,13 @@ const todayOf = (q) => time.today(q);
 
 // Everything that makes this asset UNAVAILABLE for part or all of `range`, as [{ kind, row, sk, ek }] in time order (see
 // src/reservations.js findBlockers). `excludeId` = the reservation being (re)checked; `ignoreHoldId` = the hold being confirmed.
-async function findBlockers(q, asset, range, { today, excludeId = 0, ignoreHoldId = 0 } = {}) {
+async function findBlockers(q, asset, range, { today, excludeId = 0, ignoreHoldId = 0, employeeId = null } = {}) {
   const want = T.keysOf(range);
   const near = (rows) => rows.filter((r) => T.overlaps(want, T.keysOf(r)));
   const out = [];
+  // A READY equipment request keeps this unit for its requester for 48 hours: for everyone else it blocks all time (see src/reservations.js).
+  const prio = (await q.query(`SELECT * FROM equipment_requests WHERE asset_id = $1 AND status = 'ready' AND hold_expires_at > ${NOW} AND employee_id IS DISTINCT FROM $2::integer`, [asset.id, toId(employeeId)])).rows[0];
+  if (prio) out.push({ kind: 'priority_hold', row: prio, sk: '0000-01-01T00:00', ek: T.INF_KEY });
   const resv = (await q.query(`SELECT * FROM reservations WHERE asset_id = $1 AND id <> $2 AND start_date <= $3 AND end_date >= $4
     AND (status = 'confirmed' OR (status = 'pending' AND waitlist_entry_id IS NOT NULL)) ORDER BY start_date, start_time NULLS FIRST, id`,
   [asset.id, toId(excludeId) ?? 0, range.end_date, range.start_date])).rows;
@@ -175,7 +178,7 @@ async function approve(q, id, { actorAccountId, note: text }) {
     const emp = (await c.query('SELECT status FROM employees WHERE id = $1', [r.employee_id])).rows[0];
     if (!emp || emp.status !== 'active') throw httpError(409, "Can't approve: that person is inactive.");
     if (r.start_date < today) throw httpError(409, "Can't approve: the start date has already passed. Decline it so they can book again.");
-    const blocked = (await findBlockers(c, asset, r, { excludeId: r.id, today }))[0];
+    const blocked = (await findBlockers(c, asset, r, { excludeId: r.id, today, employeeId: r.employee_id }))[0];
     if (blocked) throw httpError(409, `Can't approve: ${whyBlocked(blocked, today)} Decline it or ask the employee to choose other dates.`);
     const info = await c.query(`UPDATE reservations SET status = 'confirmed', decided_by = $1, decided_at = ${NOW}, decision_note = $2, updated_at = ${NOW} WHERE id = $3 AND status = 'pending'`,
       [actorAccountId ?? null, text || null, r.id]);

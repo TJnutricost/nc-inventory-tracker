@@ -34,6 +34,8 @@ const COPY_TABLES = [
   { table: 'settings', key: 'key' },
   { table: 'asset_tag_counter', key: 'id' },
   { table: 'issued_tag_ranges', key: 'id' },
+  { table: 'equipment_requests', key: 'id' },
+  { table: 'equipment_request_events', key: 'id' },
 ];
 const NOT_COPIED = ['sessions'];
 const BASELINE_CATALOG_ROOTS = 13;

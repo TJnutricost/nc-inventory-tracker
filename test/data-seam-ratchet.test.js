@@ -93,6 +93,21 @@ const MIGRATED = [
   'POST /api/requests/:id/approve',
   'POST /api/requests/:id/resolve',
   'POST /api/requests/:id/dropped-off',
+  // Employee equipment requests and the 48-hour priority hold (src/equipmentRequests.js)
+  'GET /api/equipment-requests',
+  'GET /api/equipment-request-counts',
+  'POST /api/equipment-requests',
+  'GET /api/equipment-requests/:id',
+  'POST /api/equipment-requests/:id/review',
+  'POST /api/equipment-requests/:id/approve',
+  'POST /api/equipment-requests/:id/permanent',
+  'POST /api/equipment-requests/:id/note',
+  'POST /api/equipment-requests/:id/decline',
+  'POST /api/equipment-requests/:id/ready',
+  'POST /api/equipment-requests/:id/fulfill',
+  'POST /api/equipment-requests/:id/cancel',
+  'POST /api/equipment-requests/:id/decline-ready',
+  'POST /api/equipment-requests/:id/release',
   'GET /api/settings',
   'PUT /api/settings',
   'GET /api/locations',
@@ -137,7 +152,7 @@ const FORBIDDEN = [
   [/\b(SELECT|INSERT|UPDATE|DELETE|REPLACE)\s+(\*|INTO|FROM|[a-z_])/, 'SQL text'],
   [/\bRESERVATION_SQL\b|\bPERSON_SQL\b|\bASSET_LIST_SQL\b/, 'a SQL fragment'],
   // the data modules, as server.js imports them (the seam is the only way in). `(?<![.\w$])`: `data.catalog.x` is the seam, `catalog.x` is not
-  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess|accounts|sessions|settings|outbox|overdue|requestRecords)\s*\./, 'a data module called directly'],
+  [/(?<![.\w$])(availabilityLib|reservationRules|waitlistRules|requestRules|catalog|assignments|assetAccess|reservationViews|catalogAdmin|activityLog|people|assetViews|assetRecords|assetCustody|photoRecords|dashboard|catalogViews|requestAccess|accounts|sessions|settings|outbox|overdue|requestRecords|equipmentRequests)\s*\./, 'a data module called directly'],
   // server.js-local helpers that run SQL (again: `data.assetAccess.reservableAsset(` is the seam, a bare `reservableAsset(` is not)
   [/(?<![.\w$])(getAsset|canViewAsset|visibleAsset|heldAsset|reservableAsset|reservationOut|reservationById|getPerson|loadRequest|cancelBlock|isSelfInitiated|log|refreshStatus|openAssignments|sanitizeAsset|withCatalog|peekTag|allocateTag|tagExists|makeToken|currentUser|catalogOut|syncAssetCategories|doCheckout|assertSerialFree|resolveAssetNode|heldByMe|getSettings|setSetting|overdueSweep|waitlistSweep|listRequests|createEquipmentRequest|approveRequest|importAssets|exportRows|employeeStatus|dueAssignments|markNotified)\s*\(/, 'a server.js helper that runs SQL'],
 ];

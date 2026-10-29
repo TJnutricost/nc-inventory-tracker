@@ -167,6 +167,21 @@ function createTemplates(appUrl) {
         ${req.resolution_note ? `<p style="background:#f3f4f6;border-radius:8px;padding:10px 12px">${esc(req.resolution_note)}</p>` : ''}`,
           { url: `${APP_URL}/#/home`, label: 'Open IT Assets' }));
     },
+    // Employee equipment requests (src/equipmentRequests.js): IT is told of a new one; the requester is told of each decision with the same template.
+    equipmentNeedSubmitted(admins, user, req) {
+      const what = [req.category, req.brand, req.model].filter(Boolean).join(' › ');
+      return m(admins, `Equipment request from ${user.name}: ${what}`,
+        layout('New equipment request', `<p><strong>${esc(user.name)}</strong>${user.department ? ` (${esc(user.department)})` : ''} is requesting: <strong>${esc(what)}</strong>${req.permanent_requested ? '<br>They asked for a <strong>permanent assignment</strong>.' : ''}</p>
+        ${req.details ? `<p style="background:#f3f4f6;border-radius:8px;padding:10px 12px">${esc(req.details)}</p>` : ''}`,
+          { url: `${APP_URL}/#/requests?cat=equipment`, label: 'Review request' }));
+    },
+    equipmentNeedUpdate(user, req, headline, detail) {
+      const what = [req.category, req.brand, req.model].filter(Boolean).join(' › ');
+      return m(user.email, `Your equipment request: ${headline}`,
+        layout(headline, `<p>Hi ${esc(user.name)}, your request for <strong>${esc(what)}</strong>: ${esc(detail)}</p>
+        ${req.asset_label ? `<p>Unit: <strong>${esc(req.asset_label)}</strong></p>` : ''}`,
+          { url: `${APP_URL}/#/requests?cat=equipment`, label: 'Open My requests' }));
+    },
     overdue(user, asset, assignment) {
       return m(user.email, `Overdue: ${asset.name} (${asset.tag})`,
         layout('Equipment overdue', `<p>Hi ${esc(user.name)}, this item was due back on <strong>${fmtDate(assignment.due_date)}</strong>:</p>${assetLine(asset)}<p>Please return it to IT as soon as possible, or reply to this email if you need more time.</p>`,
@@ -214,7 +229,7 @@ function createTemplates(appUrl) {
     },
   };
 }
-const TO_ADMINS = new Set(['selfCheckoutToAdmins', 'droppedOff', 'equipmentRequested']);
+const TO_ADMINS = new Set(['selfCheckoutToAdmins', 'droppedOff', 'equipmentRequested', 'equipmentNeedSubmitted']);
 
 function createMailer(adapter, { awaitable = false } = {}) {
   const APP_URL = (process.env.APP_URL || 'http://localhost:3000').replace(/\/$/, '');
