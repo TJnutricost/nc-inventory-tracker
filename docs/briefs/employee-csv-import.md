@@ -9,7 +9,7 @@ An admin loads the company roster (2,000+ people) from a CSV so that each person
 ## What the existing system already does (reused, not changed)
 
 - People are `employees`; a login is an optional `accounts` row (D-13).
-- **Google sign-in already links by work email** (`accounts.provisionGoogleAccount`, D-10 revised): an active employee with that work email and no login gets an `employee` login on first sign-in. So the import only has to create the *person*; no account, token or invite is created, and **no authentication code changed**.
+- **Google sign-in never creates a login** (revised 2026-10-29: it matches an existing active login's email only; see `docs/briefs/google-sign-in.md`). The import creates people (and logins/invites exactly as before); a person imported without a login cannot sign in with Google until IT gives them one. (Written 2026-10-26, when Google sign-in still linked by work email.)
 - Permissions: `employees.can_self_checkout` (per employee, D-16), admin = role on an account. Permanent assignments stay admin-only.
 
 ## CSV

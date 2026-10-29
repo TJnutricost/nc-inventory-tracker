@@ -101,3 +101,21 @@ The owner chose self-registration for the company domain after the first staging
 - My profile: everyone edits their own name, department, job title, phone and building (`PUT /api/me` no longer admin-only; D-21
   revised; a building not sent is kept, a blank one clears it, as in People); email, role and status stay IT's. A login without a password (Google, an unused invite) sees "Set a password" with no current-password
   field (the route already skipped the check when there is no hash).
+
+### Revision 2026-10-29 (owner): Google verifies identity, the People/login directory authorizes; no domain setting; no creation
+Supersedes the domain check, the first-sign-in creation (revision 2026-10-27) and the `GOOGLE_HOSTED_DOMAIN` setting above.
+- **Authorization:** the verified Google email, trimmed and lower-cased, must equal the `login_email` of an existing **active account** whose
+  employee is **active** (`accounts.loginAccount`, the same rule as the password login). A People record without a login, an unknown address,
+  a disabled login and an inactive employee are refused (`/#/login?error=no_access`, nothing written). `googleAccount` (work-email match) and
+  `provisionGoogleAccount` are removed from both drivers and the seam; Google never creates an employee or a login. No self-registration
+  and no pending-approval queue (a future HR onboarding integration is the intended way people appear: future work, not built).
+- **Domain:** no `hd` hint in the authorization request (people type their whole Google address), no `hd` or email-domain check, no
+  `GOOGLE_HOSTED_DOMAIN` / `GOOGLE_ALLOWED_DOMAINS`. Any domain works when IT gave that address a login. Scope is back to `openid email`; the
+  `domain` refusal code is gone. Unchanged: state, nonce, PKCE, issuer/audience/expiry checks, `email_verified`, the limiter, the session.
+- **`GOOGLE_ADMIN_EMAILS`:** only promotes an address that already passes the check above (`makeAdmin`, never demotes); it cannot create or admit.
+- **Limitation:** the OAuth consent screen is **Internal**, so Google itself only admits accounts of the project's Workspace organization
+  (its secondary domains and aliases included). People from an independently managed Workspace organization cannot get past Google even
+  with a login here; that needs a deliberate OAuth configuration change (External audience, with this directory as the gate, or moving those
+  domains into the same organization). Not changed automatically.
+- Tests: `test/google-sign-in.test.js` (unknown/no-login/inactive/disabled refused with nothing created; another-domain login succeeds; no
+  `hd` in the URL; unverified refused; admin list cannot create or escalate; password login), both drivers.

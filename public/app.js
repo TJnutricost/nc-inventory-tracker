@@ -98,6 +98,8 @@ const P = {
   out: '<path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4"/><path d="M9 7l5 5-5 5M14 12H3"/>',
   in: '<path d="M10 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h4"/><path d="M15 17l-5-5 5-5M10 12h11"/>',
   alert: '<path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17.5v.01"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  'eye-off': '<path d="M9.9 5.2A10 10 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-3 3.9M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 4.2-1M9.9 9.9a3 3 0 0 0 4.2 4.2M3 3l18 18"/>',
   mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>',
   key: '<circle cx="8" cy="15" r="4"/><path d="m11 12 9-9M17 6l3 3M15 8l2 2"/>',
   laptop: '<rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/>',
@@ -754,14 +756,13 @@ function authPanel(inner) {
 }
 // Google sign-in (src/server.js /auth/google) comes back to #/login?error=<code> when it is refused.
 const GOOGLE_ERRORS = {
-  no_access: 'Your access to this app is turned off. Ask IT if you need it.',
-  domain: 'Use your Nutricost Google account.',
+  no_access: 'This Google account does not have access to this app. Ask IT to add you.',
   unverified: 'That Google account\'s email is not verified.',
   cancelled: 'Google sign-in was cancelled.',
   too_many: 'Too many attempts. Try again in 15 minutes.',
 };
 async function viewLogin() {
-  try { const s = await api('GET', '/api/setup-needed'); if (s.needed && s.rule !== 'closed') return go('#/setup'); } catch { /* */ } // closed: the login page (Google can make the first admin)
+  try { const s = await api('GET', '/api/setup-needed'); if (s.needed && s.rule !== 'closed') return go('#/setup'); } catch { /* */ } // closed: the login page (first-run setup is closed in production without SETUP_TOKEN)
   let google = false;
   try { google = (await api('GET', '/api/auth-options')).google; } catch { /* the password form still works */ }
   const code = new URLSearchParams((location.hash.split('?')[1] || '')).get('error');
@@ -770,13 +771,21 @@ async function viewLogin() {
     ${google ? `<a href="/auth/google" class="btn lg block google-btn">${GOOGLE_MARK} Sign in with Google</a><div class="auth-or"><span>or</span></div>` : ''}
     <form class="form-grid" id="f">
     <label class="field"><span>Work email</span><input name="email" type="email" autocomplete="username" required placeholder="you@nutricost.com"></label>
-    <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+    <label class="field"><span id="pw-label">Password</span><div class="pw-wrap"><input name="password" type="password" autocomplete="current-password" required aria-labelledby="pw-label">
+      <button type="button" class="pw-toggle" id="pw-toggle" aria-label="Show password" aria-pressed="false">${icon('eye')}</button></div></label>
     <button class="btn primary lg block">Sign in</button>
     <a href="#/forgot" class="small" style="text-align:center">Forgot your password?</a></form>`);
+  $('#pw-toggle').onclick = (e) => { // show/hide the typed password; the value stays as typed
+    const input = $('input[name=password]'); const show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    e.currentTarget.innerHTML = icon(show ? 'eye-off' : 'eye');
+    e.currentTarget.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+    e.currentTarget.setAttribute('aria-pressed', String(show));
+  };
   $('#f').onsubmit = (e) => {
     e.preventDefault();
     const fd = Object.fromEntries(new FormData(e.target));
-    busy($('button', e.target), async () => { await api('POST', '/api/login', fd); S.me = null; go('#/home'); });
+    busy($('button.primary', e.target), async () => { await api('POST', '/api/login', fd); S.me = null; go('#/home'); });
   };
 }
 function viewForgot() {

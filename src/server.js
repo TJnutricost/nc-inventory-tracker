@@ -203,7 +203,7 @@ const NO_ACCOUNT_HASH = bcrypt.hashSync(crypto.randomBytes(16).toString('hex'), 
 
 // The first-run setup makes whoever completes it the first admin, so on a fresh server it must not be open to anyone who finds the
 // URL first. With SETUP_TOKEN set, the form needs that code; in production (NODE_ENV=production) without it, setup is closed (the
-// first admin then comes from Google sign-in with GOOGLE_ADMIN_EMAILS, or IT sets SETUP_TOKEN). Local development is unchanged.
+// first admin comes from IT setting SETUP_TOKEN). Local development is unchanged.
 const setupRule = () => (process.env.SETUP_TOKEN ? 'code' : process.env.NODE_ENV === 'production' ? 'closed' : 'open');
 const sameSecret = (a, b) => { const x = crypto.createHash('sha256').update(String(a)).digest(); return crypto.timingSafeEqual(x, crypto.createHash('sha256').update(String(b)).digest()); };
 app.get('/api/setup-needed', async (req, res) => {
@@ -317,9 +317,10 @@ app.post('/api/reset', wrap(async (req, res) => {
 
 // ---------- Google sign-in (D-10; docs/briefs/google-sign-in.md) ----------
 // Beside the password login, off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set. src/googleAuth.js talks to Google and checks
-// its answer (a verified address of the company domain). The account: an active employee's work email with an active login
-// (src/accounts.js googleAccount); on a first sign-in one is made, role 'employee' (provisionGoogleAccount; owner decision 2026-10-27),
-// unless IT turned that person or login off. An address in GOOGLE_ADMIN_EMAILS is made an admin. A success signs in exactly as
+// its answer (a verified email). Authorization is the People/login directory: the email must be, exactly (trimmed, lower-cased), the
+// login of an ACTIVE account of an active employee (src/accounts.js loginAccount, as for a password login). Google NEVER creates an
+// employee or a login (owner decision 2026-10-29); anyone else is refused. An address in GOOGLE_ADMIN_EMAILS that already is such a
+// login is made an admin (it never admits anyone). A success signs in exactly as
 // POST /api/login does. Plain browser navigations outside /api (Google redirects back with a GET),
 // so the CSRF header check does not apply; `state` (single use, kept in the session) and PKCE protect the round trip instead.
 const google = googleAuth.config();
@@ -348,9 +349,9 @@ app.get('/auth/google/callback', wrap(async (req, res) => {
     if (e.signInCode === 'google' || e.signInCode === 'token') console.error('[google sign-in]', e.signInCode, e.message);
     return refuse(e.signInCode);
   }
-  const found = await data.accounts.googleAccount(who.email);
-  const accountId = found ? found.id : await data.accounts.provisionGoogleAccount(who);
-  if (!accountId) return refuse('no_access');
+  const found = await data.accounts.loginAccount(who.email);
+  if (!found) return refuse('no_access');
+  const accountId = found.id;
   if (google.admins.has(who.email) && await data.accounts.makeAdmin(accountId)) console.log('[google sign-in] made an admin by GOOGLE_ADMIN_EMAILS:', who.email);
   loginAttempts.delete(key);
   await data.accounts.recordLogin(accountId);

@@ -1,14 +1,15 @@
 // Google sign-in (D-10, docs/briefs/google-sign-in.md): the OAuth 2.0 / OpenID Connect authorization-code flow with PKCE, beside the
 // email + password login. This module only talks to Google and checks what Google answers; who may sign in is src/accounts.js
-// (googleAccount, then provisionGoogleAccount on a first sign-in), and the session is set by the route, as POST /api/login sets it.
+// (accounts.loginAccount: an existing, active login of an active employee; Google never creates one), and the session is set by the route.
 //
 // The ID token comes straight from Google's token endpoint over TLS, in exchange for our client secret, so its signature is not checked:
 // OpenID Connect Core 1.0 §3.1.3.7 accepts TLS server validation in place of the signature for a token received this way. Every claim
-// that matters is checked: issuer, audience, expiry, nonce, a verified email and the Workspace domain (`hd`). No new npm dependency.
+// that matters is checked: issuer, audience, expiry, nonce and a verified email. No new npm dependency.
 //
 // Off unless GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are both set (the routes answer 404, the login screen shows no button).
-// GOOGLE_HOSTED_DOMAIN (default nutricost.com) is the only Workspace domain let in; the Internal consent screen already limits sign-in to
-// the organization, this is the app's own backstop. GOOGLE_ADMIN_EMAILS (optional) names addresses that are made admins at sign-in.
+// Google only proves WHO signed in (a verified email); the People/login directory decides whether that person may. There is no domain
+// setting: any verified Google address that is already an active login gets in, and no other does. The consent screen's Internal setting
+// still limits which Google accounts can reach this app at all. GOOGLE_ADMIN_EMAILS (optional) promotes an EXISTING active login to admin.
 const crypto = require('crypto');
 
 // Google's endpoints. Tests point `token` at a local fake (test/google-sign-in.test.js); nothing else changes them.
@@ -29,11 +30,11 @@ function config(env = process.env) {
   const clientId = (env.GOOGLE_CLIENT_ID || '').trim();
   const clientSecret = (env.GOOGLE_CLIENT_SECRET || '').trim();
   if (!clientId || !clientSecret) return null;
-  const domain = (env.GOOGLE_HOSTED_DOMAIN || 'nutricost.com').trim().toLowerCase();
   // GOOGLE_ADMIN_EMAILS: comma-separated addresses that become admins when they sign in with Google (how the first admin of a new
-  // environment gets in; IT gives admin to everyone else in People). Only the company domain counts, as for any sign-in.
+  // environment is promoted; IT gives admin to everyone else in People). Only an existing active login is promoted; this list never creates
+  // an account or lets anyone in.
   const admins = new Set((env.GOOGLE_ADMIN_EMAILS || '').split(',').map((a) => a.trim().toLowerCase()).filter(Boolean));
-  return { clientId, clientSecret, domain, admins };
+  return { clientId, clientSecret, admins };
 }
 
 const random = () => crypto.randomBytes(32).toString('base64url');
@@ -46,12 +47,11 @@ function start(cfg, redirectUri, now = Date.now()) {
     client_id: cfg.clientId,
     redirect_uri: redirectUri,
     response_type: 'code',
-    scope: 'openid email profile', // profile: the name a first sign-in gives the new person
+    scope: 'openid email',
     state: pending.state,
     nonce: pending.nonce,
     code_challenge: crypto.createHash('sha256').update(pending.verifier).digest('base64url'),
     code_challenge_method: 'S256',
-    hd: cfg.domain, // a hint for Google's account chooser only; the `hd` claim is what is checked
     prompt: 'select_account',
   });
   return { url: `${endpoints.auth}?${params}`, pending };
@@ -63,14 +63,7 @@ function decodeIdToken(idToken) {
   try { return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')); } catch { throw new SignInError('token', 'unreadable ID token'); }
 }
 
-// The name a first sign-in gives the new person: Google's `name`, control characters removed, at most 100 characters; else the
-// address's local part.
-function displayName(claims, email) {
-  const name = typeof claims.name === 'string' ? claims.name.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 100) : '';
-  return name || email.split('@')[0];
-}
-
-// The claims of a token from Google's token endpoint, checked; returns { email (trimmed, lower-cased), name }.
+// The claims of a token from Google's token endpoint, checked; returns { email } (trimmed, lower-cased).
 function checkClaims(cfg, claims, nonce, now = Date.now()) {
   const sec = Math.floor(now / 1000);
   const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
@@ -80,13 +73,11 @@ function checkClaims(cfg, claims, nonce, now = Date.now()) {
   if (!sameText(claims.nonce, nonce)) throw new SignInError('token', 'nonce');
   const email = typeof claims.email === 'string' ? claims.email.trim().toLowerCase() : '';
   if (!email || !(claims.email_verified === true || claims.email_verified === 'true')) throw new SignInError('unverified');
-  const hd = typeof claims.hd === 'string' ? claims.hd.toLowerCase() : '';
-  if (hd !== cfg.domain || !email.endsWith(`@${cfg.domain}`)) throw new SignInError('domain');
-  return { email, name: displayName(claims, email) };
+  return { email };
 }
 
 // GET /auth/google/callback: `pending` is what start() left in the session (already removed from it by the route: single use), `query`
-// is Google's redirect. Exchanges the code and returns { email, name }; throws SignInError for anything refused.
+// is Google's redirect. Exchanges the code and returns { email }; throws SignInError for anything refused.
 async function finish(cfg, { pending, query, redirectUri, now = Date.now() }) {
   if (!pending || !sameText(String(query.state || ''), pending.state) || now - pending.at > PENDING_MS) throw new SignInError('state');
   if (query.error) throw new SignInError('cancelled', String(query.error));
