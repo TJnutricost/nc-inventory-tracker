@@ -253,6 +253,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand-accent); b
 .ustat-slot .dd { max-width: 100%; }
 .ustat-btn { justify-content: space-between; gap: 10px; min-height: 48px; }
 .ustat-btn .dd-sub { font-weight: 650; color: var(--text); }
+.ustat-btn .s-short { display: none; }
 .ustat-slot .dd-menu { min-width: 280px; }
 .cg-wrap { position: relative; }
 .cg.cg-row { display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 3px; margin: -3px -3px 13px; scroll-behavior: smooth; scroll-snap-type: x proximity; overscroll-behavior-x: contain; scrollbar-width: thin; }
@@ -267,6 +268,10 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand-accent); b
 @media (max-width: 899px) {
   .ct-desk, .cg-nav { display: none; }
   .ustat-slot .dd, .ustat-slot .dd > .btn { width: 100%; }
+  .ustat-btn .s-full { display: none; }
+  .ustat-btn .s-short { display: inline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ustat-btn .dd-label { flex: none; }
+  .ustat-btn .dd-sub { display: block; min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cg.cg-row > .cg-card { width: 160px; }
 }
 .unit-scroll { max-height: min(68vh, 640px); overflow-y: auto; overscroll-behavior: contain; }

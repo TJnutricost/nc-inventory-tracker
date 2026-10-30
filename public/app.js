@@ -3692,6 +3692,8 @@ async function viewAdminAssets() {
   const paintStatusMenu = () => {
     const slot = $('#ustat-slot'); if (!slot) return;
     slot.innerHTML = ddMenu({ id: 'ddstat', label: 'Statuses', sub: ustatText(), cls: 'btn lg ustat-btn', checked: st.unitFilter, items: st.unitOptions.map((o) => ({ act: 'ustat', v: o[0], label: optLabel(o) })) });
+    // Desktop shows the full value ("All units (263)"); phones only a filter's name ("· Lost"), nothing for the default.
+    $('#ddstat .dd-sub').innerHTML = `<span class="s-full">${esc(ustatText())}</span><span class="s-short">${st.unitFilter ? `· ${esc(bucketLabel(st.unitFilter))}` : ''}</span>`;
     wireDropdowns(slot, { ustat: (v, { keyboard }) => { setUnitFilter(v); if (keyboard) $('#ddstat .dd-btn')?.focus(); } });
     const b = $('#ddstat .dd-btn'); const toggle = b.onclick;
     b.onclick = (e) => { if (phone()) return openStatusSheet(); toggle(e); }; // phones get the sheet, as the Filter menu does
