@@ -4,7 +4,7 @@
 
 > **Agent guidance:** Read this file first. `docs/PROJECT_HISTORY.md` and `docs/PROJECT_DECISIONS.md` are reference material and should only be opened when historical context or decision rationale is needed.
 
-**Last updated:** 2026-10-30 (reconciled through PR #68, merged into `stage`; the Catalog Model Detail PR is open and pending merge; staging results below are owner-reported unless marked otherwise)
+**Last updated:** 2026-10-30 (reconciled through PR #69, merged into `stage` and deployed to Railway staging; the desktop carousel polish PR is open and pending merge; staging results below are owner-reported unless marked otherwise)
 
 ---
 
@@ -73,7 +73,7 @@ Two separate employee actions. **Reserve equipment** (renamed from "+ Request eq
 * The login form has a show/hide password eye toggle (merged in #68; no backend change).
 * **Future work (not built):** HR onboarding integration to create/disable people and logins automatically; **refresh the IT Requests list and its notification badge when the browser tab regains focus**, so newly submitted employee requests appear without a manual page refresh.
 
-## Catalog Model Detail & Navigation Improvements (built and visually approved 2026-10-30 on `feature/catalog-model-details-nav`; **PR to `stage` open, pending merge**, not deployed)
+## Catalog Model Detail & Navigation Improvements (built and visually approved 2026-10-30 on `feature/catalog-model-details-nav`; **PR #69 merged to `stage` and deployed to Railway staging**)
 
 *Replaces the earlier "Grouped All Assets" plan.* The hierarchical catalog already grouped assets (Desktop → Apple → Mac Mini M2 → units); it was **not** rebuilt. Frontend-only (`public/app.js`, `public/app.css`): no API, schema or status changes, no new tests (browser-verified against a 263-unit QA model; `frontend-loads` and `catalog` tests pass).
 
@@ -87,6 +87,8 @@ Two separate employee actions. **Reserve equipment** (renamed from "+ Request eq
 
 Future work (not part of this slice): refreshing the **IT Requests list and its notification badge when the tab regains focus**, and the **HR onboarding integration**. Also out of scope: onboarding packages, purchasing, production deployment.
 
+
+**Desktop category carousel polish (visually approved 2026-10-30 on `feature/catalog-carousel-polish`; PR to `stage` open, pending merge, not deployed).** Frontend-only (`public/app.js`, `public/app.css`), desktop (900px+) only: the 44px prev/next arrows moved outside the card row (the page margin at 1440px+, a reserved 56px gutter inside the section below that) and hide at the scroll boundaries; a thin custom scrollbar (accessible `role="scrollbar"`, draggable thumb, clickable track, arrow/Home/End keys, synced with the row, hidden when the cards fit) sits below the cards. Phones are unchanged (no arrows, no bar, no gutter). One new source-level test in `test/catalog.test.js`.
 ## Important but nonblocking
 
 - **Real-device QA** (iPhone Safari, Android Chrome, Firefox) of the calendar/reserve/waitlist sheets, Shorten calendar, search/Browse and the 320–375 px top bar; asset photo upload on mobile; cross-browser pass.

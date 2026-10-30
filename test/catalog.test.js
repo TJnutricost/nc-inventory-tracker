@@ -633,3 +633,15 @@ test('front end: asset pages carry their origin (known sources only) and the cat
   assert.ok(src.includes("$('#pagetitle').textContent = n ? n.name : 'All assets'"), 'All assets title = the real current entry');
   assert.ok(!/history\.back\(\)[^;]*assetBackTarget/.test(src), 'the asset Back target is not browser history');
 });
+
+test('front end: desktop category carousel has synced arrows + custom scrollbar, hidden on phones', () => {
+  const root = require('path').join(__dirname, '..', 'public');
+  const src = require('fs').readFileSync(require('path').join(root, 'app.js'), 'utf8');
+  const css = require('fs').readFileSync(require('path').join(root, 'app.css'), 'utf8');
+  assert.match(src, /class="cg-bar" role="scrollbar"[^>]*aria-valuenow="0" tabindex="0" hidden/, 'the bar is an accessible, focusable scrollbar, hidden until the row overflows');
+  for (const s of ['bar.hidden = !over', 'p.hidden = row.scrollLeft <= 2', 'n.hidden = row.scrollLeft >= max - 2', 'row.addEventListener(\'scroll\', upd', 'new ResizeObserver(upd)', 'bar.setPointerCapture', "row.style.scrollBehavior = 'auto'", 'toRatio(', "'Home'", "'End'", 'ArrowLeft']) assert.ok(src.includes(s), `carousel logic keeps: ${s}`);
+  assert.match(css, /\.cg-nav \{[^}]*width: 44px; height: 44px/, 'arrows are 44px targets');
+  assert.match(css, /\.cg-wrap \{ padding: 0 56px; \}/, 'narrow desktops reserve an arrow gutter inside the section (no page overflow)');
+  assert.match(css, /@media \(min-width: 1440px\) \{\s*\.cg-wrap \{ padding: 0; \}\s*\.cg-nav\.prev \{ left: -56px; \} \.cg-nav\.next \{ right: -56px; \}/, 'wide desktops put the arrows in the page margin');
+  assert.match(css, /@media \(max-width: 899px\) \{\s*\.ct-desk, \.cg-nav, \.cg-bar \{ display: none; \}\s*\.cg-wrap \{ padding: 0; \}/, 'phones: no arrows, no bar, no gutter');
+});
