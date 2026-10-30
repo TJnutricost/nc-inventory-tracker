@@ -3708,8 +3708,38 @@ async function viewAdminAssets() {
   // The category cards are ONE horizontally scrolling row (never wrapped); desktop also gets arrow buttons while the row overflows.
   const cardsNav = () => {
     const row = $('.cg-row'); if (!row) return;
-    const upd = () => { const max = row.scrollWidth - row.clientWidth; const p = $('[data-cgnav="-1"]'); const n = $('[data-cgnav="1"]'); if (p) p.hidden = row.scrollLeft <= 2; if (n) n.hidden = row.scrollLeft >= max - 2; };
-    row.addEventListener('scroll', upd, { passive: true }); upd(); setTimeout(upd, 60);
+    const wrap = row.parentElement; const bar = wrap.querySelector('.cg-bar'); const thumb = bar.firstElementChild;
+    const p = $('[data-cgnav="-1"]'); const n = $('[data-cgnav="1"]');
+    const maxScroll = () => Math.max(0, row.scrollWidth - row.clientWidth);
+    const upd = () => {
+      const max = maxScroll(); const over = max > 2; const track = bar.clientWidth;
+      if (p) p.hidden = row.scrollLeft <= 2; if (n) n.hidden = row.scrollLeft >= max - 2;
+      bar.hidden = !over; wrap.classList.toggle('has-bar', over);
+      if (!over) return;
+      const w = Math.max(36, Math.round(track * row.clientWidth / row.scrollWidth)); const ratio = Math.min(1, row.scrollLeft / max);
+      thumb.style.width = w + 'px'; thumb.style.transform = `translateX(${Math.round(ratio * (track - w))}px)`;
+      bar.setAttribute('aria-valuenow', String(Math.round(ratio * 100)));
+    };
+    const toRatio = (r, smooth) => row.scrollTo({ left: Math.min(1, Math.max(0, r)) * maxScroll(), behavior: smooth ? 'smooth' : 'auto' });
+    let drag = null;
+    bar.onpointerdown = (e) => {
+      if (e.button) return; const t = thumb.getBoundingClientRect();
+      if (e.target === thumb) drag = { x: e.clientX, left: row.scrollLeft };
+      else { const r = bar.getBoundingClientRect(); toRatio((e.clientX - r.left - t.width / 2) / (r.width - t.width), true); return; }
+      bar.setPointerCapture(e.pointerId); bar.classList.add('drag'); row.style.scrollBehavior = 'auto'; row.style.scrollSnapType = 'none';
+    };
+    bar.onpointermove = (e) => { if (drag) row.scrollLeft = drag.left + (e.clientX - drag.x) * (row.scrollWidth - row.clientWidth) / Math.max(1, bar.clientWidth - thumb.offsetWidth); };
+    const endDrag = () => { if (!drag) return; drag = null; bar.classList.remove('drag'); row.style.scrollBehavior = ''; row.style.scrollSnapType = ''; };
+    bar.onpointerup = bar.onpointercancel = endDrag;
+    bar.onkeydown = (e) => {
+      const step = { ArrowLeft: -1, ArrowRight: 1 }[e.key];
+      if (step) row.scrollBy({ left: step * 160, behavior: 'smooth' });
+      else if (e.key === 'Home') toRatio(0, true); else if (e.key === 'End') toRatio(1, true); else return;
+      e.preventDefault();
+    };
+    row.addEventListener('scroll', upd, { passive: true });
+    if (window.ResizeObserver) new ResizeObserver(upd).observe(row);
+    upd(); setTimeout(upd, 60);
   };
   const UNIT_CAP = 300; // rows painted at once; a search narrows the rest
   const unitMatches = (a, q) => {
@@ -3778,7 +3808,7 @@ async function viewAdminAssets() {
     $('#archrow').classList.toggle('hidden', filtered);
     $('#crumbslot').innerHTML = n && !filtered ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : '';
     $('#ct').innerHTML = `${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
-      ${cards.length ? `<div class="cg-wrap"><button type="button" class="cg-nav prev" data-cgnav="-1" aria-label="Scroll the categories left" hidden>${icon('back')}</button><div class="cg cg-row" role="group" aria-label="Categories" tabindex="-1">${cards.join('')}</div><button type="button" class="cg-nav next" data-cgnav="1" aria-label="Scroll the categories right" hidden>${icon('chev')}</button></div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+      ${cards.length ? `<div class="cg-wrap"><button type="button" class="cg-nav prev" data-cgnav="-1" aria-label="Scroll the categories left" hidden>${icon('back')}</button><div class="cg cg-row" role="group" aria-label="Categories" tabindex="-1">${cards.join('')}</div><div class="cg-bar" role="scrollbar" aria-label="Scroll the categories" aria-orientation="horizontal" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" tabindex="0" hidden><i></i></div><button type="button" class="cg-nav next" data-cgnav="1" aria-label="Scroll the categories right" hidden>${icon('chev')}</button></div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
     paintStatusMenu(); cardsNav(); paintUnits(); restorePos();
   };
