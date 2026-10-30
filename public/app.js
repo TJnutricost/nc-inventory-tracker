@@ -3723,8 +3723,8 @@ async function viewAdminAssets() {
     return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all, status: st.status, from: fromSettings() ? '#/settings' : null, unit: st.unitFilter, uq: st.unitq.trim() })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
       <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${sub ? ' · ' + sub : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
   };
-  const unitsPanel = () => `${summaryHtml(st.unitShown)}
-    <div class="search unit-search">${icon('search')}<input id="uq" type="search" aria-label="Search units by tag, serial number or assigned person" placeholder="Find a unit: tag, serial or person" value="${esc(st.unitq)}" enterkeyhint="search" autocomplete="off"></div>
+  const unitsPanel = () => `<div class="search unit-search">${icon('search')}<input id="uq" type="search" aria-label="Search units by tag, serial number or assigned person" placeholder="Find a unit: tag, serial or person" value="${esc(st.unitq)}" enterkeyhint="search" autocomplete="off"></div>
+    ${summaryHtml(st.unitShown)}
     <div class="ucountrow"><p class="small muted" id="ucount" role="status"></p><button type="button" class="btn sm" id="uclear" hidden>Clear filter</button></div><div class="card unit-scroll" id="ulist" tabindex="0" role="region" aria-label="Units"></div>`;
   const paintUnits = () => {
     const box = $('#ulist'); if (!box) return;

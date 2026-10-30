@@ -249,7 +249,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand-accent); b
 .ucountrow .btn[hidden] { display: none; }
 #crumbslot .cc-top { margin: 0 0 6px; min-height: 0; }
 #crumbslot .cc-crumbs button { padding: 4px 2px; min-height: 32px; }
-.ustat-slot { margin: 13px 0 12px; display: flex; } /* 3px row padding + 13px = 16px below the category cards */
+.ustat-slot { margin: 10px 0 0; display: flex; } /* sits right under the unit search */
 .ustat-slot .dd { max-width: 100%; }
 .ustat-btn { justify-content: space-between; gap: 10px; min-height: 48px; }
 .ustat-btn .dd-sub { font-weight: 650; color: var(--text); }
@@ -264,7 +264,7 @@ input:focus, select:focus, textarea:focus { border-color: var(--brand-accent); b
 .cg-nav.prev { left: -6px; } .cg-nav.next { right: -6px; }
 .cg-nav:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
 #ct .cg-wrap { margin-bottom: 0; }
-.unit-search { margin-bottom: 0; }
+.unit-search { margin: 13px 0 0; } /* 3px row padding + 13px = 16px below the category cards */
 @media (max-width: 899px) {
   .ct-desk, .cg-nav { display: none; }
   .ustat-slot .dd, .ustat-slot .dd > .btn { width: 100%; }
