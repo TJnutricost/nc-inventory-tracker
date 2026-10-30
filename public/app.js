@@ -3664,21 +3664,18 @@ async function viewAdminAssets() {
   };
   const BUCKETS = [['available', 'Available'], ['assigned', 'Permanently assigned'], ['checked', 'Temporarily checked out'], ['mixed', 'Assigned + checked out'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed'], ['other', 'Other']];
   const bucketLabel = (k) => (BUCKETS.find(([x]) => x === k) || ['', ''])[1];
-  // The tiles are buttons: one selects a bucket (the list below narrows to it), the selected one again, or Total, clears it. The counts always
-  // describe the whole entry and never change with the selection; the search box combines with it.
+  // One "Statuses" control (an anchored dropdown on desktop, the app's bottom sheet on phones) selects ONE bucket at a time; the counts always
+  // describe the whole entry and never change with the selection; the unit search combines with it. Picking the selected bucket again clears it.
   const ustatText = () => { const o = (st.unitOptions || []).find(([k]) => k === st.unitFilter) || ['', 'All units', st.unitShown.length]; return `${o[1]} (${o[2]})`; };
+  const optLabel = ([k, l, c]) => `${l} (${c})${k === 'checked' && st.unitOverdue ? ` · ${st.unitOverdue} overdue` : ''}`;
   const summaryHtml = (list) => {
     const n = {}; let overdue = 0;
     for (const a of list) { const b = bucketOf(a); n[b] = (n[b] || 0) + 1; if ((b === 'checked' || b === 'mixed') && isOverdue(a.due_date)) overdue++; }
-    const tile = (key, label, v, note = '') => `<button type="button" class="usum-i${key === '' ? ' tot' : ''}${key === st.unitFilter ? ' on' : ''}" data-bucket="${key}" aria-pressed="${key === st.unitFilter}"><span class="n">${v}</span><span class="l">${label}</span>${note}</button>`;
-    // Four primary cards always; every other status that has units sits in a collapsed "Other statuses" disclosure (open while one of them is selected).
+    // Always: All units, Available, Permanently assigned, Temporarily checked out; every other status only when it has units. Each unit is in one bucket.
     const primary = ['available', 'assigned', 'checked'];
-    const others = BUCKETS.filter(([k]) => !primary.includes(k) && n[k]);
-    st.unitOptions = [['', 'All units', list.length], ...BUCKETS.filter(([k]) => primary.includes(k) || n[k]).map(([k, l]) => [k, l, n[k] || 0])]; // for the phone's Statuses sheet
-    const otherTotal = others.reduce((t, [k]) => t + n[k], 0);
-    return `<button type="button" class="ustat-m" id="ustat" aria-haspopup="dialog"><span class="ustat-l">Statuses</span><span class="ustat-v" id="ustatv">${esc(ustatText())}</span>${icon('chev', 'ustat-c')}</button>
-      <div class="usum" role="group" aria-label="Filter the units by status">${tile('', 'Total units', list.length)}${BUCKETS.filter(([k]) => primary.includes(k)).map(([k, l]) => tile(k, l, n[k] || 0, k === 'checked' && overdue ? `<span class="small bad-t">${overdue} overdue</span>` : '')).join('')}</div>
-      ${others.length ? `<details class="usum-more"${others.some(([k]) => k === st.unitFilter) ? ' open' : ''}><summary>Other statuses <span class="muted">— ${otherTotal} unit${otherTotal === 1 ? '' : 's'}</span></summary><div class="usum usum-sub" role="group" aria-label="Filter the units by other statuses">${others.map(([k, l]) => tile(k, l, n[k])).join('')}</div></details>` : ''}
+    st.unitOptions = [['', 'All units', list.length], ...BUCKETS.filter(([k]) => primary.includes(k) || n[k]).map(([k, l]) => [k, l, n[k] || 0])];
+    st.unitOverdue = overdue;
+    return `<div id="ustat-slot" class="ustat-slot"></div>
       ${list.length >= 1000 ? '<p class="small muted" style="margin:-4px 0 10px">The list is limited to 1,000 units, so these counts cover the first 1,000.</p>' : ''}`;
   };
   // The unit filter and unit search live in the URL (?unit=<bucket>&uq=<text>), written with replaceState: no history entry per keystroke or tile
@@ -3692,13 +3689,25 @@ async function viewAdminAssets() {
     if (!st.restorePos || !$('#ulist')) return; st.restorePos = false;
     try { const k = posKey(); const v = JSON.parse(sessionStorage.getItem(k) || 'null'); sessionStorage.removeItem(k); if (v) { $('#ulist').scrollTop = v.l; window.scrollTo(0, v.y); } } catch { /* nothing saved */ }
   };
-  const syncTiles = () => { const v = $('#ustatv'); if (v) v.textContent = ustatText(); $$('.usum-i').forEach((t) => { const on = t.dataset.bucket === st.unitFilter; t.classList.toggle('on', on); t.setAttribute('aria-pressed', String(on)); }) };
+  const paintStatusMenu = () => {
+    const slot = $('#ustat-slot'); if (!slot) return;
+    slot.innerHTML = ddMenu({ id: 'ddstat', label: 'Statuses', sub: ustatText(), cls: 'btn lg ustat-btn', checked: st.unitFilter, items: st.unitOptions.map((o) => ({ act: 'ustat', v: o[0], label: optLabel(o) })) });
+    wireDropdowns(slot, { ustat: (v, { keyboard }) => { setUnitFilter(v); if (keyboard) $('#ddstat .dd-btn')?.focus(); } });
+    const b = $('#ddstat .dd-btn'); const toggle = b.onclick;
+    b.onclick = (e) => { if (phone()) return openStatusSheet(); toggle(e); }; // phones get the sheet, as the Filter menu does
+  };
+  const syncTiles = () => paintStatusMenu();
   const setUnitFilter = (b) => { st.unitFilter = b === '' || st.unitFilter === b ? '' : b; syncTiles(); paintUnits(); syncUrl(); };
-  // Phones: one "Statuses" control (the app's bottom-sheet radio list, as the Filter menu) replaces the tiles; same state, same URL.
   const openStatusSheet = () => {
-    const { el, close } = sheet(`<h2>Statuses</h2><div class="fsheet" role="radiogroup" aria-label="Statuses">${st.unitOptions.map(([k, l, c]) => `<button type="button" class="fopt${k === st.unitFilter ? ' on' : ''}" role="radio" aria-checked="${k === st.unitFilter}" data-b="${k}"><span>${esc(l)} <span class="muted">(${c})</span></span>${k === st.unitFilter ? icon('check') : ''}</button>`).join('')}</div>
+    const { el, close } = sheet(`<h2>Statuses</h2><div class="fsheet" role="radiogroup" aria-label="Statuses">${st.unitOptions.map((o) => `<button type="button" class="fopt${o[0] === st.unitFilter ? ' on' : ''}" role="radio" aria-checked="${o[0] === st.unitFilter}" data-b="${o[0]}"><span>${esc(optLabel(o))}</span>${o[0] === st.unitFilter ? icon('check') : ''}</button>`).join('')}</div>
       <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
-    el.onclick = (e) => { const o = e.target.closest('[data-b]'); if (!o) return; close(); setUnitFilter(o.dataset.b === st.unitFilter ? '' : o.dataset.b); };
+    el.onclick = (e) => { const o = e.target.closest('[data-b]'); if (!o) return; close(); setUnitFilter(o.dataset.b); };
+  };
+  // The category cards are ONE horizontally scrolling row (never wrapped); desktop also gets arrow buttons while the row overflows.
+  const cardsNav = () => {
+    const row = $('.cg-row'); if (!row) return;
+    const upd = () => { const max = row.scrollWidth - row.clientWidth; const p = $('[data-cgnav="-1"]'); const n = $('[data-cgnav="1"]'); if (p) p.hidden = row.scrollLeft <= 2; if (n) n.hidden = row.scrollLeft >= max - 2; };
+    row.addEventListener('scroll', upd, { passive: true }); upd(); setTimeout(upd, 60);
   };
   const UNIT_CAP = 300; // rows painted at once; a search narrows the rest
   const unitMatches = (a, q) => {
@@ -3767,9 +3776,9 @@ async function viewAdminAssets() {
     $('#archrow').classList.toggle('hidden', filtered);
     $('#crumbslot').innerHTML = n && !filtered ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : '';
     $('#ct').innerHTML = `${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
-      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+      ${cards.length ? `<div class="cg-wrap"><button type="button" class="cg-nav prev" data-cgnav="-1" aria-label="Scroll the categories left" hidden>${icon('back')}</button><div class="cg cg-row" role="group" aria-label="Categories" tabindex="-1">${cards.join('')}</div><button type="button" class="cg-nav next" data-cgnav="1" aria-label="Scroll the categories right" hidden>${icon('chev')}</button></div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
-    paintUnits(); restorePos();
+    paintStatusMenu(); cardsNav(); paintUnits(); restorePos();
   };
   const loadAssets = async () => {
     const mine = ++st.token; const id = st.sel;
@@ -3862,9 +3871,8 @@ async function viewAdminAssets() {
   $('#ct').oninput = (e) => { if (e.target.id === 'uq') { st.unitq = e.target.value; paintUnits(); syncUrl(); } }; // the unit list repaints alone, so the box keeps focus
   // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
   $('#ct').onclick = (e) => {
-    const tile = e.target.closest('[data-bucket]');
-    if (tile) { setUnitFilter(tile.dataset.bucket); return; }
-    if (e.target.closest('#ustat')) return openStatusSheet();
+    const nav = e.target.closest('[data-cgnav]');
+    if (nav) { const row = $('.cg-row'); row.scrollBy({ left: Number(nav.dataset.cgnav) * Math.max(160, row.clientWidth * 0.8), behavior: 'smooth' }); return; }
     if (e.target.closest('#uclear, [data-uclear]')) { st.unitFilter = ''; st.unitq = ''; const i = $('#uq'); if (i) i.value = ''; syncTiles(); paintUnits(); syncUrl(); return; }
     if (e.target.closest('#ulist a')) savePos(); // leaving for an asset: remember where the list was
     const hit = e.target.closest('[data-found]');
