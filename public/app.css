@@ -241,6 +241,43 @@ input, select, textarea {
 }
 textarea { min-height: 88px; resize: vertical; }
 input:focus, select:focus, textarea:focus { border-color: var(--brand-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-accent) 20%, transparent); }
+.back.back-prom { min-height: 44px; padding: 0 14px 0 8px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--text); font-size: 15px; max-width: 100%; }
+.back.back-prom span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.back.back-prom:hover { border-color: var(--brand-accent); }
+.ucountrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 8px 0; min-height: 32px; }
+.ucountrow p { margin: 0; }
+.ucountrow .btn[hidden] { display: none; }
+#crumbslot .cc-top { margin: 0 0 6px; min-height: 0; }
+#crumbslot .cc-crumbs button { padding: 4px 2px; min-height: 32px; }
+.ustat-slot { margin: 10px 0 0; display: flex; } /* sits right under the unit search */
+.ustat-slot .dd { max-width: 100%; }
+.ustat-btn { justify-content: space-between; gap: 10px; min-height: 48px; }
+.ustat-btn .dd-sub { font-weight: 650; color: var(--text); }
+.ustat-btn .s-short { display: none; }
+.ustat-slot .dd-menu { min-width: 280px; }
+.cg-wrap { position: relative; }
+.cg.cg-row { display: flex; flex-wrap: nowrap; gap: 12px; overflow-x: auto; overflow-y: hidden; padding: 3px; margin: -3px -3px 13px; scroll-behavior: smooth; scroll-snap-type: x proximity; overscroll-behavior-x: contain; scrollbar-width: none; }
+.cg.cg-row::-webkit-scrollbar { display: none; } /* swipe / arrow buttons / Tab scroll it; no visible bar */
+.cg.cg-row > .cg-card { flex: 0 0 auto; width: 190px; scroll-snap-align: start; }
+.cg-nav { position: absolute; top: 50%; transform: translateY(-50%); z-index: 2; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--text); display: grid; place-items: center; cursor: pointer; box-shadow: 0 2px 8px rgba(0,0,0,.25); padding: 0; }
+.cg-nav[hidden] { display: none; }
+.cg-nav svg { width: 18px; height: 18px; }
+.cg-nav.prev { left: -6px; } .cg-nav.next { right: -6px; }
+.cg-nav:focus-visible { outline: 2px solid var(--brand-accent); outline-offset: 2px; }
+#ct .cg-wrap { margin-bottom: 0; }
+.unit-search { margin: 13px 0 0; } /* 3px row padding + 13px = 16px below the category cards */
+@media (max-width: 899px) {
+  .ct-desk, .cg-nav { display: none; }
+  .ustat-slot .dd, .ustat-slot .dd > .btn { width: 100%; }
+  .ustat-btn .s-full { display: none; }
+  .ustat-btn .s-short { display: inline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ustat-btn .dd-label { flex: none; }
+  .ustat-btn .dd-sub { display: block; min-width: 0; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cg.cg-row > .cg-card { width: 160px; }
+}
+.unit-scroll { max-height: min(68vh, 640px); overflow-y: auto; overscroll-behavior: contain; }
+.unit-scroll li { content-visibility: auto; contain-intrinsic-size: auto 68px; }
+@media (max-width: 899px) { .unit-scroll { max-height: none; overflow: visible; } } /* phones: the page scrolls, not a box inside it */
 .pw-wrap { position: relative; }
 .pw-wrap input { padding-right: 52px; }
 .pw-wrap input::-ms-reveal { display: none; }

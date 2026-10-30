@@ -923,7 +923,7 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
   const src = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.js'), 'utf8');
   const css = fs.readFileSync(path.join(__dirname, '..', 'public', 'app.css'), 'utf8');
   // (the catalog is IT's All assets since docs/briefs/labels-and-assets.md)
-  const catalog = src.slice(src.indexOf('async function viewAdminAssets()'), src.indexOf('async function viewAdminAssets()') + 16000);
+  const catalog = src.slice(src.indexOf('async function viewAdminAssets()'), src.indexOf('// ============================================================ profile'));
   // Settings stamps the source into the route; the sidebar does not
   assert.match(src, /<a class="btn" href="#\/assets\?from=\$\{encodeURIComponent\('#\/settings'\)\}">/);
   assert.match(src, /key: 'assets', href: '#\/assets', label: isAdmin\(\) \? 'All assets'/, 'the sidebar link is the plain root');
@@ -931,7 +931,8 @@ test('front end: contextual Back from Settings to the catalog, the Settings sect
   // the catalog keeps it on every URL it builds, and shows Back only when it is there
   assert.match(catalog, /const fromSettings = \(\) => qs\(\)\.get\('from'\) === '#\/settings'/);
   assert.match(catalog, /if \(fromSettings\(\)\) q\.push\(`from=\$\{encodeURIComponent\('#\/settings'\)\}`\)/);
-  assert.match(catalog, /: fromSettings\(\) \? backAnchor\('#\/settings', 'Settings'\) : autoBack\(\)/, 'from Settings: back to Settings; otherwise the previous page (every page has a Back)');
+  assert.match(catalog, /fromSettings\(\) \? backAnchor\('#\/settings', 'Back to Settings'[^)]*\) : autoBack\(\)/, 'from Settings: "Back to Settings"; otherwise the previous page (every page has a Back)');
+  assert.match(catalog, /backAnchor\(hashFor\(up \? up\.id : null\), `Back to \$\{up \? up\.name : 'All assets'\}`/, 'inside the catalog: "Back to <parent>", built with hashFor (which keeps the Settings source)');
   assert.doesNotMatch(catalog, /history\.replaceState\(null, '', '#\/(catalog|assets)'\)/, 'even the stale-node fallback keeps the source');
   // Settings layout: a header row (title + description, then the action); Locations is managed on its own page (Locations under All assets)
   assert.match(src, /<div class="set-head"><div class="field"><span>Categories &amp; equipment types<\/span>/);
@@ -955,12 +956,24 @@ test('front end: an asset opened from a catalog that came from Settings carries 
   assert.match(src, /srcQ\('catalog', \{ node: node \? node\.id : null, all: st\.all, status: st\.status, from: fromSettings\(\) \? '#\/settings' : null \}\)/);
   // context: read only for src=catalog and only the one whitelisted value; carried to the edit form and its Cancel/Save return
   assert.match(src, /fromSettings: src === 'catalog' && p\.get\('from'\) === '#\/settings'/);
-  assert.match(src, /status: c\.status, tab: c\.tab, from: c\.fromSettings \? '#\/settings' : null \}\) : ''; \}?;?/);
+  const ctxQuery = src.slice(src.indexOf('const ctxQuery ='), src.indexOf('async function assetBackTarget()'));
+  assert.match(ctxQuery, /from: c\.fromSettings \? '#\/settings' : null/, 'the edit form carries the Settings source');
   // back: the catalog root AND the exact node both get it appended, via one helper; employee Browse is untouched
   const back = src.slice(src.indexOf('async function assetBackTarget()'), src.indexOf('// ============================================================ router'));
-  assert.match(back, /const catFrom = \(href\) => \{ const x = \[\.\.\.\(c\.status \? \[`status=\$\{c\.status\}`\] : \[\]\), \.\.\.\(c\.fromSettings \? \[`from=\$\{encodeURIComponent\('#\/settings'\)\}`\] : \[\]\)\]; return x\.length \? `\$\{href\}\$\{href\.includes\('\?'\) \? '&' : '\?'\}\$\{x\.join\('&'\)\}` : href; \}/);
+  // (catFrom also carries the unit status filter and unit search: ?unit= / ?uq=; see the unit-state assertions below)
+  assert.match(back, /const catFrom = \(href\) => \{[^\n]*status=\$\{c\.status\}[^\n]*from=\$\{encodeURIComponent\('#\/settings'\)\}[^\n]*return x\.length \? `\$\{href\}\$\{href\.includes\('\?'\) \? '&' : '\?'\}\$\{x\.join\('&'\)\}` : href; \}/);
   assert.match(back, /const root = c\.src === 'catalog' \? \{ href: catFrom\('#\/assets'\), label: 'All assets' \}/);
   assert.match(back, /c\.src === 'catalog' \? catFrom\(`#\/assets\?node=\$\{n\.id\}\$\{c\.all \? '&all=1' : ''\}`\) : `#\/assets\?node=\$\{n\.id\}`/);
   // srcQ drops null extras, so a catalog without `from` produces exactly the old URL
   assert.match(src, /Object\.entries\(extra\)\.filter\(\(\[, v\]\) => v\)/);
+  // unit status filter and unit search (Catalog model detail): the catalog URL holds ?unit=&uq= (replaceState, no history entry per keystroke), the
+  // unit rows carry them to the asset, the asset's context reads them (validated), and its Back link puts them back on the same node
+  const catalog = src.slice(src.indexOf('async function viewAdminAssets()'));
+  assert.match(catalog, /const syncUrl = \(\) => \{ if \(st\.sel\) history\.replaceState\(history\.state, '', unitHash\(\)\); \}/);
+  assert.match(catalog, /const unitHash = \(\) => \{[^\n]*unit=\$\{st\.unitFilter\}[^\n]*uq=\$\{encodeURIComponent\(st\.unitq\.trim\(\)\)\}/);
+  assert.match(catalog, /srcQ\('catalog', \{ node: node\.id, all: st\.all, status: st\.status, from: fromSettings\(\) \? '#\/settings' : null, unit: st\.unitFilter, uq: st\.unitq\.trim\(\) \}\)/, 'unit rows keep the Settings source and add the unit state');
+  assert.match(catalog, /st\.unitFilter = BUCKETS\.some\(\(\[k\]\) => k === p\.get\('unit'\)\) \? p\.get\('unit'\) : ''; st\.unitq = \(p\.get\('uq'\) \|\| ''\)\.slice\(0, 100\)/, 'the URL is the state; an unknown status is ignored');
+  assert.match(src, /unit: src === 'catalog' && \/\^\[a-z\]\{1,20\}\$\/\.test\(p\.get\('unit'\) \|\| ''\) \? p\.get\('unit'\) : null, uq: src === 'catalog' \? \(p\.get\('uq'\) \|\| ''\)\.slice\(0, 100\) \|\| null : null/);
+  assert.match(src, /const ctxQuery = [^\n]*unit: c\.unit, uq: c\.uq/);
+  assert.match(back, /\.\.\.\(c\.unit \? \[`unit=\$\{c\.unit\}`\] : \[\]\), \.\.\.\(c\.uq \? \[`uq=\$\{encodeURIComponent\(c\.uq\)\}`\] : \[\]\)/, 'the exact-node Back link carries them');
 });

@@ -601,9 +601,10 @@ function assetCtx() {
   if (!(SRC_BY_ROLE[isAdmin() ? 'admin' : 'employee'] || []).includes(src)) return null;
   const num = (k) => { const n = Number(p.get(k)); return Number.isInteger(n) && n > 0 ? n : null; };
   // `from=#/settings` rides along only when the catalog itself was opened from Settings: the asset's Back then returns to the catalog WITH it.
-  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', status: src === 'catalog' && STATUS_CHIPS.some(([v]) => v && v === p.get('status')) ? p.get('status') : null, tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings' };
+  return { src, node: num('node'), id: num('id'), all: p.get('all') === '1', status: src === 'catalog' && STATUS_CHIPS.some(([v]) => v && v === p.get('status')) ? p.get('status') : null, tab: ['open', 'closed'].includes(p.get('tab')) ? p.get('tab') : null, fromSettings: src === 'catalog' && p.get('from') === '#/settings',
+    unit: src === 'catalog' && /^[a-z]{1,20}$/.test(p.get('unit') || '') ? p.get('unit') : null, uq: src === 'catalog' ? (p.get('uq') || '').slice(0, 100) || null : null }; // the catalog's unit filter and unit search ride along, so Back restores them
 }
-const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, status: c.status, tab: c.tab, from: c.fromSettings ? '#/settings' : null }) : ''; }; // carried on to the edit form and back
+const ctxQuery = () => { const c = assetCtx(); return c ? srcQ(c.src, { node: c.node, id: c.id, all: c.all, status: c.status, tab: c.tab, from: c.fromSettings ? '#/settings' : null, unit: c.unit, uq: c.uq }) : ''; }; // carried on to the edit form and back
 async function assetBackTarget() {
   const c = assetCtx();
   const fallback = { href: '#/assets', label: isAdmin() ? 'Assets' : 'Browse equipment', exact: false }; // existing behavior when there is no (valid) source
@@ -619,7 +620,7 @@ async function assetBackTarget() {
   }
   // catalog (admin) / browse (employee): back to the exact node, labelled with that node's real name
   // The catalog keeps its Settings source and its status filter (All assets > Filter), so Back lands on the same filtered list.
-  const catFrom = (href) => { const x = [...(c.status ? [`status=${c.status}`] : []), ...(c.fromSettings ? [`from=${encodeURIComponent('#/settings')}`] : [])]; return x.length ? `${href}${href.includes('?') ? '&' : '?'}${x.join('&')}` : href; };
+  const catFrom = (href) => { const x = [...(c.status ? [`status=${c.status}`] : []), ...(c.fromSettings ? [`from=${encodeURIComponent('#/settings')}`] : []), ...(c.unit ? [`unit=${c.unit}`] : []), ...(c.uq ? [`uq=${encodeURIComponent(c.uq)}`] : [])]; return x.length ? `${href}${href.includes('?') ? '&' : '?'}${x.join('&')}` : href; };
   // ('catalog' = IT's All assets page, which is the catalog drill-down since docs/briefs/labels-and-assets.md)
   const root = c.src === 'catalog' ? { href: catFrom('#/assets'), label: 'All assets' } : { href: c.all ? '#/assets?all=1' : '#/assets', label: c.all ? 'All equipment' : 'Browse equipment' };
   if (!c.node) return { ...root, exact: true };
@@ -935,7 +936,7 @@ async function viewAssets() {
 const cgCard = ({ attrs, name, meta, kind = '', chev = true, extra = '' }) => `<button type="button" class="cg-card ${kind}" ${attrs}><span class="cg-name">${esc(name)}${extra}</span><span class="cg-meta">${meta}</span>${chev ? icon('chev', 'cg-chev') : kind.includes('on') ? icon('check', 'cg-chev') : ''}</button>`;
 // Drill-down screens reuse the app's existing back-link (the `.back` style used on asset pages: "‹ Assets"), placed ABOVE the
 // page title so the title never moves. It is a real link to the parent's URL, labelled with where it goes.
-const backAnchor = (href, label) => `<a class="back" href="${href}">${icon('back')}${esc(label)}</a>`;
+const backAnchor = (href, label, cls = '') => `<a class="back${cls ? ' ' + cls : ''}" href="${href}">${icon('back')}<span>${esc(label)}</span></a>`;
 const cgTop = (chain, { allLabel, curAll, trailing = '' }) => `<div class="cc-top cg-top">
   <nav class="cc-crumbs" aria-label="Where you are"><button type="button" data-crumb="-1" class="${chain.length ? '' : 'cur'}">${esc(allLabel)}</button>${chain.map((c, i) => `<span aria-hidden="true">›</span><button type="button" data-crumb="${c.id}" class="${i === chain.length - 1 && !curAll ? 'cur' : ''}">${esc(c.name)}</button>`).join('')}${curAll ? `<span aria-hidden="true">›</span><button type="button" class="cur" aria-current="true">All in ${esc(chain[chain.length - 1].name)}</button>` : ''}</nav>${trailing}</div>`;
 
@@ -3543,7 +3544,7 @@ const ADMIN_STATUSES = [['', 'All'], ['available', 'Available'], ['checked_out',
 // does not offer, so it is recognised here and by the source-trail parser (line ~574) from one list.
 const STATUS_CHIPS = [...ADMIN_STATUSES, ['active', 'Active']];
 async function viewAdminAssets() {
-  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1, listOpen: false };
+  const st = { rows: [], archived: false, sel: null, all: false, assets: null, token: 0, search: qs().get('q') || '', found: null, searchToken: 0, status: '', page: 1, listOpen: false, unitq: '', unitFilter: '', unitShown: [] };
   // The URL is the state: #/assets (all categories), #/assets?node=<id>, #/assets?node=<id>&all=1 ("All in <name>", a browsing view of
   // the real entry <id>), each optionally &status=<chip> (the Home stat cards link to #/assets?status=overdue …). Cards, breadcrumbs and
   // Back navigate to those URLs; hashchange (S.soft) repaints in place. Opened from Settings ("Manage the equipment catalog") the route
@@ -3555,7 +3556,7 @@ async function viewAdminAssets() {
     if (fromSettings()) q.push(`from=${encodeURIComponent('#/settings')}`);
     return '#/assets' + (q.length ? '?' + q.join('&') : '');
   };
-  main().innerHTML = `<div id="backslot"></div><div class="page-head"><h1 id="pagetitle">All assets</h1><span id="headact" class="row" style="gap:8px"></span></div>
+  main().innerHTML = `<div id="backslot"></div><div id="crumbslot"></div><div class="page-head"><h1 id="pagetitle">All assets</h1><span id="headact" class="row" style="gap:8px"></span></div>
     <div class="stack">
       <div class="atools">
         <div class="atools-row">${ddMenu({ id: 'ddlabels', label: 'Labels', ic: 'tag', items: [{ href: '#/labels/new', label: 'Create labels', ic: 'plus' }, { href: '#/labels', label: 'Print labels', ic: 'printer' }] })}<div id="ddfilter-slot"></div></div>
@@ -3625,7 +3626,7 @@ async function viewAdminAssets() {
   // person, brand… within the status chip) and the matching catalog entries, each with its full path; empty = the grid, unchanged.
   const renderFound = () => {
     const f = st.found;
-    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); paintHead({ cat: false });
+    $('#pagetitle').textContent = 'All assets'; $('#backslot').innerHTML = autoBack(); $('#crumbslot').innerHTML = ''; paintHead({ cat: false });
     if (f === null) { $('#ct').innerHTML = '<div class="spinner"></div>'; return; }
     const assets = f.assets.length
       ? `<p class="small muted" style="margin:0 0 8px">${f.assets.length} asset${f.assets.length === 1 ? '' : 's'}${st.status ? ` · ${esc(statusLabel())}` : ''}</p>${listCard(f.assets, null)}`
@@ -3651,6 +3652,91 @@ async function viewAdminAssets() {
     } catch (e) { if (mine !== st.searchToken) return; st.found = { total: 0, results: [], assets: [] }; fail(e); }
     renderFound();
   };
+  // ---- Unit panel (Catalog Model Detail): what a selected entry lists under its cards. The summary and the searchable unit list are built from
+  // the SAME list (st.unitShown), so the counts always describe the units below. Each unit falls in exactly one bucket, so the buckets add up to
+  // the total: a permanent holder = "Permanently assigned", a temporary checkout = "Temporarily checked out" (overdue is a note on it, not a
+  // bucket); reservations are not checkouts and are not counted. A multi-seat unit with both kinds of holder is its own bucket.
+  const bucketOf = (a) => {
+    if (a.status === 'available') return 'available';
+    if (['maintenance', 'lost', 'retired', 'disposed'].includes(a.status)) return a.status;
+    if (a.status === 'checked_out') { const p = a.permanent_holders > 0; const c = a.checkout_holders > 0; return p && c ? 'mixed' : p ? 'assigned' : c ? 'checked' : 'other'; }
+    return 'other';
+  };
+  const BUCKETS = [['available', 'Available'], ['assigned', 'Permanently assigned'], ['checked', 'Temporarily checked out'], ['mixed', 'Assigned + checked out'], ['maintenance', 'In repair'], ['lost', 'Lost'], ['retired', 'Retired'], ['disposed', 'Disposed'], ['other', 'Other']];
+  const bucketLabel = (k) => (BUCKETS.find(([x]) => x === k) || ['', ''])[1];
+  // One "Statuses" control (an anchored dropdown on desktop, the app's bottom sheet on phones) selects ONE bucket at a time; the counts always
+  // describe the whole entry and never change with the selection; the unit search combines with it. Picking the selected bucket again clears it.
+  const ustatText = () => { const o = (st.unitOptions || []).find(([k]) => k === st.unitFilter) || ['', 'All units', st.unitShown.length]; return `${o[1]} (${o[2]})`; };
+  const optLabel = ([k, l, c]) => `${l} (${c})${k === 'checked' && st.unitOverdue ? ` · ${st.unitOverdue} overdue` : ''}`;
+  const summaryHtml = (list) => {
+    const n = {}; let overdue = 0;
+    for (const a of list) { const b = bucketOf(a); n[b] = (n[b] || 0) + 1; if ((b === 'checked' || b === 'mixed') && isOverdue(a.due_date)) overdue++; }
+    // Always: All units, Available, Permanently assigned, Temporarily checked out; every other status only when it has units. Each unit is in one bucket.
+    const primary = ['available', 'assigned', 'checked'];
+    st.unitOptions = [['', 'All units', list.length], ...BUCKETS.filter(([k]) => primary.includes(k) || n[k]).map(([k, l]) => [k, l, n[k] || 0])];
+    st.unitOverdue = overdue;
+    return `<div id="ustat-slot" class="ustat-slot"></div>
+      ${list.length >= 1000 ? '<p class="small muted" style="margin:-4px 0 10px">The list is limited to 1,000 units, so these counts cover the first 1,000.</p>' : ''}`;
+  };
+  // The unit filter and unit search live in the URL (?unit=<bucket>&uq=<text>), written with replaceState: no history entry per keystroke or tile
+  // click, yet browser Back/Forward and the asset's Back link return to the same state. Another entry's URL (hashFor) carries neither.
+  const unitHash = () => { const h = hashFor(st.sel, st.all); const x = []; if (st.unitFilter) x.push(`unit=${st.unitFilter}`); if (st.unitq.trim()) x.push(`uq=${encodeURIComponent(st.unitq.trim())}`); return x.length ? `${h}${h.includes('?') ? '&' : '?'}${x.join('&')}` : h; };
+  const syncUrl = () => { if (st.sel) history.replaceState(history.state, '', unitHash()); };
+  // Scroll (page and unit list) is kept in sessionStorage when a unit is opened and restored once when the same view comes back.
+  const posKey = () => `nc-units:${unitHash()}`;
+  const savePos = () => { try { sessionStorage.setItem(posKey(), JSON.stringify({ l: ($('#ulist') || {}).scrollTop || 0, y: window.scrollY })); } catch { /* storage unavailable */ } };
+  const restorePos = () => {
+    if (!st.restorePos || !$('#ulist')) return; st.restorePos = false;
+    try { const k = posKey(); const v = JSON.parse(sessionStorage.getItem(k) || 'null'); sessionStorage.removeItem(k); if (v) { $('#ulist').scrollTop = v.l; window.scrollTo(0, v.y); } } catch { /* nothing saved */ }
+  };
+  const paintStatusMenu = () => {
+    const slot = $('#ustat-slot'); if (!slot) return;
+    slot.innerHTML = ddMenu({ id: 'ddstat', label: 'Statuses', sub: ustatText(), cls: 'btn lg ustat-btn', checked: st.unitFilter, items: st.unitOptions.map((o) => ({ act: 'ustat', v: o[0], label: optLabel(o) })) });
+    // Desktop shows the full value ("All units (263)"); phones only a filter's name ("· Lost"), nothing for the default.
+    $('#ddstat .dd-sub').innerHTML = `<span class="s-full">${esc(ustatText())}</span><span class="s-short">${st.unitFilter ? `· ${esc(bucketLabel(st.unitFilter))}` : ''}</span>`;
+    wireDropdowns(slot, { ustat: (v, { keyboard }) => { setUnitFilter(v); if (keyboard) $('#ddstat .dd-btn')?.focus(); } });
+    const b = $('#ddstat .dd-btn'); const toggle = b.onclick;
+    b.onclick = (e) => { if (phone()) return openStatusSheet(); toggle(e); }; // phones get the sheet, as the Filter menu does
+  };
+  const syncTiles = () => paintStatusMenu();
+  const setUnitFilter = (b) => { st.unitFilter = b === '' || st.unitFilter === b ? '' : b; syncTiles(); paintUnits(); syncUrl(); };
+  const openStatusSheet = () => {
+    const { el, close } = sheet(`<h2>Statuses</h2><div class="fsheet" role="radiogroup" aria-label="Statuses">${st.unitOptions.map((o) => `<button type="button" class="fopt${o[0] === st.unitFilter ? ' on' : ''}" role="radio" aria-checked="${o[0] === st.unitFilter}" data-b="${o[0]}"><span>${esc(optLabel(o))}</span>${o[0] === st.unitFilter ? icon('check') : ''}</button>`).join('')}</div>
+      <div class="sheet-actions"><button type="button" class="btn" data-close>Close</button></div>`);
+    el.onclick = (e) => { const o = e.target.closest('[data-b]'); if (!o) return; close(); setUnitFilter(o.dataset.b); };
+  };
+  // The category cards are ONE horizontally scrolling row (never wrapped); desktop also gets arrow buttons while the row overflows.
+  const cardsNav = () => {
+    const row = $('.cg-row'); if (!row) return;
+    const upd = () => { const max = row.scrollWidth - row.clientWidth; const p = $('[data-cgnav="-1"]'); const n = $('[data-cgnav="1"]'); if (p) p.hidden = row.scrollLeft <= 2; if (n) n.hidden = row.scrollLeft >= max - 2; };
+    row.addEventListener('scroll', upd, { passive: true }); upd(); setTimeout(upd, 60);
+  };
+  const UNIT_CAP = 300; // rows painted at once; a search narrows the rest
+  const unitMatches = (a, q) => {
+    const hay = [a.tag, a.serial, a.name, a.holder_names].filter(Boolean).join(' ').toLowerCase();
+    return q.toLowerCase().split(/\s+/).filter(Boolean).every((t) => hay.includes(t));
+  };
+  const unitRow = (a, node) => {
+    const who = a.holder_names ? `${a.permanent_holders > 0 && !a.checkout_holders ? 'Assigned to ' : a.checkout_holders > 0 && !a.permanent_holders ? 'Checked out to ' : ''}${a.holder_names}` : '';
+    const rel = !a.catalog_path ? '' : a.catalog_node_id !== node.id ? crumbText(a.catalog_path.split(' > ').slice(node.path.split(' > ').length).join(' > ')) : '';
+    const sub = [a.serial ? `S/N ${a.serial}` : '', who, rel].filter(Boolean).map(esc).join(' · ');
+    return `<li><a class="item" href="#/asset/${a.id}${srcQ('catalog', { node: node.id, all: st.all, status: st.status, from: fromSettings() ? '#/settings' : null, unit: st.unitFilter, uq: st.unitq.trim() })}">${thumbHtml(a.thumb, a.category)}<div class="grow" style="min-width:0"><div class="title">${esc(a.name)}</div>
+      <div class="sub" style="overflow-wrap:anywhere"><span class="mono">${esc(a.tag)}</span>${sub ? ' · ' + sub : ''}</div></div>${statusPill(a)}${icon('chev', 'chev')}</a></li>`;
+  };
+  const unitsPanel = () => `<div class="search unit-search">${icon('search')}<input id="uq" type="search" aria-label="Search units by tag, serial number or assigned person" placeholder="Find a unit: tag, serial or person" value="${esc(st.unitq)}" enterkeyhint="search" autocomplete="off"></div>
+    ${summaryHtml(st.unitShown)}
+    <div class="ucountrow"><p class="small muted" id="ucount" role="status"></p><button type="button" class="btn sm" id="uclear" hidden>Clear filter</button></div><div class="card unit-scroll" id="ulist" tabindex="0" role="region" aria-label="Units"></div>`;
+  const paintUnits = () => {
+    const box = $('#ulist'); if (!box) return;
+    const n = byId(st.sel); const q = st.unitq.trim(); const f = st.unitFilter;
+    const hits = st.unitShown.filter((a) => (!f || bucketOf(a) === f) && (!q || unitMatches(a, q)));
+    const part = hits.slice(0, UNIT_CAP);
+    $('#ucount').textContent = `${hits.length} unit${hits.length === 1 ? '' : 's'}${f ? ` · ${bucketLabel(f)}` : ''}${q ? ` matching “${q}”` : ''}${hits.length > UNIT_CAP ? ` (showing the first ${UNIT_CAP}; narrow it to see the rest)` : ''}`;
+    $('#uclear').hidden = !(f || q);
+    box.innerHTML = part.length ? `<ul class="list">${part.map((a) => unitRow(a, n)).join('')}</ul>`
+      : `<div class="empty">${icon('search')}<p>${f ? `No ${esc(bucketLabel(f).toLowerCase())} units` : 'No units'}${q ? ` match “${esc(q)}”` : ' here'}.</p>${f || q ? '<button type="button" class="btn sm" data-uclear>Clear filter</button>' : ''}</div>`;
+    box.scrollTop = 0;
+  };
   const render = () => {
     if (st.search) return renderFound();
     const n = byId(st.sel); const ch = n ? kids(n.id) : kids(null);
@@ -3672,8 +3758,8 @@ async function viewAdminAssets() {
     } else if (n) {
       const shown = inAll ? list : direct;
       const title = `${inAll ? `All in ${n.name}` : ch.length ? `Filed directly in ${n.name}` : 'Assets'}${st.status ? ` · ${statusLabel()}` : ''}`;
-      below = `<h3 class="ct-h">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
-        ? `${inAll ? `<p class="small muted ct-empty" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it. Pick a card above to narrow it.</p>` : ''}${listCard(shown, n)}`
+      below = `<h3 class="ct-h${list && shown.length ? ' ct-desk' : ''}">${esc(title)} <span class="muted">${list ? shown.length : ''}</span></h3>${list === null ? '<div class="spinner"></div>' : shown.length
+        ? `${inAll ? `<p class="small muted ct-empty ct-desk" style="margin-top:0">Every asset filed in ${esc(n.name)} or anywhere below it. Pick a card above to narrow it.</p>` : ''}${(st.unitShown = shown, unitsPanel())}`
         : `<p class="muted small ct-empty">${st.status ? `No ${esc(statusLabel().toLowerCase())} assets here.` : inAll ? 'No assets are filed in this branch yet.' : ch.length ? `Nothing is filed directly in ${esc(n.name)}.${list.length ? ` Open <strong>All in ${esc(n.name)}</strong> to see the ${list.length} asset${list.length === 1 ? '' : 's'} in this branch.` : ''}` : 'No assets are filed here yet. Open an asset and choose this entry in its Equipment catalog field.'}</p>`}`;
     } else { // the top: the cards, then every asset in a section that starts collapsed (it is long; the cards are the way in)
       const open = st.listOpen && !!list;
@@ -3687,12 +3773,14 @@ async function viewAdminAssets() {
     // Back = the app's usual "‹ <where it goes>" link above the title: out of "All in <name>" to the entry, else to the parent (or the root).
     $('#pagetitle').textContent = n ? n.name : 'All assets'; // the title is the real entry being viewed (stored name, no pluralizing)
     const up = n ? byId(n.parent_id) : null;
-    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), up ? up.name : 'All assets') : fromSettings() ? backAnchor('#/settings', 'Settings') : autoBack();
+    $('#backslot').innerHTML = n ? backAnchor(hashFor(up ? up.id : null), `Back to ${up ? up.name : 'All assets'}`, 'back-prom') : fromSettings() ? backAnchor('#/settings', 'Back to Settings', 'back-prom') : autoBack();
     paintHead({ cat: !n && !filtered, node: n ? n.id : null });
     $('#archrow').classList.toggle('hidden', filtered);
-    $('#ct').innerHTML = `${n && !filtered ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : ''}${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
-      ${cards.length ? `<div class="cg" role="group" aria-label="Categories">${cards.join('')}</div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
+    $('#crumbslot').innerHTML = n && !filtered ? cgTop(chain, { allLabel: 'All categories', curAll: false }) : '';
+    $('#ct').innerHTML = `${n && !n.live ? '<p class="small muted">Not visible to employees.</p>' : ''}${controls}
+      ${cards.length ? `<div class="cg-wrap"><button type="button" class="cg-nav prev" data-cgnav="-1" aria-label="Scroll the categories left" hidden>${icon('back')}</button><div class="cg cg-row" role="group" aria-label="Categories" tabindex="-1">${cards.join('')}</div><button type="button" class="cg-nav next" data-cgnav="1" aria-label="Scroll the categories right" hidden>${icon('chev')}</button></div>` : n || filtered ? '' : `<div class="empty">${icon('tag')}<p>No categories yet. Tap <strong>Add category</strong> to start.</p></div>`}
       ${below}`;
+    paintStatusMenu(); cardsNav(); paintUnits(); restorePos();
   };
   const loadAssets = async () => {
     const mine = ++st.token; const id = st.sel;
@@ -3715,7 +3803,8 @@ async function viewAdminAssets() {
     paintFilter();
     if ((p.get('node') && !st.sel) || (p.get('status') && !st.status)) history.replaceState(null, '', hashFor(st.sel, st.all)); // unknown/stale node or status: tidy the URL
     if (st.search && st.status !== prevStatus) runSearch();
-    if (st.sel !== prev || st.status !== prevStatus) st.page = 1;
+    if (st.sel !== prev || st.status !== prevStatus) { st.page = 1; st.restorePos = true; }
+    st.unitFilter = BUCKETS.some(([k]) => k === p.get('unit')) ? p.get('unit') : ''; st.unitq = (p.get('uq') || '').slice(0, 100); // the URL is the state (see unitHash)
     if (st.sel !== prev || st.status !== prevStatus || st.assets === null) loadAssets(); else render();
   };
   const reload = async () => {
@@ -3781,8 +3870,13 @@ async function viewAdminAssets() {
   const addRoot = () => nameSheet({ title: 'Add a category', text: 'A broad top-level group, like Laptop, Camera or Audio.', label: 'Category name', okLabel: 'Add', onOk: async (name) => { await api('POST', '/api/catalog', { name }); await reload(); toast('Added'); } });
   $('#showarch').onchange = (e) => { st.archived = e.target.checked; render(); };
   $('#cq').oninput = debounce((e) => { st.search = e.target.value.trim(); runSearch(); });
+  $('#ct').oninput = (e) => { if (e.target.id === 'uq') { st.unitq = e.target.value; paintUnits(); syncUrl(); } }; // the unit list repaints alone, so the box keeps focus
   // Cards and breadcrumbs only navigate. Management is reached only through the explicit buttons.
   $('#ct').onclick = (e) => {
+    const nav = e.target.closest('[data-cgnav]');
+    if (nav) { const row = $('.cg-row'); row.scrollBy({ left: Number(nav.dataset.cgnav) * Math.max(160, row.clientWidth * 0.8), behavior: 'smooth' }); return; }
+    if (e.target.closest('#uclear, [data-uclear]')) { st.unitFilter = ''; st.unitq = ''; const i = $('#uq'); if (i) i.value = ''; syncTiles(); paintUnits(); syncUrl(); return; }
+    if (e.target.closest('#ulist a')) savePos(); // leaving for an asset: remember where the list was
     const hit = e.target.closest('[data-found]');
     if (hit) { e.preventDefault(); st.search = ''; st.found = null; $('#cq').value = ''; go(hashFor(Number(hit.dataset.found))); window.scrollTo(0, 0); return; } // a search result opens that entry (the grid comes back)
     const acc = e.target.closest('#allbtn');
@@ -3799,8 +3893,8 @@ async function viewAdminAssets() {
     }
     if (e.target.closest('[data-all]')) return to(hashFor(st.sel)); // (the branch is already listed; the card marks it)
     const sel = e.target.closest('[data-select]'); if (sel) return to(hashFor(Number(sel.dataset.select)));
-    const crumb = e.target.closest('[data-crumb]'); if (crumb) { const id = Number(crumb.dataset.crumb); return to(hashFor(id > 0 ? id : null)); }
   };
+  $('#crumbslot').onclick = (e) => { const crumb = e.target.closest('[data-crumb]'); if (!crumb) return; const id = Number(crumb.dataset.crumb); go(hashFor(id > 0 ? id : null)); window.scrollTo(0, 0); };
   $('#backslot').onclick = () => window.scrollTo(0, 0); // (the link itself navigates one step up)
   $('#fchips').onclick = (e) => { if (e.target.closest('#fclear')) gotoStatus(''); };
   if ($('#scanbtn')) $('#scanbtn').onclick = () => openScanner({ onResult: handleScannedCode });
